@@ -197,11 +197,12 @@ export class AgentSession {
             .join('');
           if (t.trim() !== '') out.finalTexts.push(t);
         } else if (m.type === 'result') {
+          const stale = m.subtype === 'error_during_execution' && m.errors.some((e) => e.includes(STALE_SESSION));
+          // Any result but "that session does not exist" leaves a transcript worth resuming (error_max_turns included).
+          if (!stale) await store.setSessionId(m.session_id);
           if (m.subtype === 'success') {
-            // Only a successful turn proves the session exists and is worth resuming.
-            await store.setSessionId(m.session_id);
             if (m.is_error) out.resultError = m.result;
-          } else if (resume && m.subtype === 'error_during_execution' && m.errors.some((e) => e.includes(STALE_SESSION))) {
+          } else if (stale && resume) {
             out.staleSession = true;
             break;
           } else {

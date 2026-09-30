@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { query, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { FastifyInstance } from 'fastify';
+import { CheckRunner } from '../../src/agent/checks/runner.js';
 import { AgentSession } from '../../src/agent/session.js';
 import { makeDeckTools } from '../../src/agent/tools.js';
 import { ThumbService } from '../../src/render/thumbs.js';
@@ -10,7 +11,7 @@ import { buildApp } from '../../src/server/app.js';
 import { Bus, type BusEvent } from '../../src/server/bus.js';
 import type { ChecksRunner } from '../../src/server/routes/checks.js';
 import { DeckStore } from '../../src/store/deckStore.js';
-import type { Anchor, Brief, Remark, Slide, Snapshot, ThreadMessage } from '../../src/model/types.js';
+import type { Brief, Remark, Slide, Snapshot, ThreadMessage } from '../../src/model/types.js';
 import { tmpDir } from '../helpers/tmp.js';
 import { waitFor } from '../helpers/waitFor.js';
 import { themeCss } from '../render/themeCss.js';
@@ -127,44 +128,66 @@ describe('remarks and checks API', () => {
     expect((await app.inject({ method: 'POST', url: '/api/remarks/r_missing/propose' })).statusCode).toBe(404);
   });
 
-  it('checks: 503 when no runner is wired; status still answers', async () => {
+  it('checks: 503 on run and status when no runner is wired', async () => {
     await build();
     const res = await app.inject({ method: 'POST', url: '/api/checks/run', payload: {} });
     expect(res.statusCode).toBe(503);
     expect(res.json()).toEqual({ error: 'checks unavailable' });
-    expect((await app.inject({ method: 'GET', url: '/api/checks/status' })).json()).toEqual({
-      running: [],
-      lastRun: { arc: null, order: null, gaps: null, render: null },
-    });
+    const st = await app.inject({ method: 'GET', url: '/api/checks/status' });
+    expect(st.statusCode).toBe(503);
+    expect(st.json()).toEqual({ error: 'checks unavailable' });
   });
 
-  it('checks: runs the named checks in the background, reports running then lastRun', async () => {
-    const release: Array<() => void> = [];
-    const ran: Array<[string, Anchor | undefined]> = [];
-    await build({
-      run: (name, scope) => {
-        ran.push([name, scope]);
-        return new Promise((resolve) => release.push(() => resolve({ remarks: [], lanes: [] })));
-      },
-    });
+  /** A real CheckRunner whose SDK queries each wait for `release()`. */
+  const gatedRunner = (debounceMs = 10) => {
+    const queried: string[] = [];
+    const gates: Array<() => void> = [];
+    const impl = ((params: { prompt: string; options: Options }) => {
+      queried.push(String(params.options.systemPrompt));
+      const opened = new Promise<void>((resolve) => gates.push(resolve));
+      return (async function* () {
+        await opened;
+        yield { type: 'result', subtype: 'success', is_error: false, result: '{"remarks":[]}', session_id: 'x', total_cost_usd: 0, errors: [] };
+      })() as AsyncGenerator<SDKMessage, void>;
+    }) as unknown as typeof query;
+    const runner = new CheckRunner({ store, thumbs, bus: new Bus(), model: 'claude-opus-5', queryImpl: impl, debounceMs });
+    return { runner, queried, release: () => gates.splice(0).forEach((g) => g()) };
+  };
+  const status = async () => (await app.inject({ method: 'GET', url: '/api/checks/status' })).json() as { running: string[]; lastRun: Record<string, string | null> };
+
+  it('checks: POST starts the named checks, GET status reads the runner, a queued or running check is not started twice', async () => {
+    const { runner, queried, release } = gatedRunner();
+    await build(runner);
     const res = await app.inject({ method: 'POST', url: '/api/checks/run', payload: { names: ['order', 'gaps'] } });
     expect(res.statusCode).toBe(202);
     expect(res.json()).toEqual({ started: ['order', 'gaps'] });
-    expect(ran.map((r) => r[0])).toEqual(['order', 'gaps']);
-    const status = async () => (await app.inject({ method: 'GET', url: '/api/checks/status' })).json() as { running: string[]; lastRun: Record<string, string | null> };
     expect((await status()).running).toEqual(['order', 'gaps']);
-    // A check already running is not started twice.
     expect((await app.inject({ method: 'POST', url: '/api/checks/run', payload: { names: ['order'] } })).json()).toEqual({ started: [] });
-    expect(ran).toHaveLength(2);
-    for (const r of release) r();
     const done = await waitFor(async () => {
+      release();
       const s = await status();
       return s.running.length === 0 ? s : null;
     });
+    expect(queried).toHaveLength(2);
     expect(done.lastRun.order).toMatch(/^\d{4}-/);
     expect(done.lastRun.gaps).toMatch(/^\d{4}-/);
     expect(done.lastRun.arc).toBeNull();
-    expect(events.filter((e) => e.type === 'checks.status').length).toBeGreaterThanOrEqual(2);
     expect((await app.inject({ method: 'POST', url: '/api/checks/run', payload: { names: ['nope'] } })).statusCode).toBe(400);
+  });
+
+  it('checks: an automatic run after deck.changed shows in GET status and is not doubled by POST', async () => {
+    const { runner, queried, release } = gatedRunner();
+    await build(runner);
+    app.bus.emit({ type: 'deck.changed', version: 2 });
+    await waitFor(() => queried.length === 1);
+    expect((await status()).running).toEqual(['arc', 'order', 'gaps', 'render']);
+    const post = await app.inject({ method: 'POST', url: '/api/checks/run', payload: {} });
+    expect(post.json()).toEqual({ started: [] });
+    await waitFor(async () => {
+      release();
+      return (await status()).running.length === 0;
+    });
+    // Thumbs are not started: render fails before querying. arc, order and gaps each ran once.
+    expect(queried).toHaveLength(3);
   });
 });

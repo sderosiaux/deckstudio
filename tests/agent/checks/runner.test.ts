@@ -6,6 +6,7 @@ import { CHECKS, CheckRunner, parseCheckOutput, RETRY_INSTRUCTION } from '../../
 import type { Brief, Lane, Slide, Snapshot } from '../../../src/model/types.js';
 import { ThumbService } from '../../../src/render/thumbs.js';
 import { Bus, type BusEvent } from '../../../src/server/bus.js';
+import { LaneService } from '../../../src/server/laneService.js';
 import { DeckStore } from '../../../src/store/deckStore.js';
 import { tmpDir } from '../../helpers/tmp.js';
 import { waitFor } from '../../helpers/waitFor.js';
@@ -39,6 +40,33 @@ function fakeQuery(texts: string[]): { impl: typeof query; calls: Call[] } {
     })() as AsyncGenerator<SDKMessage, void>;
   }) as unknown as typeof query;
   return { impl, calls };
+}
+
+/**
+ * A fake `query` whose calls each wait for `release()` (or for their abort signal, then throw like the SDK).
+ * `texts` answers call n with texts[n] (the last one repeats).
+ */
+function gatedQuery(texts: string[]): { impl: typeof query; calls: Call[]; release: () => void } {
+  const calls: Call[] = [];
+  const gates: Array<() => void> = [];
+  let released = 0;
+  const impl = ((params: Call) => {
+    calls.push({ prompt: params.prompt, options: params.options });
+    const text = texts[Math.min(calls.length - 1, texts.length - 1)]!;
+    const signal = params.options.abortController!.signal;
+    const opened = new Promise<void>((resolve, reject) => {
+      gates.push(resolve);
+      signal.addEventListener('abort', () => reject(new Error('aborted by user')), { once: true });
+    });
+    return (async function* () {
+      await opened;
+      yield result(text);
+    })() as AsyncGenerator<SDKMessage, void>;
+  }) as unknown as typeof query;
+  const release = () => {
+    while (released < gates.length) gates[released++]!();
+  };
+  return { impl, calls, release };
 }
 
 const remarkJson = (anchor: object, text: string, lane: object | null = null) =>
@@ -75,6 +103,14 @@ describe('CheckRunner', () => {
     await thumbs.stop();
   });
 
+  const gated = (texts: string[], debounceMs?: number) => {
+    const fake = gatedQuery(texts);
+    const r = new CheckRunner({ store, thumbs, bus, model: 'claude-opus-5', queryImpl: fake.impl, ...(debounceMs !== undefined ? { debounceMs } : {}) });
+    runners.push(r);
+    return { r, ...fake };
+  };
+  const timerArmed = (r: CheckRunner): boolean => (r as unknown as { timer: unknown }).timer !== null;
+
   const runner = (texts: string[], debounceMs?: number) => {
     const fake = fakeQuery(texts);
     const r = new CheckRunner({ store, thumbs, bus, model: 'claude-opus-5', queryImpl: fake.impl, ...(debounceMs !== undefined ? { debounceMs } : {}) });
@@ -107,6 +143,75 @@ describe('CheckRunner', () => {
     expect(remarks).toHaveLength(1);
     expect(remarks[0]).toMatchObject({ anchor: { kind: 'arc' }, severity: 'info', origin: 'check:gaps', laneId: null });
     expect(remarks[0]!.text).toMatch(/^check gaps failed: the JSON does not match the contract/);
+  });
+
+  it('a failed run keeps the check’s earlier remarks and lanes and only replaces its failure remark', async () => {
+    const lane = { label: 'Hook first', anchor: { kind: 'arc' }, changes: [{ kind: 'move', slide: 's3', after: null, reason: 'hook' }] };
+    const good = await runner([remarkJson({ kind: 'arc' }, 'no hook', lane)]).r.run('arc');
+    const laneId = good.lanes[0]!.id;
+    await runner(['nope', 'nope']).r.run('arc');
+    await runner(['still nope', 'still nope']).r.run('arc');
+    const remarks = await store.remarks();
+    expect(remarks.map((x) => x.text)).toEqual(['no hook', 'check arc failed: the answer contains no JSON object']);
+    expect(remarks[0]!.laneId).toBe(laneId);
+    expect((await store.lane(laneId))!.status).toBe('open');
+    expect(events).not.toContainEqual({ type: 'lane.closed', laneId });
+
+    // The next good run replaces both the old remarks and the failure remark.
+    await runner([JSON.stringify({ remarks: [] })]).r.run('arc');
+    expect(await store.remarks()).toEqual([]);
+  });
+
+  it('dispose during the first query: no retry, nothing persisted', async () => {
+    const { r, calls } = gated([remarkJson({ kind: 'arc' }, 'late')]);
+    const run = r.run('arc');
+    await waitFor(() => calls.length === 1);
+    r.dispose();
+    await expect(run).rejects.toThrow('check runner stopped');
+    expect(calls).toHaveLength(1);
+    expect(await store.remarks()).toEqual([]);
+    expect(events).not.toContainEqual({ type: 'remarks.changed' });
+  });
+
+  it('status() reports queued and running checks, dedupes a run of the same name and stamps lastRun', async () => {
+    const { r, calls, release } = gated([JSON.stringify({ remarks: [] })]);
+    expect(r.status()).toEqual({ running: [], lastRun: { arc: null, order: null, gaps: null, render: null } });
+    const a = r.run('order');
+    const b = r.run('gaps');
+    expect(r.run('order')).toBe(a);
+    expect(r.status().running).toEqual(['order', 'gaps']);
+    await waitFor(() => calls.length === 1);
+    expect(r.start(['order', 'gaps', 'arc'])).toEqual(['arc']);
+    expect(r.status().running).toEqual(['arc', 'order', 'gaps']);
+    const done = waitFor(async () => {
+      release();
+      return r.status().running.length === 0;
+    });
+    await Promise.all([a, b, done]);
+    expect(calls).toHaveLength(3);
+    const s = r.status();
+    expect(s.lastRun.order).toMatch(/^\d{4}-/);
+    expect(s.lastRun.gaps).toMatch(/^\d{4}-/);
+    expect(s.lastRun.arc).toMatch(/^\d{4}-/);
+    expect(s.lastRun.render).toBeNull();
+  });
+
+  it('accepts during a running batch coalesce into exactly one more batch', async () => {
+    // Thumbs are not started: render fails before querying, so each batch makes three queries.
+    const { r, calls, release } = gated([JSON.stringify({ remarks: [] })], 10);
+    r.scheduleAfterAccept();
+    await waitFor(() => calls.length === 1);
+    for (let k = 0; k < 3; k++) {
+      r.scheduleAfterAccept();
+      await waitFor(() => !timerArmed(r));
+    }
+    await waitFor(async () => {
+      release();
+      return r.status().running.length === 0 && !timerArmed(r) && calls.length >= 6;
+    });
+    const arcCalls = calls.filter((c) => c.options.systemPrompt === CHECKS.arc.system);
+    expect(arcCalls).toHaveLength(2);
+    expect(calls).toHaveLength(6);
   });
 
   it('an anchor naming an unknown slide counts as an unusable answer', async () => {
@@ -177,12 +282,12 @@ describe('CheckRunner', () => {
     await waitFor(() => calls.length >= 4 && events.filter((e) => e.type === 'checks.status').length >= 8, { timeout: 20_000 });
     expect(calls.map((c) => c.options.systemPrompt)).toEqual([CHECKS.arc.system, CHECKS.order.system, CHECKS.gaps.system, CHECKS.render.system]);
     expect(calls[3]!.options).toMatchObject({ allowedTools: ['Read'], maxTurns: 6 });
-    // Sequential: each check ends before the next starts.
+    // All four are queued at once, then each one leaves the list when it ends, in order.
     const running = events.flatMap((e) => (e.type === 'checks.status' ? [e.running] : []));
-    expect(running).toEqual([['arc'], [], ['order'], [], ['gaps'], [], ['render'], []]);
+    expect(running).toEqual([['arc'], ['arc', 'order'], ['arc', 'order', 'gaps'], ['arc', 'order', 'gaps', 'render'], ['order', 'gaps', 'render'], ['gaps', 'render'], ['render'], []]);
   });
 
-  it('scheduleAfterLane runs the render check on the lane’s changed slides only and links the remarks to the lane', async () => {
+  it('scheduleAfterLane runs the render check on the lane’s changed slides only and tags the remarks with the scanned lane', async () => {
     await thumbs.start();
     const inserted = slide('n1', { title: 'Where does memory live?', body: '<p>new</p>' });
     const lane: Lane = {
@@ -210,11 +315,40 @@ describe('CheckRunner', () => {
     expect(prompt).toMatch(/image: .*cache\/thumbs\/[0-9a-f]+\.png/);
     expect(prompt).toContain('"lane" must be null');
     const [remark] = await store.remarks();
-    expect(remark).toMatchObject({ origin: 'check:render', anchor: { kind: 'slide', slide: 'n1' }, laneId: 'l1' });
+    expect(remark).toMatchObject({ origin: 'check:render', anchor: { kind: 'slide', slide: 'n1' }, laneId: null, sourceLaneId: 'l1' });
 
     // A later deck-wide render run leaves the lane's remarks alone while the lane is open.
     await runner([remarkJson({ kind: 'slide', slide: 's4' }, 'overflow')]).r.run('render');
     expect((await store.remarks()).map((x) => x.text).sort()).toEqual(['overflow', 'text under 24px']);
+
+    // Discarding the lane resolves the remarks found on its preview.
+    await new LaneService(store, bus).closeLane('l1');
+    const after = await store.remarks();
+    expect(after.find((x) => x.text === 'text under 24px')!.status).toBe('resolved');
+    expect(after.find((x) => x.text === 'overflow')!.status).toBe('open');
+    expect(events).toContainEqual({ type: 'remarks.changed' });
+  });
+
+  it('a lane-scoped render run does not replace a deck-wide render remark the creator linked to that lane', async () => {
+    await thumbs.start();
+    await runner([remarkJson({ kind: 'slide', slide: 's2' }, 'title overflows')]).r.run('render');
+    const [deckWide] = await store.remarks();
+    const l: Lane = {
+      id: 'l1',
+      label: 'Fix s2',
+      anchor: { kind: 'slide', slide: 's2' },
+      origin: 'user',
+      baseVersion: 1,
+      changes: [{ id: 'c1', kind: 'modify', slide: 's2', patch: { body: '<p>shorter</p>' }, reason: 'fit', status: 'pending' }],
+      status: 'open',
+      createdAt: new Date().toISOString(),
+    };
+    await store.putLane(l);
+    await store.putRemarks([{ ...deckWide!, laneId: 'l1' }]);
+    const { r, calls } = runner([JSON.stringify({ remarks: [] })]);
+    r.scheduleAfterLane('l1');
+    await waitFor(() => calls.length === 1 && r.status().running.length === 0, { timeout: 20_000 });
+    expect((await store.remarks()).map((x) => [x.text, x.laneId, x.status])).toEqual([['title overflows', 'l1', 'open']]);
   });
 
   it('parseCheckOutput takes the first { to the last } of a chatty answer', () => {

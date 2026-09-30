@@ -4,16 +4,16 @@ import { slidesInRange } from '../../model/ops.js';
 import type { Anchor, Brief, Lane, Remark, SlideId, Snapshot } from '../../model/types.js';
 import type { ThumbService } from '../../render/thumbs.js';
 import type { Bus } from '../../server/bus.js';
-import { LaneService } from '../../server/laneService.js';
+import { LaneService, resolveLaneRemarks } from '../../server/laneService.js';
 import type { DeckStore } from '../../store/deckStore.js';
 import { makeDeckToolHandlers, type DeckToolHandlers } from '../tools.js';
 import { arc } from './arc.js';
 import { gaps } from './gaps.js';
-import { CHECK_NAMES, CheckResultSchema, isCheckName, type CheckDef, type CheckName, type CheckResult } from './index.js';
+import { CHECK_NAMES, CheckResultSchema, isCheckName, type CheckDef, type CheckName, type CheckResult, type ChecksStatus } from './index.js';
 import { order } from './order.js';
 import { render } from './render.js';
 
-export { CheckResultSchema, type CheckDef, type CheckName } from './index.js';
+export { CheckResultSchema, type CheckDef, type CheckName, type ChecksStatus } from './index.js';
 
 export const CHECKS: Readonly<Record<CheckName, CheckDef>> = { arc, order, gaps, render };
 
@@ -51,13 +51,18 @@ interface Target {
   /** Order used to resolve range anchors when deciding which old remarks are in scope. */
   order: readonly SlideId[];
   allowLanes: boolean;
-  /** Set for a render check on a lane's preview: its remarks carry this laneId. */
+  /** Set for a render check on a lane's preview: its remarks carry it as sourceLaneId. */
   laneId: string | null;
   /** Null: the run covers the whole deck and replaces all of its check's remarks. */
   scopeIds: ReadonlySet<SlideId> | null;
 }
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+const STOPPED = 'check runner stopped';
+const failurePrefix = (name: CheckName): string => `check ${name} failed: `;
+/** The single remark a failed run leaves (per check, per scanned lane). */
+const isFailureRemark = (r: Remark, name: CheckName): boolean =>
+  r.anchor.kind === 'arc' && r.severity === 'info' && r.laneId === null && r.text.startsWith(failurePrefix(name));
 const pick = (snap: Snapshot, ids: readonly SlideId[]): Snapshot => ({
   order: ids.filter((id) => snap.slides[id] !== undefined),
   slides: Object.fromEntries(ids.flatMap((id) => (snap.slides[id] ? [[id, snap.slides[id]!]] : []))),
@@ -94,14 +99,22 @@ export function parseCheckOutput(text: string, validIds: ReadonlySet<SlideId>): 
 /**
  * Runs the deck checks as fresh single-shot SDK queries (no session, no user settings), validates their
  * JSON, and persists the result as remarks that replace the check's previous ones. Runs are serialized:
- * at most one check query is in flight per deck.
+ * at most one check query is in flight per deck. The runner is the only owner of check status: which
+ * checks are queued or running, and when each last ended (in memory: a restart forgets it).
  */
 export class CheckRunner {
   private readonly opts: CheckRunnerOptions;
   private readonly queryImpl: typeof query;
   private readonly handlers: DeckToolHandlers;
   private tail: Promise<unknown> = Promise.resolve();
-  private running: CheckName[] = [];
+  /** Queued or running runs per check name (deck-wide, scoped and lane runs alike). */
+  private readonly active = new Map<CheckName, number>();
+  /** The queued or running deck-wide run of each check, which a new unscoped run of that name joins. */
+  private readonly pending = new Map<CheckName, Promise<CheckRunResult>>();
+  private readonly lastRun: Record<CheckName, string | null> = { arc: null, order: null, gaps: null, render: null };
+  /** The after-accept batch queued or running; an accept meanwhile only marks it dirty. */
+  private batch: Promise<void> | null = null;
+  private dirty = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private current: AbortController | null = null;
   private disposed = false;
@@ -123,15 +136,42 @@ export class CheckRunner {
     });
   }
 
-  /** Runs one check now (after any queued run). `scope` restricts the slides shown and the remarks replaced. */
+  /**
+   * Runs one check after any queued run. An unscoped run joins the deck-wide run of the same check that is
+   * already queued or running instead of starting another. `scope` restricts the slides shown and the remarks replaced.
+   */
   run(name: CheckName, scope?: Anchor): Promise<CheckRunResult> {
-    return this.enqueue(() => this.runDeck(name, scope));
+    if (scope === undefined) {
+      const joined = this.pending.get(name);
+      if (joined) return joined;
+    }
+    const p = this.tracked(name, () => this.runDeck(name, scope));
+    if (scope === undefined) {
+      this.pending.set(name, p);
+      const clear = () => {
+        if (this.pending.get(name) === p) this.pending.delete(name);
+      };
+      p.then(clear, clear);
+    }
+    return p;
+  }
+
+  /** Fire-and-forget start of the named checks not already queued or running; returns the ones started. */
+  start(names: readonly CheckName[]): CheckName[] {
+    if (this.disposed) return [];
+    const started = [...new Set(names)].filter((n) => !this.pending.has(n));
+    for (const name of started) this.run(name).catch((e) => this.report(name, e));
+    return started;
   }
 
   /** Fire-and-forget start by name, for the run_check tool. Throws on an unknown name. */
   trigger(name: string): void {
     if (!isCheckName(name)) throw new Error(`unknown check "${name}"; available: ${CHECK_NAMES.join(', ')}`);
-    this.run(name).catch((e) => this.report(name, e));
+    this.start([name]);
+  }
+
+  status(): ChecksStatus {
+    return { running: CHECK_NAMES.filter((n) => this.active.has(n)), lastRun: { ...this.lastRun } };
   }
 
   scheduleAfterAccept(): void {
@@ -139,19 +179,21 @@ export class CheckRunner {
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
-      for (const name of CHECK_NAMES) this.run(name).catch((e) => this.report(name, e));
+      if (this.batch) this.dirty = true;
+      else this.runBatch();
     }, this.opts.debounceMs ?? DEFAULT_DEBOUNCE_MS);
     this.timer.unref?.();
   }
 
   scheduleAfterLane(laneId: string): void {
     if (this.disposed) return;
-    this.enqueue(() => this.runLane(laneId)).catch((e) => this.report(`render on lane ${laneId}`, e));
+    this.tracked('render', () => this.runLane(laneId)).catch((e) => this.report(`render on lane ${laneId}`, e));
   }
 
   /** Stops pending schedules and aborts the query in flight. */
   dispose(): void {
     this.disposed = true;
+    this.dirty = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.current?.abort();
@@ -159,13 +201,43 @@ export class CheckRunner {
 
   // -------------------------------------------------------------------------
 
+  /** All four checks on the current deck; accepts that land meanwhile add exactly one more batch. */
+  private runBatch(): void {
+    const all = CHECK_NAMES.map((name) => this.run(name).catch((e) => this.report(name, e)));
+    this.batch = Promise.all(all).then(() => {
+      this.batch = null;
+      if (this.dirty && !this.disposed) {
+        this.dirty = false;
+        this.runBatch();
+      }
+    });
+  }
+
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const p = this.tail.then(() => {
-      if (this.disposed) throw new Error('check runner stopped');
+      if (this.disposed) throw new Error(STOPPED);
       return fn();
     });
     this.tail = p.catch(() => undefined);
     return p;
+  }
+
+  /** Enqueues `fn`, counting `name` as running from now until it settles. */
+  private tracked<T>(name: CheckName, fn: () => Promise<T>): Promise<T> {
+    this.setActive(name, 1);
+    const p = this.enqueue(fn);
+    const done = () => this.setActive(name, -1);
+    p.then(done, done);
+    return p;
+  }
+
+  private setActive(name: CheckName, delta: 1 | -1): void {
+    const before = this.status().running;
+    const n = (this.active.get(name) ?? 0) + delta;
+    if (n > 0) this.active.set(name, n);
+    else this.active.delete(name);
+    const running = this.status().running;
+    if (running.join() !== before.join()) this.opts.bus.emit({ type: 'checks.status', running });
   }
 
   private report(what: string, e: unknown): void {
@@ -209,23 +281,14 @@ export class CheckRunner {
     });
   }
 
-  private setRunning(next: CheckName[]): void {
-    this.running = next;
-    this.opts.bus.emit({ type: 'checks.status', running: [...next] });
-  }
-
   private async execute(t: Target): Promise<CheckRunResult> {
     const name = t.def.name;
-    this.setRunning([...this.running, name]);
     try {
       const outcome = await this.evaluate(t);
-      const items: Item[] = outcome.ok
-        ? outcome.items
-        : [{ anchor: { kind: 'arc' }, severity: 'info', text: `check ${name} failed: ${outcome.reason}`, lane: null }];
-      return await this.persist(t, items);
+      if (this.disposed) throw new Error(STOPPED);
+      return outcome.ok ? await this.persist(t, outcome.items) : await this.persistFailure(t, `${failurePrefix(name)}${outcome.reason}`);
     } finally {
-      const i = this.running.indexOf(name);
-      this.setRunning(i < 0 ? this.running : [...this.running.slice(0, i), ...this.running.slice(i + 1)]);
+      this.lastRun[name] = new Date().toISOString();
     }
   }
 
@@ -241,7 +304,8 @@ export class CheckRunner {
     }
     const prompt = t.def.buildPrompt({ brief: t.brief, snap: t.snap, allowLanes: t.allowLanes, ...(thumbs ? { thumbs } : {}) });
     const first = await this.ask(t, prompt);
-    if (first.ok) return first;
+    // Disposed (the query was aborted): a retry would only start a query nobody waits for.
+    if (first.ok || this.disposed) return first;
     const second = await this.ask(t, `${prompt}\n\nYour previous answer could not be used (${first.reason}). ${RETRY_INSTRUCTION}.`);
     return second.ok ? second : { ok: false, reason: second.reason };
   }
@@ -263,6 +327,7 @@ export class CheckRunner {
   }
 
   private async complete(def: CheckDef, prompt: string): Promise<string> {
+    if (this.disposed) throw new Error(STOPPED);
     const { store, model } = this.opts;
     const abortController = new AbortController();
     this.current = abortController;
@@ -302,9 +367,18 @@ export class CheckRunner {
   /** Is `r` one of the remarks this run supersedes? */
   private async owned(t: Target, r: Remark, origin: Remark['origin']): Promise<boolean> {
     if (r.origin !== origin) return false;
-    if (t.laneId !== null) return r.laneId === t.laneId;
-    // A remark linked to a lane someone else opened (a lane-scoped render remark, or a lane the creator asked
-    // for from the remark's thread) stays while that lane is open.
+    const source = r.sourceLaneId ?? null;
+    // A lane run owns exactly the remarks found on that lane's preview, whatever lane answers them.
+    if (t.laneId !== null) return source === t.laneId;
+    // Remarks found on a lane's preview stay while that lane is open (closing it resolves them).
+    if (source !== null) {
+      const lane = await this.opts.store.lane(source);
+      if (lane && lane.status === 'open') return false;
+    }
+    // A failure remark is always superseded by the check's next run on the same target.
+    if (isFailureRemark(r, t.def.name)) return true;
+    // A remark linked to a lane someone else opened (e.g. a lane the creator asked for from the remark's
+    // thread) stays while that lane is open.
     if (r.laneId !== null) {
       const lane = await this.opts.store.lane(r.laneId);
       if (lane && lane.status === 'open' && lane.origin !== origin) return false;
@@ -322,7 +396,7 @@ export class CheckRunner {
     const lanes: Lane[] = [];
     const laneIds: (string | null)[] = [];
     for (const item of items) {
-      laneIds.push(t.laneId);
+      laneIds.push(null);
       if (!item.lane || !t.allowLanes) continue;
       const res = await this.handlers.propose_lane(item.lane);
       if (!('laneId' in res) || typeof res.laneId !== 'string') {
@@ -352,6 +426,7 @@ export class CheckRunner {
       severity: item.severity,
       status: 'open',
       laneId: laneIds[k] ?? null,
+      ...(t.laneId !== null ? { sourceLaneId: t.laneId } : {}),
       createdAt: now,
     }));
 
@@ -369,12 +444,38 @@ export class CheckRunner {
         await store.putLane({ ...lane, status: 'closed' });
         closedIds.push(lane.id);
       }
-      await store.putRemarks([...kept, ...remarks]);
+      const next = [...kept, ...remarks];
+      await store.putRemarks(resolveLaneRemarks(next, closedIds) ?? next);
       return closedIds;
     });
 
     for (const id of closed) bus.emit({ type: 'lane.closed', laneId: id });
     bus.emit({ type: 'remarks.changed' });
     return { remarks, lanes };
+  }
+
+  /** A failed run leaves the check's remarks and lanes as they were; only its failure remark is added or replaced. */
+  private async persistFailure(t: Target, text: string): Promise<CheckRunResult> {
+    const { store, bus } = this.opts;
+    const origin = `check:${t.def.name}` as const;
+    const source = t.laneId;
+    const remark: Remark = {
+      id: newId('r'),
+      anchor: { kind: 'arc' },
+      text,
+      origin,
+      severity: 'info',
+      status: 'open',
+      laneId: null,
+      ...(source !== null ? { sourceLaneId: source } : {}),
+      createdAt: new Date().toISOString(),
+    };
+    await store.withLock(async () => {
+      const existing = await store.remarks();
+      const kept = existing.filter((r) => !(r.origin === origin && (r.sourceLaneId ?? null) === source && isFailureRemark(r, t.def.name)));
+      await store.putRemarks([...kept, remark]);
+    });
+    bus.emit({ type: 'remarks.changed' });
+    return { remarks: [remark], lanes: [] };
   }
 }

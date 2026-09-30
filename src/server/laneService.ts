@@ -1,6 +1,6 @@
 import { hashSlide } from '../model/ids.js';
 import { applyChange, rebaseLane } from '../model/ops.js';
-import type { Change, Lane, SlideId, Snapshot, Version } from '../model/types.js';
+import type { Change, Lane, Remark, SlideId, Snapshot, Version } from '../model/types.js';
 import type { DeckStore } from '../store/deckStore.js';
 import type { Bus } from './bus.js';
 
@@ -25,6 +25,21 @@ export interface LanePreview {
 }
 
 const hasPending = (l: Lane): boolean => l.changes.some((c) => c.status === 'pending');
+
+/**
+ * Resolves the open remarks found on the preview of the given (now closed) lanes: they described slides
+ * that only existed in that lane. Null when nothing changes.
+ */
+export function resolveLaneRemarks(remarks: readonly Remark[], closedLaneIds: readonly string[]): Remark[] | null {
+  if (closedLaneIds.length === 0) return null;
+  let changed = false;
+  const next = remarks.map((r) => {
+    if (r.status !== 'open' || !r.sourceLaneId || !closedLaneIds.includes(r.sourceLaneId)) return r;
+    changed = true;
+    return { ...r, status: 'resolved' as const };
+  });
+  return changed ? next : null;
+}
 
 /**
  * Every lane mutation runs under the deck lock, so accepts are strictly sequential
@@ -54,36 +69,42 @@ export class LaneService {
         if (changed) await this.store.putLane(next);
         touched.push({ lane: next, changed });
       }
-      return { version, touched };
+      const remarksChanged = await this.resolveRemarksOf(touched.filter((t) => t.changed && t.lane.status === 'closed').map((t) => t.lane.id));
+      return { version, touched, remarksChanged };
     });
 
     this.bus.emit({ type: 'deck.changed', version: out.version.n });
     for (const { lane, changed } of out.touched) if (changed) this.emitLane(lane);
+    if (out.remarksChanged) this.bus.emit({ type: 'remarks.changed' });
     return { version: out.version, lane: out.touched[0]!.lane };
   }
 
   async refuse(laneId: string, changeId: string): Promise<Lane> {
-    const next = await this.store.withLock(async () => {
+    const out = await this.store.withLock(async () => {
       const lane = await this.openLane(laneId);
       this.pendingChange(lane, changeId);
       const refused = this.withStatus(lane, changeId, 'refused');
       const next: Lane = hasPending(refused) ? refused : { ...refused, status: 'closed' };
       await this.store.putLane(next);
-      return next;
+      const remarksChanged = next.status === 'closed' && (await this.resolveRemarksOf([next.id]));
+      return { next, remarksChanged };
     });
-    this.emitLane(next);
-    return next;
+    this.emitLane(out.next);
+    if (out.remarksChanged) this.bus.emit({ type: 'remarks.changed' });
+    return out.next;
   }
 
   async closeLane(laneId: string): Promise<void> {
     const closed = await this.store.withLock(async () => {
       const lane = await this.store.lane(laneId);
       if (!lane) throw new LaneError(404, `unknown lane ${laneId}`);
-      if (lane.status === 'closed') return false;
+      if (lane.status === 'closed') return null;
       await this.store.putLane({ ...lane, status: 'closed' });
-      return true;
+      return { remarksChanged: await this.resolveRemarksOf([laneId]) };
     });
-    if (closed) this.bus.emit({ type: 'lane.closed', laneId });
+    if (!closed) return;
+    this.bus.emit({ type: 'lane.closed', laneId });
+    if (closed.remarksChanged) this.bus.emit({ type: 'remarks.changed' });
   }
 
   /** Current main with all pending changes of the lane applied in order. Read under the lock so a concurrent commit is never seen half-written. */
@@ -106,6 +127,13 @@ export class LaneService {
       });
       return { order: snap.order, slides: snap.slides, skipped, changed };
     });
+  }
+
+  /** Call under the deck lock. True when some remark was resolved. */
+  private async resolveRemarksOf(closedLaneIds: string[]): Promise<boolean> {
+    const next = resolveLaneRemarks(await this.store.remarks(), closedLaneIds);
+    if (next) await this.store.putRemarks(next);
+    return next !== null;
   }
 
   private async openLane(laneId: string): Promise<Lane> {
