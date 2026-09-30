@@ -54,7 +54,7 @@ describe('server core', () => {
     await copyFile(join(fixtureAssets, 's02.png'), join(deckDir, 'assets', 's02.png'));
     thumbs = new ThumbService({ cacheDir: join(deckDir, 'cache'), themeCss, assetsDir: join(deckDir, 'assets') });
     await thumbs.start();
-    app = await buildApp({ deckDir, thumbs });
+    app = await buildApp({ deckDir, thumbs, checks: null });
     events = [];
     app.bus.on('any', (e) => events.push(e));
     await app.ready();
@@ -194,7 +194,7 @@ describe('server core', () => {
       }
     }
     const failing = new FailingThumbs({ cacheDir: join(deckDir, 'cache-failing'), themeCss, assetsDir: join(deckDir, 'assets') });
-    const other = await buildApp({ deckDir, thumbs: failing });
+    const other = await buildApp({ deckDir, thumbs: failing, checks: null });
     const seen: BusEvent[] = [];
     other.bus.on('any', (e) => seen.push(e));
     try {

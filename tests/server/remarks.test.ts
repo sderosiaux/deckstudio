@@ -53,8 +53,7 @@ describe('remarks and checks API', () => {
       })() as AsyncGenerator<SDKMessage, void>;
     }) as unknown as typeof query;
     const agent = new AgentSession({ store, tools, bus, model: 'claude-opus-5', deckDir, queryImpl: impl });
-    app = await buildApp({ deckDir, thumbs, agent });
-    if (checks) app.decorate('checks', checks);
+    app = await buildApp({ deckDir, thumbs, agent, checks: checks ?? null });
     events = [];
     app.bus.on('any', (e) => events.push(e));
     await app.ready();

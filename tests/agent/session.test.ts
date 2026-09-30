@@ -301,7 +301,7 @@ describe('threads API', () => {
     });
     calls = fake.calls;
     const agent = new AgentSession({ store, tools, bus, model: 'claude-opus-5', deckDir, queryImpl: fake.impl });
-    app = await buildApp({ deckDir, thumbs, agent });
+    app = await buildApp({ deckDir, thumbs, agent, checks: null });
     await app.ready();
   });
   afterEach(async () => {

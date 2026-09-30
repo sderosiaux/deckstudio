@@ -60,7 +60,7 @@ describe('lanes API', () => {
     await writeFile(join(deckDir, 'theme.css'), themeCss);
     thumbs = new ThumbService({ cacheDir: join(deckDir, 'cache'), themeCss, assetsDir: join(deckDir, 'assets') });
     await thumbs.start();
-    app = await buildApp({ deckDir, thumbs });
+    app = await buildApp({ deckDir, thumbs, checks: null });
     events = [];
     app.bus.on('any', (e) => events.push(e));
     await app.ready();

@@ -12,7 +12,7 @@ import { DeckStore } from '../store/deckStore.js';
 import { Bus } from './bus.js';
 import { LaneService } from './laneService.js';
 import { briefRoutes } from './routes/brief.js';
-import { checkRoutes } from './routes/checks.js';
+import { checkRoutes, type ChecksRunner } from './routes/checks.js';
 import { deckRoutes } from './routes/deck.js';
 import { laneRoutes } from './routes/lanes.js';
 import { presentRoutes } from './routes/present.js';
@@ -36,15 +36,21 @@ export interface BuildAppOptions {
   thumbs: ThumbService;
   /** Injected by tests; otherwise a real SDK session is built on the deck's model. */
   agent?: AgentSession;
+  /** Injected by tests: a fake runner, or null for no checks at all. Undefined builds the real CheckRunner. */
+  checks?: ChecksRunner | null;
 }
 
-function defaultAgent(store: DeckStore, thumbs: ThumbService, bus: Bus, model: string, checks: CheckRunner): AgentSession {
+function defaultAgent(store: DeckStore, thumbs: ThumbService, bus: Bus, model: string, checks: ChecksRunner | null): AgentSession {
   const tools = makeDeckTools({
     store,
     thumbs,
     bus,
     imageGen: makeImageGen(join(store.dir, 'assets')),
-    runCheck: async (name) => checks.trigger(name),
+    runCheck: async (name) => {
+      if (!checks) throw new Error('checks are not available in this build');
+      if (checks instanceof CheckRunner) checks.trigger(name);
+      else void checks.run(name as Parameters<typeof checks.run>[0]);
+    },
   });
   return new AgentSession({ store, tools, bus, model, deckDir: store.dir });
 }
@@ -70,13 +76,15 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   presentRoutes(app, store);
   laneRoutes(app, store, new LaneService(store, bus), opts.thumbs, bus);
   const model = (await store.state()).model;
-  const checks = new CheckRunner({ store, thumbs: opts.thumbs, bus, model });
-  app.decorate('checks', checks);
-  bus.on('deck.changed', () => checks.scheduleAfterAccept());
-  bus.on('lane.created', (e) => {
-    if (e.type === 'lane.created') checks.scheduleAfterLane(e.laneId);
-  });
-  app.addHook('onClose', async () => checks.dispose());
+  const checks = opts.checks === undefined ? new CheckRunner({ store, thumbs: opts.thumbs, bus, model }) : opts.checks;
+  if (checks) app.decorate('checks', checks);
+  if (checks instanceof CheckRunner) {
+    bus.on('deck.changed', () => checks.scheduleAfterAccept());
+    bus.on('lane.created', (e) => {
+      if (e.type === 'lane.created') checks.scheduleAfterLane(e.laneId);
+    });
+    app.addHook('onClose', async () => checks.dispose());
+  }
   const agent = opts.agent ?? defaultAgent(store, opts.thumbs, bus, model, checks);
   threadRoutes(app, store, agent);
   remarkRoutes(app, store, agent, bus);
