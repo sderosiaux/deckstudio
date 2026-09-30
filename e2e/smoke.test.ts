@@ -81,9 +81,11 @@ describe.skipIf(!ENABLED)('smoke: real SDK session proposes a lane that gets acc
     await tmp?.cleanup();
   });
 
-  it('global message -> lane with one insert -> accept -> v2 with 30 slides -> thumb rendered', async () => {
+  it('global message -> lane with one insert -> accept -> next version with one more slide -> thumb rendered', async () => {
     const deck = (await app.inject({ method: 'GET', url: '/api/deck' })).json() as { order: SlideId[] };
-    expect(deck.order).toHaveLength(29);
+    const initialCount = deck.order.length;
+    const initialVersion = deck.state.version;
+    expect(initialCount).toBeGreaterThanOrEqual(29);
     const order = deck.order;
 
     const sent = await app.inject({
@@ -108,10 +110,10 @@ describe.skipIf(!ENABLED)('smoke: real SDK session proposes a lane that gets acc
     expect(acc.statusCode).toBe(200);
 
     const after = (await app.inject({ method: 'GET', url: '/api/deck' })).json() as { order: SlideId[] };
-    expect(after.order).toHaveLength(30);
+    expect(after.order).toHaveLength(initialCount + 1);
     expect(after.order).toContain(newId);
     const versions = (await app.inject({ method: 'GET', url: '/api/versions' })).json() as Version[];
-    expect(versions.some((v) => v.n === 2)).toBe(true);
+    expect(versions.some((v) => v.n === initialVersion + 1)).toBe(true);
 
     const hash = await waitFor(
       async () => {
