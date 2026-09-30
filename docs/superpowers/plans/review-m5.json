@@ -1,0 +1,304 @@
+{
+ "confirmed": [
+  {
+   "file": "src/server/historyService.ts",
+   "line": 132,
+   "severity": "high",
+   "claim": "Restoring a 'modified' entry overwrites the whole slide with the source version's copy instead of reverting only entry.fields. Any edit made on main after v<b> to other fields (notes, body, story...) is silently lost, which contradicts the plan's 'applies the inverse of one entry'.",
+   "repro": "v1 slide s1 {title:'T s1', notes:''}; v2 changes title to 'NEW'; v3 changes notes to 'later notes'. GET /api/history/diff?a=1&b=2 gives [{kind:'modified',slide:'s1',fields:['title']}]. POST /api/history/restore {from:1, entry} \u2192 status 200, main s1.title='T s1' (correct), but s1.notes='' (the v3 edit is gone). Checked with a throwaway vitest against buildApp: expected 'later notes', received ''.",
+   "verdict": "CONFIRMED",
+   "evidence": "The bug reproduces. Running at HEAD e451b3f. `git diff 18821a9 HEAD -- src/server/historyService.ts` is empty, so this is the same code as the reviewed commit.\n\nSetup: an untracked throwaway file `tests/server/zz_throwaway_restore.test.ts`, built from lines 1-57 of `tests/server/history.test.ts` (the buildApp/store/post fixture) plus one test. I deleted it after the run and changed no tracked files.\n- v1: the fixture's five slides; s1 has title 'Title s1' and notes ''.\n- v2: s1.title changed to 'NEW'.\n- v3: s1.notes changed to 'later notes'.\n- The test calls GET `/api/history/diff?a=1&b=2`, then POST `/api/history/restore` with `{from:1, entry}`, then reads `store.snapshot()`.\n\nCommand: `npx vitest run tests/server/zz_throwaway_restore.test.ts --reporter=verbose`\n\nOutput:\n```\nRESULT diff=[{\"kind\":\"modified\",\"slide\":\"s1\",\"fields\":[\"title\"]}] status=200 {\"title\":\"Title s1\",\"notes\":\"\"}\n \u00d7 ... restore modified keeps later edits to other fields\nAssertionError: expected '' to be 'later notes'\n```\n\nCause: in `src/server/historyService.ts:132`, the 'modified' branch of `inverse()` returns `{ ...copySlide(then), id }`. That replaces the whole slide with the v1 copy and ignores `entry.fields`, so the v3 edit to notes is lost.\n\nNote: the fixture's title is 'Title s1', not the 'T s1' used in the claim. That does not affect the result.",
+   "fix_hint": "In inverse() case 'modified', start from main's slide and copy back only the fields named in `entry.fields` from `then`: `{ ...now, ...Object.fromEntries(entry.fields.map(f => [f, structuredClone(then[f])])) }`. Also base the 'already has its source content' check on those fields, not hashSlide."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 65,
+   "severity": "medium",
+   "claim": "restore closes open lanes whose pending changes all become orphans, but unlike LaneService.accept (laneService.ts:66-78) it never calls resolveLaneRemarks and never emits 'remarks.changed'. Remarks sourced from those now-closed lanes stay 'open' and point at slides that only existed in a dead lane.",
+   "repro": "Open a lane whose only pending change modifies slide n1 and has a remark with sourceLaneId=<lane>. Restore the 'added n1' entry (diff v1\u2192v3) so n1 is removed from main. The lane is rebased to orphan, then status 'closed' and lane.closed is emitted. GET the remarks: the remark is still status 'open'. The same situation reached through accept would resolve it.",
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced on the working tree at main HEAD e451b3f. historyService.ts is byte-identical to 18821a9. At 18821a9 itself, laneService had no resolveLaneRemarks and Remark had no sourceLaneId, so the file:line cited for accept matches HEAD, not 18821a9. The asymmetry is present at HEAD.\n\nThrowaway test at /tmp/repro-hist/restore.test.ts, driving DeckStore, HistoryService and LaneService directly with a fresh Bus. Setup: v1=[s1,s2]; v2 adds n1; open lane l_x has one pending change, modify n1; a remark has sourceLaneId='l_x' and status 'open'.\n\nCommand: `cd /Users/sderosiaux/code/personal/deckstudio && NO_COLOR=1 npx vitest run --config /tmp/repro-hist/vitest.config.ts --root /tmp/repro-hist --reporter=verbose --silent=false`\n\nOutput:\n```\nRESTORE lane closed [ 'orphan' ] remarks [ 'open' ] events [ 'deck.changed', 'lane.updated', 'lane.closed' ]\nACCEPT lane closed remarks [ 'resolved' ] events [ 'lane.updated', 'lane.closed', 'lane.updated', 'lane.closed', ...\n\u2713 restore closing a lane leaves its remarks open\n\u2713 accept path for comparison: other lane orphaned+closed resolves remark\n```\n\n- Restore path, `restore(1, {kind:'added', slide:'n1', at:2})`: l_x is rebased to orphan and closed, and lane.closed is emitted. The remark stays 'open' and remarks.changed is never emitted.\n- Accept path (a second lane removes n1 and is accepted): l_x reaches the same state, closed, but the remark is 'resolved'.\n\ngit status is clean. No tracked files were touched.",
+   "fix_hint": "In HistoryService.restore, run resolveLaneRemarks(await store.remarks(), updated.filter(l => l.status==='closed').map(l => l.id)) inside the lock; if it returns something, call putRemarks and emit 'remarks.changed' after the lane events. Better: pull this into a shared helper that LaneService.accept also uses."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 132,
+   "severity": "high",
+   "claim": "Restoring a 'modified' diff entry overwrites the whole slide with its v<from> copy and ignores entry.fields. Any edit made on main after the compared pair, to a field the entry does not list, is silently reverted. The new 'restore' version then persists that loss. Security lens: no path-traversal, HTML-injection or unsafe-write issue found in this milestone. Slide ids still go through assertSafe in store.commit, version numbers are regex/zod-checked and confirmed to exist before snapshotAt, the history UI uses no innerHTML, and zod strips unknown keys from the entry before it is stored in the cause.",
+   "repro": "Temporary vitest test (confirmed, then deleted). Commit v1 s1{title:'Ts1',notes:'n0'}, v2 s1{title:'NEW'}, v3 s1{title:'NEW',notes:'LATER NOTES'}. GET /api/history/diff?a=1&b=2 \u2192 [{kind:'modified',slide:'s1',fields:['title']}]. POST /api/history/restore {from:1, entry:<that entry>} \u2192 200. Main's s1 is now {title:'Ts1', notes:'n0'}: the v3 notes 'LATER NOTES' are lost, though only 'title' was restored. Fix: apply only the entry.fields from `then` onto `now`, e.g. with patchOf restricted to entry.fields.",
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced. The throwaway test was tests/server/zz-repro-mine.test.ts. It reused the beforeEach from tests/server/history.test.ts, then I deleted it. No tracked files were modified. The other untracked zz_* files in the repo are not mine.\nScenario:\n- v1: the five default slides (s1 notes='').\n- v2: s1.title='NEW'.\n- v3: s1.notes='LATER NOTES'.\n- GET /api/history/diff?a=1&b=2, then POST /api/history/restore {from:1, entry}.\nCommand: npx vitest run tests/server/zz-repro-mine.test.ts, with results written to /tmp/repro-out.txt.\nOutput:\nDIFF [{\"kind\":\"modified\",\"slide\":\"s1\",\"fields\":[\"title\"]}]\nSTATUS 200\nMAIN s1 {\"title\":\"Title s1\",\"notes\":\"\"}\nThe v3 notes 'LATER NOTES' were reverted, although the entry only listed 'title'. Cause: in the 'modified' case of inverse() (src/server/historyService.ts:~132), the code returns `{ ...copySlide(then), id }`, which replaces the whole slide and never reads entry.fields. HEAD is e451b3f. `git diff 18821a9 HEAD -- src/server/historyService.ts` is empty, so the code is the same at the claimed commit.",
+   "fix_hint": "In inverse() 'modified', build the slide as { ...now, ...Object.fromEntries(entry.fields.map(f => [f, then[f]])) }, i.e. copy only entry.fields from `then`. Base the stale check on those fields instead of on the whole-slide hash."
+  },
+  {
+   "file": "tests/server/history.test.ts",
+   "line": 110,
+   "severity": "medium",
+   "claim": "No test covers restore when main has moved on from version b of the compared pair (entry taken between v_a and v_b with a < latest). Every restore test diffs against the latest version, so partial-field restore, and 'moved'/'removed' placement against a main whose order differs from v_b, are never checked.",
+   "repro": "Add a test that commits v1..v4 with a different edit to the same slide in v4, then restores an entry from diff(1,2). The existing suite stays green while the modify path drops the v4 edit (see the previous finding).",
+   "verdict": "CONFIRMED",
+   "evidence": "Code is the same at 18821a9 and HEAD: `git diff --stat 18821a9 HEAD` on historyService.ts, history.test.ts and ops.ts shows nothing. In tests/server/history.test.ts, every restore call passes `from: 1`, and the entries come from diffs whose later side is the latest version, i.e. current main (threeVersions \u2192 v3, or the v2 in the \"beyond length\" test). No test takes the entry from diff(a,b) with b < latest.\n\nI ran a throwaway test, /tmp/hrepro/restore.test.ts (deleted afterwards), with the command `npx vitest run --config /tmp/hrepro/vitest.config.ts --root /tmp/hrepro`. It commits:\n- v1: s1..s3\n- v2: s2 title \u2192 'S2 v2'\n- v3: s3 notes edit (unrelated)\n- v4: s2 body \u2192 '<p>v4 body</p>'\n\nIt then takes the entry from HistoryService.diff(1,2), which is modified s2 with fields ['title'], and calls restore(1, entry). Output:\n```\nFAIL restore.test.ts > restore against a main that moved past v_b > modified entry from diff(1,2) keeps later v4 edit to another field\nAssertionError: expected '<p>body s2</p>' to be '<p>v4 body</p>'\n```\nThe title was restored correctly, but the v4 body edit was silently reverted. inverse() 'modified' at src/server/historyService.ts copies the whole `then` slide (`{ ...copySlide(then), id }`) and ignores entry.fields.\n\nSame run, existing suite: `npx vitest run tests/server/history.test.ts` \u2192 8 passed (8), so the gap is real and the suite stays green.\n\nNot reproduced by me: the reviewer also named 'moved'/'removed' placement against a reordered main as uncovered. The absence of such tests is confirmed, but I did not show a wrong result for those two kinds.",
+   "fix_hint": "In inverse() 'modified', only overwrite entry.fields from `then` onto `now` (e.g. { ...now, ...pick(then, entry.fields) }). Add a test: commit v1..v4, edit another field of the same slide in v4, restore an entry from diff(1,2), and assert that the v4 edit survives."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 63,
+   "severity": "medium",
+   "claim": "The rebase of open lanes after a restore (orphaning changes, closing lanes with no pending changes, emitting lane.updated and lane.closed) is untested. No test in tests/server/history.test.ts has an open lane when restore runs. This is the Review Focus 1 scenario (a change referencing a slide that main just removed must become orphan) reached through a new mutation path.",
+   "repro": "grep -n \"lane.updated\\|lane.closed\\|orphan\" tests/server/history.test.ts returns nothing. Scenario: open a lane with 'modify n1', then POST restore {from:1, entry:{kind:'added',slide:'n1',at:4}}. The suite never checks that the change becomes orphan and the lane closes.",
+   "verdict": "CONFIRMED",
+   "evidence": "The coverage gap is real, but the code behaves correctly.\n\n1) Static check at 18821a9. `git show 18821a9:tests/server/history.test.ts | grep -c \"lane.updated\\|lane.closed\\|orphan\\|putLane\"` returns 0. `tests/server/history.test.ts` is the only test file at 18821a9 that calls `/api/history/restore` or `.restore(`; `lanes.test.ts` does not. None of the restore tests (lines 88-130) creates an open lane before the restore runs, so the rebase loop at `src/server/historyService.ts:63-76` never executes under test. `src/server/historyService.ts` is byte-identical between 18821a9 and HEAD (e451b3f), since `git diff --stat` is empty.\n\n2) Dynamic check with a throwaway test in /tmp/rlane, run through `npx vitest run --config /tmp/rlane/vc.mts` with root set to the repo. Setup: v1 has s1..s5, v2 adds n1 at index 5. An open lane `l_t` holds a pending `modify n1` change. The test then POSTs `/api/history/restore {from:1, entry:{kind:'added',slide:'n1',at:5}}`. It asserts the change status is 'orphan', the lane status is 'closed', and the events include lane.updated and lane.closed. Result: `Test Files 1 passed (1) / Tests 1 passed (1)`.\n\nSo the rebase path works today, but no test in the suite pins it down, which is what the claim says. Nothing tracked was modified, and /tmp/rlane was removed afterwards.",
+   "fix_hint": "Add a test to tests/server/history.test.ts that puts an open lane with a pending 'modify n1' change, POSTs restore {from:1, entry:{kind:'added',slide:'n1',at:4}} after threeVersions(), and asserts the change is 'orphan', the lane is 'closed', and the events include lane.updated and lane.closed."
+  },
+  {
+   "file": "tests/server/history.test.ts",
+   "line": 134,
+   "severity": "medium",
+   "claim": "The plan asks for a property test on the fixture ('open-as-lane produces changes that, all accepted, reproduce v<n>'s order and content'). The suite has two hand-picked examples and does not use tests/fixtures/deck-mini. It also never covers the rename branch at historyService.ts:169 (an added id already in main.slides) or an open-as-lane where the same slide is both modified and moved.",
+   "repro": "grep -n \"fast-check\\|fc\\.\\|deck-mini\" tests/server/history.test.ts package.json finds nothing. Coverage of historyService.ts:169-170 with an insert whose id is renamed is 0.",
+   "verdict": "CONFIRMED",
+   "evidence": "Setup: exported commit 18821a9 to /tmp/ds18 with `git archive 18821a9 | tar -x -C /tmp/ds18` and symlinked node_modules from the repo. Tracked files were not touched, the tmp copy was deleted afterwards, and `git status -sb` in the repo still shows a clean `## main`.\n\n1) No property test: `grep -n \"fast-check\\|fc\\.\\|deck-mini\" tests/server/history.test.ts package.json` prints nothing (rc=1). The plan asks for one: docs/superpowers/plans/2026-09-30-deckstudio.md:375 says \"open-as-lane produces changes that, all accepted, reproduce v<n>'s order and content (property test on the fixture)\". The suite has only two hand-written open-as-lane cases (history.test.ts:134 and :152), and neither loads a fixture. Caveat: tests/fixtures/deck-mini does not exist at this commit. The only fixture is tests/fixtures/deck-3.html, so the reviewer named the wrong file, but the gap is real.\n\n2) Rename branch never runs: I added a `console.log(\"RENAME_HIT\", id)` inside the `if` at historyService.ts:169 and logged every diff entry in changesToward, all in the tmp copy. `npx vitest run tests/server/history.test.ts` passed 8/8 and printed no RENAME_HIT. Every insert the suite exercises (n9, s3) is absent from main.slides, so lines 169-170 are never hit. Caveat: the code comment says this branch is only reachable if main holds an id it does not list in its order, so it may be close to dead code.\n\n3) This part of the claim is false. The suite does cover one slide being both modified and moved. In the test at :152, s4 produces both `{\"kind\":\"modified\",\"slide\":\"s4\",\"fields\":[\"kind\"]}` and `{\"kind\":\"moved\",\"slide\":\"s4\",\"from\":0,\"to\":6}`, and all changes are accepted and checked against the target.\n\nNet: the main claim holds (no property test even though the plan asks for one, and the rename branch has zero coverage). The fixture name and the modified+moved point are wrong.",
+   "fix_hint": "Add a seeded randomized test (fast-check or a seeded PRNG) that builds main/target snapshots from tests/fixtures/deck-3.html slides with random removes, adds, modifies and reorders, runs open-as-lane, accepts every change, and asserts contentOf(main) equals contentOf(target). Add one case where main.slides holds an unlisted id that the target adds, to hit line 169, or delete that branch if it cannot happen."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 132,
+   "severity": "high",
+   "claim": "Restoring a 'modified' entry ignores entry.fields and copies the whole source slide over main. Any later edit to fields the entry doesn't name is silently reverted, which loses data. patchOf in the same file could limit the restore to entry.fields but isn't used here.",
+   "repro": "Store v1 s1{title:'T s1'}, v2 s1{title:'NEW'}, v3 s1{title:'NEW', body:'<p>later edit</p>'}. Call history.diff(v1,v2), which gives [{kind:'modified',slide:'s1',fields:['title']}], then history.restore(v1, entry). Main s1 comes back as {title:'T s1', body:'<p>s1</p>'}: the v3 body edit is gone. Verified with a throwaway vitest test against HistoryService + DeckStore.",
+   "verdict": "CONFIRMED",
+   "evidence": "src/server/historyService.ts is the same at 18821a9 and HEAD e451b3f (git diff --stat showed no changes). I wrote a throwaway test at /tmp/hrepro/repro.test.ts with its own config /tmp/hrepro/vitest.config.mjs. It uses the real DeckStore, HistoryService and Bus: it commits v1 s1{title:'T s1', body:'<p>s1</p>'}, then v2 {title:'NEW'}, then v3 {title:'NEW', body:'<p>later edit</p>'}, and calls h.restore(1, diff(1,2)[0]).\n\nCommand: cd /Users/sderosiaux/code/personal/deckstudio && npx vitest run --config /tmp/hrepro/vitest.config.mjs\n\nOutput:\nversions 1 2 3 diff [{\"kind\":\"modified\",\"slide\":\"s1\",\"fields\":[\"title\"]}]\nmain s1 after restore {\"id\":\"s1\",\"title\":\"T s1\",\"story\":\"\",\"notes\":\"\",\"body\":\"<p>s1</p>\",\"assets\":[],\"kind\":\"text\"}\nAssertionError: expected '<p>s1</p>' to be '<p>later edit</p>'\n\nSo the entry names only 'title', but the v3 body edit was reverted. That happens because line 132 replaces the whole slide: `slides: { ...main.slides, [id]: { ...copySlide(then), id } }`. Note: the working tree has two untracked files, tests/server/zz-repro-mine.test.ts and zz_repro_tmp2.test.ts. I did not create them and left them in place. I changed no tracked files.",
+   "fix_hint": "In the 'modified' case, restore only the fields in entry.fields: build a patch from `then` for each f in entry.fields (copy assets as an array), apply it on top of `now`, and throw stale() if main already has those values."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 62,
+   "severity": "medium",
+   "claim": "The rebase-and-close loop copies LaneService.accept (laneService.ts:62-72) but leaves out resolveRemarksOf. When a restore closes a lane, that lane's open remarks (sourceLaneId) are never resolved and no 'remarks.changed' event goes out, so accept and restore behave differently after main moves.",
+   "repro": "Open lane L whose only pending change is `remove s3`, and post a remark on L's preview (sourceLaneId=L). Restore an entry that removes s3 from main (e.g. restore an 'added' s3 entry). rebaseLane orphans L's change and L is closed, but GET remarks still shows the remark as status 'open'. Accepting a change that closes L the same way would resolve it (resolveLaneRemarks).",
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced against the working tree at HEAD e451b3f on main. At 18821a9 itself the claim doesn't apply: `sourceLaneId`, `resolveLaneRemarks` and `resolveRemarksOf` don't exist there yet, and accept doesn't resolve remarks either. `src/server/historyService.ts` has the same content at both commits. The code the reviewer points to (laneService.ts:62-72 calling `resolveRemarksOf`) only exists at HEAD, so the review describes HEAD's code.\n\nI wrote a throwaway vitest file in /tmp/repro-restore (config rooted there, node_modules symlinked, all removed afterwards). `git status` shows the repo clean.\n\nSetup:\n- v1 = [s1, s2], v2 = [s1, s2, n1]\n- open lane l_L with the single pending change `remove n1`\n- remark r1 with `sourceLaneId: 'l_L'`, status `open`\n\nTest 1 (restore): POST /api/history/restore {from:1, entry:{kind:'added', slide:'n1', at:2}}\nTest 2 (control, accept): open lane l_O with [remove n1, modify s1]; POST /api/lanes/l_O/changes/c_o/accept\n\nCommand: `cd /tmp/repro-restore && <repo>/node_modules/.bin/vitest run --config /tmp/repro-restore/vitest.config.mjs --reporter=verbose`\n\nOutput:\n```\nrestore status 200\nRESTORE lane status: closed\nRESTORE remarks: [[\"r1\",\"open\"]]\nRESTORE remarks.changed emitted: false\naccept status 200\nACCEPT lane L status: closed\nACCEPT remarks: [[\"r1\",\"resolved\"]]\nACCEPT remarks.changed emitted: true\n```\n\nIn both cases main moves and l_L is closed by the rebase. Accept resolves the remark and emits `remarks.changed`. Restore leaves r1 open and emits no `remarks.changed`. The cause is the loop at historyService.ts:62-69: it copies the rebase-and-close logic from `LaneService.accept` but never calls `resolveLaneRemarks`.",
+   "fix_hint": "In `HistoryService.restore`, while still holding the lock, call `resolveLaneRemarks(await this.store.remarks(), updated.filter(l => l.status === 'closed').map(l => l.id))`, `putRemarks` the result when it is non-null, and emit `remarks.changed` after the lock is released. Better: move this shared rebase-close-resolve step into one helper that both accept and restore call."
+  },
+  {
+   "file": "web/src/api.ts",
+   "line": 197,
+   "severity": "medium",
+   "claim": "openVersionAsLane is typed Promise<Lane> and casts the response to Lane, but POST /api/history/open-as-lane (routes/history.ts:54) answers { laneId }. Any caller reading lane.id/changes gets undefined. The web test mock (tests/web/history.test.tsx:44) returns a full Lane, which hides the mismatch.",
+   "repro": "curl -XPOST /api/history/open-as-lane -d '{\"n\":1}' returns {\"laneId\":\"l_...\"}. `(await openVersionAsLane(1)).id` is undefined at runtime while TypeScript accepts it.",
+   "verdict": "CONFIRMED",
+   "evidence": "Checked at HEAD e451b3f. Running `git diff 18821a9 HEAD` on api.ts, routes/history.ts, History.tsx and tests/web/history.test.tsx shows no changes, so the result applies to 18821a9 too.\n\nCode:\n- web/src/api.ts:197-199 is `openVersionAsLane(n): Promise<Lane>` and does `return (await res.json()) as Lane;`.\n- src/server/routes/history.ts:54 is `return { laneId: await history.openAsLane(body.data.n) };`, and historyService.openAsLane returns `Promise<string>`.\n- The server test tests/server/history.test.ts:138 reads `{ laneId }` itself.\n- The web mock at tests/web/history.test.tsx:44 returns a full Lane object (`id: 'lv'`, `changes: []`, ...).\n\nRuntime repro: throwaway test at /tmp/repro/openlane.test.ts. It uses the real buildApp and DeckStore with 2 committed versions. global fetch is stubbed to route through app.inject, then it calls the real web `openVersionAsLane(1)`.\nCommand: `npx vitest run --root /tmp/repro --config /tmp/repro/vitest.config.ts --silent=false --reporter=verbose openlane`\nOutput:\n```\nRAW RESULT: {\"laneId\":\"l_Be6jw5d8Zf\"}\nlane.id = undefined | lane.changes = undefined\n\u2713 openlane.test.ts > repro > openVersionAsLane result vs real server\n```\nThe assertions `expect(lane.id).toBeUndefined()` and `expect(lane.laneId).toMatch(/.+/)` both passed. TypeScript accepts `.id` on the result.\n\nImpact today is latent: the only caller, History.tsx:175, ignores the resolved value and just calls navigate('/'). No user-visible break yet, but the type is wrong and the mock hides it. No tracked files were modified (git status clean).",
+   "fix_hint": "Change it to `openVersionAsLane(n): Promise<{ laneId: string }>` (also in the HistoryApi interface at api.ts:250), and make the mock at tests/web/history.test.tsx:44 return `{ laneId: 'lv' }`."
+  },
+  {
+   "file": "web/src/screens/History.tsx",
+   "line": 94,
+   "severity": "medium",
+   "claim": "Every refresh wipes the whole thumbnail map (requested.current.clear(); setMainThumbs({})), even though only the slides that changed on main need new thumbnails. After any deck.changed or WS 'hello' (reconnect), every rendered thumbnail on both filmstrips falls back to its title card. The effect at L145-157 then sends one GET /api/thumbs/for/:id per slide in a\u222ab that still matches main. Each of those requests re-hashes the slide HTML and reads its asset bytes on the server (thumbs.ts:138 hashFor). On a 40-slide deck, one restore costs about 40 thumbFor round-trips plus a visible flash of every thumbnail, for a change to one slide. The cache that avoids re-rendering is thrown away on the client.",
+   "repro": "Open /history on a deck of 30+ slides with rendered thumbnails. Click 'restore' on one 'modified' entry and watch the network tab. Every thumbnail blanks to a title card, then about N /api/thumbs/for/* requests fire. Or in tests/web/history.test.tsx: count api.thumbFor calls before and after emitting {type:'deck.changed'} through the injected subscribe. The count grows by the full slide count, not by the changed slides.",
+   "verdict": "CONFIRMED",
+   "evidence": "web/src/screens/History.tsx is the same at 18821a9 and at HEAD e451b3f (`git diff 18821a9 HEAD -- web/src/screens/History.tsx` is empty). In `refresh()` (L88-107), every call runs `requested.current.clear(); setMainThumbs({})` before anything else. So the thumbnail effect (L145-157) calls `api.thumbFor` again for every slide that still matches main.\n\nRepro: I added a throwaway test at tests/web/zz_tmp_repro.test.tsx, ran it, and deleted it. `git status -sb` shows a clean `## main` afterwards. Setup: 40-slide deck. v1 has s0..s39. v2 retitles only s3. Main equals v2. The test waits for the first thumbnails, emits `{type:'deck.changed'}` through the injected subscribe, and samples the `<img>` count while the refresh runs.\n\nCommand: `npx vitest run tests/web/zz_tmp_repro.test.tsx` \u2192 1 passed. Result written to /tmp/zz_repro.out:\n`N=40 thumbFor before=40 after=80 imgsBefore=79 imgsMinDuringRefresh=0 imgsAfter=79`\n\n- One deck.changed triggers 40 new thumbFor calls (one per slide), even though main did not change.\n- The rendered `<img>` count drops from 79 to 0 during the refresh: every thumbnail on both filmstrips falls back to its title card, then comes back.\n\nThe 'hello' branch at L112 calls the same `refresh()`, so a WS reconnect behaves the same way.",
+   "fix_hint": "In refresh(), keep mainThumbs and requested. Only clear the ids whose slide content changed between the old deck and the new one (use `!sameSlide(old.slides[id], d.slides[id])`), and only re-request those."
+  },
+  {
+   "file": "web/src/screens/History.tsx",
+   "line": 166,
+   "severity": "medium",
+   "claim": "A restore refreshes twice. restoreEntry(...).then(() => refresh()) runs refresh, and the server's deck.changed event (historyService.ts:72) runs it again through the subscribe handler at L113. Each refresh re-fetches /api/versions (which reads every versions/v*.json, all lanes and main) and /api/deck. It also clears the thumbs and bumps `reload`, which re-fetches both snapshots and the diff. So one click does the whole reload pipeline twice: 2x getVersions, 2x getDeck, 4x getVersionSnapshot, 2x getHistoryDiff and 2N thumbFor. refresh has no sequencing either, so the two responses can land in either order.",
+   "repro": "In tests/web/history.test.tsx, make the fake subscribe emit {type:'deck.changed'} when api.restoreEntry is called (as the real server does). Click a restore button, await, and assert api.getVersions and api.getHistoryDiff were each called once after the click. They are called twice.",
+   "verdict": "CONFIRMED",
+   "evidence": "History.tsx and history.test.tsx are identical at 18821a9 and HEAD (e451b3f): `git diff 18821a9 HEAD --stat` on both files is empty. For the test I copied the first 99 lines of tests/web/history.test.tsx (stubApi and helpers) into a temporary tests/web/zz_tmp_restore.test.tsx, then deleted it; `git status` was clean afterwards. The temporary test uses a subscribe fake that records the handler, and api.restoreEntry emits {type:'deck.changed'}, as historyService.ts:72 does. It clicks v1, clicks restore on the 'removed' entry, waits about 600ms, and counts calls made after the click.\n\nRun 1, event emitted synchronously inside restoreEntry: `npx vitest run tests/web/zz_tmp_restore.test.tsx -t TMP`\n\u2192 DELTA getVersions 2 getDeck 2 getHistoryDiff 1 getVersionSnapshot 2\n\u2192 AssertionError: expected 2 to be 1\n\nHere the two reload bumps were batched, so the diff ran once.\n\nRun 2, event emitted 100ms later via setTimeout (closer to a real SSE arriving on its own):\n\u2192 DELTA getVersions 2 getDeck 2 getHistoryDiff 2 getVersionSnapshot 4\n\u2192 AssertionError: expected 2 to be 1\n\nThis is the full doubled pipeline the reviewer described: 2x getVersions, 2x getDeck, 4x getVersionSnapshot, 2x getHistoryDiff. The cause is History.tsx:166, where `api.restoreEntry(...).then(() => refresh())` runs alongside the subscribe handler at L113 (`deck.changed` \u2192 refresh). refresh has no sequence guard, so two overlapping calls can land in either order. That ordering part is reasoned from the code, not observed in the test. The existing test at history.test.tsx:100 uses `noEvents`, so it hides the double refresh and even expects getVersions to be called twice.",
+   "fix_hint": "Drop the `.then(() => refresh())` in restore at History.tsx:166 and rely on the server's deck.changed event, or give refresh a request-id guard so a stale response is dropped. Also switch the restore test to a subscribe fake that emits deck.changed."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 65,
+   "severity": "medium",
+   "claim": "restore() auto-closes open lanes whose pending changes no longer apply, but unlike LaneService.accept/refuse/closeLane (laneService.ts:66-72,103) it never calls resolveLaneRemarks or emits remarks.changed. A remark whose sourceLaneId is the closed lane stays 'open' permanently and points at a dead lane.",
+   "repro": "Propose a remark \u2192 agent opens lane L (sourceLaneId=L) with a single pending modify on slide S. Pick two versions where S was removed and POST /api/history/restore with an 'added' entry that deletes S from main. rebaseLane orphans L's change \u2192 L is written status 'closed' and lane.closed is emitted, but GET remarks still shows the remark status 'open' and no remarks.changed event goes out. Run the same scenario through LaneService.accept and the remark becomes 'resolved'.",
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced at HEAD e451b3f. NOTE: 18821a9 does not yet contain resolveLaneRemarks, so the claim's laneService.ts:66-72,103 refs only match HEAD. historyService.ts is identical in both commits. Throwaway test tests/server/zz_tmp_repro2.test.ts (removed afterwards, git status clean) built the app via buildApp with v1=[s1,s2] and v2=[s1,s2,s3]. It then stored open lane L (single pending modify on s3) and remark r1 {status:'open', sourceLaneId:'L'}. It POSTed /api/history/restore {from:1, entry:{kind:'added', slide:'s3', at:2}}. The asserts all passed: lane L status === 'closed', store.remarks()[0].status === 'open', and no 'remarks.changed' event on the bus. Command: `npx vitest run tests/server/zz_tmp_repro2.test.ts`, output: `Test Files 1 passed (1) / Tests 1 passed (1)`. Code cause: historyService.ts:62-76 closes lanes (line 65) and emits lane.updated/lane.closed, but never calls resolveLaneRemarks or emits remarks.changed. LaneService.accept/refuse/closeLane all do both through resolveRemarksOf.",
+   "fix_hint": "Inside restore's withLock, collect the ids of lanes that became closed, run `resolveLaneRemarks(await store.remarks(), closedIds)` and call putRemarks if it returns a list, then emit {type:'remarks.changed'} after the lock (ideally share LaneService's resolveRemarksOf helper)."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 105,
+   "severity": "medium",
+   "claim": "Version existence is checked with store.versions(), which lists every v*.json file. That includes the orphan v{n}.json that DeckStore.commit says a crash before the deck.json write can leave above the committed version (deckStore.ts:184-186). diff, restore and open-as-lane all accept that uncommitted version. The history screen also picks it as the default 'b' because defaultPair and latestOf use the highest n, not deck.state.version.",
+   "repro": "Put a store at state.version=3, then copy versions/v3.json to versions/v4.json with a changed order, which simulates a crash between the version write and the deck.json write. GET /api/history/diff?a=3&b=4 \u2192 200 with entries. POST /api/history/open-as-lane {n:4} \u2192 creates a lane labelled 'v4'. The next real commit overwrites v4.json, so that lane label and any restore 'from:4' cause now point at different content. /history also opens on v3\u2192v4 even though main is v3.",
+   "verdict": "CONFIRMED",
+   "evidence": "Setup: I extracted 18821a9 to /tmp/ds-repro with `git archive`, symlinked node_modules and wrote tests/server/orphan.test.ts. The test does this:\n1. Init the store and make three commits, so state.version=3.\n2. Copy versions/v3.json to v4.json with n=4 and the order reversed, which simulates a crash between the version write and the deck.json write.\n3. buildApp and inject requests.\n\nCommand: `npx vitest run tests/server/orphan.test.ts --reporter=verbose --silent=false`\n\nOutput:\nstate.version 3\ndiff 200 {\"a\":3,\"b\":4,\"entries\":[{\"kind\":\"moved\",\"slide\":\"s3\",\"from\":2,\"to\":0},{\"kind\":\"moved\",\"slide\":\"s2\",\"from\":1,\"to\":1}]}\nopen-as-lane 200 {\"laneId\":\"l_GTtr59OXQB\"}\nlane labels [ 'v4 base=3' ]\nv4 after real commit [ 's1' ]   <- the next real commit overwrote v4.json, so the lane labelled 'v4' now refers to different content\nTest passed.\n\nWhy it happens:\n- HistoryService.diff (historyService.ts:49) and snapshotOf (historyService.ts:105) check existence with `store.versions()`.\n- `store.versions()` (deckStore.ts:206-209) lists every v\\d+.json file and does not bound them by state.version, so the orphan is accepted.\n- restore goes through the same snapshotOf, so it is affected too. I did not run restore separately.\n- In web/src/screens/History.tsx:32-39, defaultPair and latestOf take the highest n from the list, and GET /api/versions returns that list. So the UI defaults to b = 4 while main is v3. I checked this by reading the code, not by rendering the page.\n\nCleanup: /tmp removed, and `git status` in the repo is clean.",
+   "fix_hint": "Make DeckStore.versions() (or a committedVersions helper used by history, /api/versions and snapshotAt) drop any v.n > state().version, so orphan version files are never listed or accepted."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 132,
+   "severity": "high",
+   "claim": "Restoring a 'modified' entry swaps in the whole source slide (copySlide(then)) and ignores entry.fields. Every field edited on main after v<b> gets silently reverted, which breaks the spec's 'restaurer un changement' (undo one entry). The plan says to apply the inverse of one entry, so only entry.fields should come back from v<from>.",
+   "repro": "Temporary vitest built on the tests/server/history.test.ts fixture: v1 = five slides; v2 changes s2.title only; v3 changes s2.body to '<p>later</p>'. GET /api/history/diff?a=1&b=2 \u2192 [{kind:'modified',slide:'s2',fields:['title']}]. POST /api/history/restore {from:1, entry} \u2192 200, and main's s2.body is now '<p>body s2</p>'. The v3 body edit is lost even though the entry only covered 'title'.",
+   "verdict": "CONFIRMED",
+   "evidence": "src/server/historyService.ts is unchanged between 18821a9 and HEAD (e451b3f). In the 'modified' branch of inverse() (~line 132), main's slide is replaced with `{ ...copySlide(then), id }` and entry.fields is never read. Repro: a throwaway vitest file copied the tests/server/history.test.ts fixture into tests/server/zz_repro_tmp2.test.ts. It set v2 to change s2.title only and v3 to change s2.body to '<p>later</p>', checked that diff?a=1&b=2 returns [{kind:'modified',slide:'s2',fields:['title']}], then POSTed /api/history/restore {from:1, entry}. Ran `npx vitest run tests/server/zz_repro_tmp2.test.ts`, then deleted the file. The diff assertion, the restore statusCode 200, and title === 'Title s2' all passed. The body assertion failed:\nAssertionError: expected '<p>body s2</p>' to be '<p>later</p>'\n \u276f tests/server/zz_repro_tmp2.test.ts:71:34  expect(main.slides.s2!.body).toBe('<p>later</p>');\nTests 1 failed (1)\nThe later v3 body edit was silently reverted even though the entry only covered 'title'. The git tree is clean afterwards. An unrelated untracked file, tests/server/zz_throwaway_restore.test.ts, appeared during the run. I did not create it and left it alone.",
+   "fix_hint": "In inverse()'s 'modified' case, build the slide as `{ ...now, ...Object.fromEntries(entry.fields.map(f => [f, then[f]])) }` so only entry.fields come back. Then change the stale check so it compares only those fields, not the full hashSlide."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 172,
+   "severity": "medium",
+   "claim": "open-as-lane anchors each placement 'after' its target predecessor, so the lane only reproduces v<n> when its changes are accepted in list order. The spec allows accepting each change on its own, in any order. Accepted in a different order, main ends up in an order that is not v<n>, the lane closes as if it succeeded, and no orphan is reported.",
+   "repro": "Temporary vitest: v1 order s1..s5; commit v2 with order [s5,s4,s3,s2,s1]; POST /api/history/open-as-lane {n:1} \u2192 changes move s1 after null, s2 after s1, s3 after s2, s4 after s3. Accepting them in reverse through POST /api/lanes/:id/changes/:c/accept gives 200 each time, final main order [s1,s5,s4,s3,s2] (\u2260 v1's [s1,s2,s3,s4,s5]), and the lane status is 'closed'.",
+   "verdict": "CONFIRMED",
+   "evidence": "I reproduced this at commit 18821a9. I ran it in a temporary detached worktree at /tmp/ds-18821a9, which I have since removed. The main checkout was not touched and `git status` there is clean.\n\nI added a throwaway test to tests/server/history.test.ts in that worktree. It sets v1 to s1..s5, commits v2 with order [s5,s4,s3,s2,s1], calls POST /api/history/open-as-lane {n:1}, then accepts the lane's changes in reverse order through POST /api/lanes/:id/changes/:c/accept.\n\nCommand: `npx vitest run tests/server/history.test.ts -t REPRO --reporter=verbose --silent=false`\n\nOutput:\n```\nCHANGES [[\"move\",\"s1\",null],[\"move\",\"s2\",\"s1\"],[\"move\",\"s3\",\"s2\"],[\"move\",\"s4\",\"s3\"]]\nACCEPT s4 200\nACCEPT s3 200\nACCEPT s2 200\nACCEPT s1 200\nMAIN [\"s1\",\"s5\",\"s4\",\"s3\",\"s2\"] V1 [\"s1\",\"s2\",\"s3\",\"s4\",\"s5\"]\nLANE closed [\"accepted\",\"accepted\",\"accepted\",\"accepted\"] orphans? null\n```\n\nEvery accept returns 200. Main ends as [s1,s5,s4,s3,s2], which is not v1's order, and the lane closes with every change marked accepted and no orphan reported. The cause is in `changesToward` (src/server/historyService.ts, around line 172): each placement is anchored \"after\" its predecessor in the target. That only reproduces v<n> when the changes are accepted from left to right. The existing tests (history.test.ts:134 and :152) accept in list order only, so they don't catch this.",
+   "fix_hint": "Make placements independent of accept order. Either express each move/insert as an absolute target index checked against the target, or have accept re-resolve 'after' against the target order and send the lane to orphan/conflict (never 'closed') when main \u2260 target once all changes are accepted. Also add a test that accepts the changes in reverse or shuffled order."
+  }
+ ],
+ "rejected": [],
+ "low": [
+  {
+   "file": "web/src/api.ts",
+   "line": 197,
+   "severity": "low",
+   "claim": "openVersionAsLane casts the response to Lane, but POST /api/history/open-as-lane answers { laneId } (routes/history.ts:54). The returned 'Lane' has no id, changes, and so on. The one current caller ignores the value, but any caller that uses lane.id gets undefined.",
+   "repro": "const l = await openVersionAsLane(1); l.id === undefined; (l as any).laneId holds the real id."
+  },
+  {
+   "file": "web/src/screens/History.tsx",
+   "line": 152,
+   "severity": "low",
+   "claim": "Thumb requests have no generation guard. refresh() clears requested and mainThumbs, but a thumbFor started before the refresh can resolve afterwards and write the old content hash into mainThumbs[id]. thumbsOf then shows main's stale thumbnail for a slide that sameSlide() matches against the new deck.",
+   "repro": "On /history, while thumbFor('s2') is in flight, accept a change that edits s2 on main. deck.changed \u2192 refresh clears state and re-requests s2. If the first (old-hash) response resolves after the second, mainThumbs.s2 holds the pre-edit hash, and the new-version filmstrip shows the old s2 image."
+  },
+  {
+   "file": "web/src/screens/History.tsx",
+   "line": 203,
+   "severity": "low",
+   "claim": "After a restore, refresh() bumps `reload` but keeps `compared` for the same pair. `shown` stays non-null and the old entry list (including the entry just restored) keeps enabled restore buttons until the refetch lands. A second click sends the stale entry, which returns a 409 'entry no longer applies' shown as an actionError.",
+   "repro": "Compare v1 against v2 where v2 is not the latest (so pair.b does not follow the new latest). Click restore on 'removed s3'. As soon as busy clears, before the diff refetch resolves, click restore on the same row again \u2192 POST returns 409 and the header shows the error."
+  },
+  {
+   "file": "tests/web/history.test.tsx",
+   "line": 80,
+   "severity": "low",
+   "claim": "The test titled 'selecting v1 and v3 fetches their diff' shift-clicks v3, but b is already 3 by default, so the shift-click changes nothing. The waitFor at line 81 passes after the first click alone. The test does not show that the screen wires shift-click to b; only the VersionLine unit test covers that. The plan's case ('select v3 and v6', two non-default versions) is not exercised through History.",
+   "repro": "Delete line 80 (the shift-click): the test still passes. Change History.select to ignore `which` and always set `a`: the test still passes."
+  },
+  {
+   "file": "tests/web/history.test.tsx",
+   "line": 100,
+   "severity": "low",
+   "claim": "The restore test stubs getVersions to return the same three versions after the restore, so the 'b follows the new latest version' logic in History.refresh (History.tsx:101) is never exercised. The 409/error path (the actionError alert when restoreEntry rejects) is also untested.",
+   "repro": "Replace History.tsx:101 with `return prev;`: all tests in tests/web/history.test.tsx still pass. Make restoreEntry reject with Error('entry no longer applies'): nothing asserts the role=alert."
+  },
+  {
+   "file": "tests/web/history.test.tsx",
+   "line": 44,
+   "severity": "low",
+   "claim": "The stub openVersionAsLane resolves to a full Lane object, but the real server answers {laneId} and web/src/api.ts casts that to Lane. The stub hides the contract mismatch, so any consumer that reads lane.id from the result gets undefined in production while tests pass.",
+   "repro": "POST /api/history/open-as-lane {n:1} returns {\"laneId\":\"l_...\"} (src/server/routes/history.ts:54). api.openVersionAsLane returns it typed as Lane, so `(await openVersionAsLane(1)).id === undefined`."
+  },
+  {
+   "file": "web/src/screens/History.tsx",
+   "line": 127,
+   "severity": "low",
+   "claim": "The 'a newer selection discards older answers' guard (the `live` flag) is untested. No test resolves diffs out of order, so a regression that shows a stale pair's diff would not be caught.",
+   "repro": "Stub getHistoryDiff with a deferred promise per call. Select v1 (request 1, pending), then v2 (request 2). Resolve request 2, then request 1. Remove `if (live)` at History.tsx:133: the current tests still pass even though the stale pair is then stored in state."
+  },
+  {
+   "file": "src/server/routes/history.ts",
+   "line": 34,
+   "severity": "low",
+   "claim": "GET /api/history/diff returns {a,b,entries}, but the plan's interface (plan line 374) says `-> DiffEntry[]`. The client (api.ts HistoryDiff) follows the implementation, so the plan and the code have drifted apart.",
+   "repro": "GET /api/history/diff?a=1&b=2 returns an object, not an array. Compare with docs/superpowers/plans/2026-09-30-deckstudio.md:374."
+  },
+  {
+   "file": "src/server/routes/history.ts",
+   "line": 12,
+   "severity": "low",
+   "claim": "DiffEntrySchema is defined locally in the route, which duplicates the DiffEntry type in model/types.ts:96, and is then cast with `as DiffEntry`. model/schema.ts holds every other schema, so this one can drift from the type without a compile error.",
+   "repro": "Add a field to DiffEntry.moved in types.ts: routes/history.ts still compiles because of the `as DiffEntry` cast at line 44, and restore requests would have the new field stripped by zod."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 18,
+   "severity": "low",
+   "claim": "The slide content field list is written out three times: PATCH_FIELDS here, PATCH_FIELDS/fieldEqual in model/ops.ts:84, and sameSlide in web/src/screens/History.tsx:42, which lists fields by hand instead of using hashSlide. Adding a Slide field means updating all three, or history diffs, patches and thumbnail reuse will disagree.",
+   "repro": "Add a Slide field such as `layoutHints`. diffVersions sees the change through hashSlide, but History.sameSlide still returns true, so the screen shows main's thumbnail (stale content) for a slide that differs."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 49,
+   "severity": "low",
+   "claim": "diff() re-implements the version-existence check that the private snapshotOf() (line 104) already does, including the error text. It could just call snapshotOf for a and b.",
+   "repro": "Read historyService.ts:49-51 next to 104-107: both build the same list of known versions and throw the same HistoryError(400, 'version N does not exist')."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 49,
+   "severity": "low",
+   "claim": "diff() (and snapshotOf, used by restore and openAsLane at L105) checks that a version exists by calling store.versions(). That readdirs versions/ and reads and Zod-parses every v<n>.json, just to test membership. Every accepted change and every restore adds a version, so each diff request costs O(total versions) file reads plus two snapshotAt reads. The client makes it worse: each pair selection also calls GET /api/versions/:a and /api/versions/:b, and each of those runs store.versions() again (versions.ts:40). So one click on the version line reads all version files 3 times and each snapshot twice. A single access/readJsonOrNull on versions/v<n>.json would give the same answer.",
+   "repro": "Create a deck, accept 500 manual edits (500 version files), then time `curl '/api/history/diff?a=0&b=500'` against a build where the existence check is replaced by an access() on versions/v<n>.json. Or wrap fs.readFile with a counter in a store test: a single history.diff(0,1) call reads (#versions + #slides_a + #slides_b + 2) files instead of #slides_a + #slides_b + 2."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 63,
+   "severity": "low",
+   "claim": "restore() holds the store lock while it rebases every open lane, reads and parses all lane files through store.lanes(), and deep-compares each lane twice with JSON.stringify (L66) before writing. That cost is O(open lanes \u00d7 lane size) and blocks every other store write (accept, slide edit, openAsLane) for as long as it runs. It is the same pattern as the accept path, but restore adds it to a click users are invited to repeat entry by entry. With many agent lanes (arc plus per-slide) each restore click serializes all writers behind a full lane scan.",
+   "repro": "Seed 50 open lanes of 20 pending changes each. POST /api/history/restore for a 'modified' entry while concurrently POSTing /api/slides edits, and measure the edit latency. The edits wait for the whole lane scan and the JSON.stringify comparisons inside withLock."
+  },
+  {
+   "file": "web/src/screens/History.tsx",
+   "line": 153,
+   "severity": "low",
+   "claim": "Answers to thumbFor requests from an earlier refresh are not discarded. refresh clears requested and mainThumbs, but a thumbFor promise already in flight still runs setMainThumbs(prev => ({...prev, [id]: t})) with the hash of the old main content. The effect also re-requests the id, so two requests race and the last one to resolve wins. If the old one lands last, thumbsOf (L200) shows the old main thumbnail for a slide whose version content now equals the new main. The sameSlide check compares against the new deck, not against the content the hash came from.",
+   "repro": "In tests/web/history.test.tsx, make api.thumbFor('s1') return a deferred promise. Render, emit deck.changed with a deck where s1's body changed and matches v_b, and resolve the second thumbFor first (new hash) and the first one after (old hash). The img src for s1 in row-b is /api/thumbs/<oldhash>.png."
+  },
+  {
+   "file": "web/src/screens/History.tsx",
+   "line": 195,
+   "severity": "low",
+   "claim": "thumbsOf rebuilds both sides' thumb maps on every render. Each build calls sameSlide, which JSON.stringifies both slides' assets for every slide. DiffFilmstrips is not memoized, so hovering an entry in the 'what changed' list (onMouseEnter \u2192 setFocused, L264) re-renders the whole screen, re-runs bRowCells and redoes all of these comparisons plus every Thumb. The comparison is 4 \u00d7 N stringify pairs per mouse move across the list.",
+   "repro": "Open /history on a 60-slide deck and compare two distant versions with many entries. Record React Profiler or Chrome Performance while sweeping the mouse down the 'what changed' list. Every hover commit re-renders History, DiffFilmstrips and all ~120 Thumb components."
+  },
+  {
+   "file": "src/server/historyService.ts",
+   "line": 67,
+   "severity": "low",
+   "claim": "restore() commits the new version first and only then rewrites lanes. If putLane throws (for example a LaneSchema.parse failure or a disk error), the route answers 500, but the restore version is already main and deck.changed is never emitted, because the emit sits after withLock resolves. The UI shows 'restore failed' and stays on stale data while main has actually moved.",
+   "repro": "Make lanes/ read-only (chmod 555 <deck>/lanes) with one open lane that the restore changes. POST /api/history/restore \u2192 500, yet state.version has incremented and no bus event was sent. The History screen shows an actionError and does not call refresh(), so it keeps showing the old main until a manual reload."
+  },
+  {
+   "file": "web/src/screens/History.tsx",
+   "line": 152,
+   "severity": "low",
+   "claim": "refresh() clears requested/mainThumbs but does not cancel thumbFor calls already in flight. A thumbFor from before a restore can resolve after the refresh and write the old content's hash into mainThumbs[id]. thumbsOf then shows the old render for a slide whose content changed, until the re-request happens to resolve later.",
+   "repro": "On /history with a slow thumbFor for slide S, click restore on a 'modified' entry for S. The deck.changed refresh clears state and the effect re-requests S. If the first (pre-restore) thumbFor resolves last, setMainThumbs stores the old hash with ready:true, and the filmstrip shows S's old thumbnail next to the new content. A test with deferred promises resolved in reverse order shows it."
+  },
+  {
+   "file": "web/src/api.ts",
+   "line": 197,
+   "severity": "low",
+   "claim": "openVersionAsLane is typed and cast as returning a Lane, but the server answers { laneId } (routes/history.ts:54). Any caller that reads lane.id or lane.changes gets undefined with no error. The one caller today ignores the value and navigates to '/', so the created lane is never focused.",
+   "repro": "const l = await openVersionAsLane(2); console.log(l.id) \u2192 undefined (the body is {\"laneId\":\"l_...\"}). tests/web/history.test.tsx mocks openVersionAsLane, so this mismatch never reaches the network layer in tests."
+  },
+  {
+   "file": "src/server/routes/history.ts",
+   "line": 25,
+   "severity": "low",
+   "claim": "A missing version returns 400 from /api/history/* (HistoryError(400)) but 404 from /api/versions/:n. Also, a corrupted version (a missing object file) makes store.snapshotAt throw a plain Error that fail() rethrows, so the client gets a bare 500 instead of a message naming the missing object.",
+   "repro": "rm <deck>/objects/<hash>.json for a slide in v2. GET /api/history/diff?a=1&b=2 \u2192 500 'Internal Server Error' (Fastify default), while the store error text 'version 2: object ... is missing' goes only to the server log. The History screen shows 'Could not compare: GET ... failed: 500 Internal Server Error'."
+  },
+  {
+   "file": "web/src/api.ts",
+   "line": 197,
+   "severity": "low",
+   "claim": "openVersionAsLane is typed to resolve to Lane, but POST /api/history/open-as-lane returns { laneId } (src/server/routes/history.ts:54). Any caller that reads lane.id/changes from the result gets undefined.",
+   "repro": "(await openVersionAsLane(1)).id === undefined; the response body is {\"laneId\":\"l_...\"} (see the 'open-as-lane builds a lane...' test in tests/server/history.test.ts, which reads res.json().laneId)."
+  },
+  {
+   "file": "src/server/routes/history.ts",
+   "line": 34,
+   "severity": "low",
+   "claim": "The plan's interface says GET /api/history/diff?a&b returns DiffEntry[], but the route returns { a, b, entries }. The web client matches the server, not the plan, so this is contract drift from the plan's Interfaces block.",
+   "repro": "curl 'localhost:<port>/api/history/diff?a=1&b=3' \u2192 {\"a\":1,\"b\":3,\"entries\":[...]} instead of a bare array (the 'diffs two versions' test in tests/server/history.test.ts asserts this shape)."
+  }
+ ]
+}
