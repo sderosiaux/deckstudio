@@ -194,9 +194,9 @@ export async function restoreEntry(from: number, entry: DiffEntry): Promise<void
 }
 
 /** Proposes, as a user lane, the changes that bring current main back to version `n`. */
-export async function openVersionAsLane(n: number): Promise<Lane> {
+export async function openVersionAsLane(n: number): Promise<{ laneId: string }> {
   const res = await send('POST', '/api/history/open-as-lane', { n });
-  return (await res.json()) as Lane;
+  return (await res.json()) as { laneId: string };
 }
 
 /** The lane-related calls, grouped so components can take them as an injectable dependency. */
@@ -247,7 +247,7 @@ export interface HistoryApi {
   getVersionSnapshot(n: number): Promise<Snapshot>;
   getHistoryDiff(a: number, b: number): Promise<HistoryDiff>;
   restoreEntry(from: number, entry: DiffEntry): Promise<void>;
-  openVersionAsLane(n: number): Promise<Lane>;
+  openVersionAsLane(n: number): Promise<{ laneId: string }>;
   thumbFor(slideId: SlideId): Promise<ThumbStatus>;
 }
 
