@@ -215,6 +215,16 @@ describe('server core', () => {
     expect((await app.inject({ method: 'GET', url: '/assets/missing.png' })).statusCode).toBe(404);
   });
 
+  it('GET /fonts/* serves the self-hosted fonts used by the present page', async () => {
+    const res = await app.inject({ method: 'GET', url: '/fonts/Archivo-700.woff2' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toBe('font/woff2');
+    expect(res.rawPayload.subarray(0, 4).toString()).toBe('wOF2');
+    const present = (await app.inject({ method: 'GET', url: '/api/present' })).body;
+    expect(present).toContain('url(/fonts/Archivo-700.woff2)');
+    expect(present).not.toContain('googleapis');
+  });
+
   it('GET /api/present returns one HTML page with every slide of main and the player', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/present' });
     expect(res.statusCode).toBe(200);

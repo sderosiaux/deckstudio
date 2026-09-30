@@ -1,9 +1,19 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import createDOMPurify from 'dompurify';
 import { JSDOM } from 'jsdom';
 import type { Slide } from '../model/types.js';
 
-/** Same web fonts as the original deck; rendering falls back to system fonts when offline. */
-export const FONTS_LINK = '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;800&family=IBM+Plex+Mono:wght@400;700&display=swap">';
+/** Self-hosted Archivo + IBM Plex Mono (same faces as the original deck), so renders never hit the network. */
+export const FONTS_DIR = fileURLToPath(new URL('./fonts/', import.meta.url));
+const FONTS_CSS = readFileSync(`${FONTS_DIR}fonts.css`, 'utf8').trim();
+export const DEFAULT_FONTS_BASE_URL = '/fonts';
+
+/** Inline <style> with the @font-face rules, their src() pointing at fontsBaseUrl. */
+export function fontsStyle(fontsBaseUrl: string = DEFAULT_FONTS_BASE_URL): string {
+  const base = trimSlash(fontsBaseUrl);
+  return `<style data-fonts>${FONTS_CSS.replaceAll('FONT_BASE', base)}</style>`;
+}
 export const STAGE_WIDTH = 1280;
 export const STAGE_HEIGHT = 720;
 
@@ -53,7 +63,7 @@ export function rewriteAssetUrls(body: string, assetsBaseUrl: string): string {
 
 export function assembleSlideHtml(
   slide: Pick<Slide, 'title' | 'body' | 'kind'>,
-  opts: { themeCss: string; assetsBaseUrl: string },
+  opts: { themeCss: string; assetsBaseUrl: string; fontsBaseUrl?: string },
 ): string {
   const body = rewriteAssetUrls(sanitizeBody(slide.body), opts.assetsBaseUrl);
   const strata = /class\s*=\s*["'][^"']*\bstrata\b/.test(body) ? '' : STRATA;
@@ -61,7 +71,7 @@ export function assembleSlideHtml(
   return [
     '<!DOCTYPE html>',
     '<html lang="en"><head><meta charset="UTF-8">',
-    FONTS_LINK,
+    fontsStyle(opts.fontsBaseUrl),
     `<style>${opts.themeCss}</style>`,
     `<style>${STAGE_OVERRIDE}</style>`,
     '</head><body>',

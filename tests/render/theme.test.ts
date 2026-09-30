@@ -49,6 +49,18 @@ describe('assembleSlideHtml', () => {
     expect(html).toContain('url(http://deck.local/assets/bg.png)');
     expect(html).toContain('<img src="https://x.test/a.png">');
   });
+
+  it('inlines self-hosted @font-face rules at fontsBaseUrl (default /fonts) and never links Google Fonts', () => {
+    const def = assembleSlideHtml({ title: 't', kind: 'text', body: '' }, opts);
+    expect(def).not.toContain('googleapis');
+    expect(def).not.toContain('FONT_BASE');
+    expect(def).toContain("font-family:'Archivo'");
+    expect(def).toContain('url(/fonts/Archivo-800.woff2)');
+    expect(def).toContain('url(/fonts/IBMPlexMono-400.woff2)');
+    const custom = assembleSlideHtml({ title: 't', kind: 'text', body: '' }, { ...opts, fontsBaseUrl: 'http://x.test/f/' });
+    expect(custom).toContain('url(http://x.test/f/Archivo-700.woff2)');
+    expect(custom).not.toContain('url(/fonts/');
+  });
 });
 
 describe('sanitizeBody', () => {

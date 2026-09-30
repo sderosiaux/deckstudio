@@ -3,10 +3,12 @@ import { loadThemeCss } from '../../render/defaultTheme.js';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type { Slide } from '../../model/types.js';
-import { assembleSlideHtml, FONTS_LINK } from '../../render/theme.js';
+import { assembleSlideHtml, fontsStyle } from '../../render/theme.js';
 import type { DeckStore } from '../../store/deckStore.js';
 
 const ASSETS_BASE_URL = '/assets';
+// Served by app.ts from src/render/fonts.
+const FONTS_BASE_URL = '/fonts';
 const SECTION_OPEN = '<section class="slide active"';
 
 function escapeHtml(s: string): string {
@@ -80,7 +82,7 @@ export function presentRoutes(app: FastifyInstance, store: DeckStore): void {
       '<html lang="en"><head><meta charset="UTF-8">',
       '<meta name="viewport" content="width=device-width, initial-scale=1.0">',
       `<title>${escapeHtml(state.name)}</title>`,
-      FONTS_LINK,
+      fontsStyle(FONTS_BASE_URL),
       `<style>${themeCss}</style>`,
       '</head><body>',
       '<div id="viewport">',
