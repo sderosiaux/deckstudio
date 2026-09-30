@@ -86,3 +86,17 @@
 - minor · Checks screen, brief panel layout: The 'message in one sentence' textarea overflows its box and overlaps the 'narrative pattern' label. The audience input truncates the text with no wrap.
 - minor · Propose to lane feedback: After 'propose', nothing appeared in the thread and there was no link to the lane once it existed. I polled main for about 2.5 min. The new lane has no provenance label, unlike the 'from check' lanes.
 - minor · Focus screen layout: Before and after are stacked vertically and the after slide is cut off by the lane filmstrip at 900 px height. I had to scroll to see it and to reach accept/refuse.
+
+## M5 persona test (history screen, real UI)
+Scenario completed (compare, restore one entry, open a version as a lane, accept, reload). Ranked frictions:
+1. After a restore, main showed "Could not load the deck" then, after Retry, "Lanes: Failed to fetch" next to the empty state "No open lanes" while 28 lanes existed. Cause on that run: the architect restarted the server mid-test; but Retry only reloads the deck and the empty state hides a failed fetch → both real.
+2. "restore" on an "added in vN" row deletes the slide; the verb never says so (only a tooltip). Comparing against v0 (empty) gives 30 destructive "restore" buttons.
+3. "open vN as a lane" stays enabled when main already equals vN → raw 409 in the header.
+4. A lane opened from history is titled just "vN", lands at the bottom of the lane list with no scroll/confirmation, shows the whole strip with the insert as a second-row "+" card (two cards numbered 2).
+5. Forward compare (older → newer) has no ghost slot in the older row, so rows drift by one after an insert; the selected-thumbnail outline is the same accent as the "changed" marker.
+6. v0 (empty, before import) and v1 both read "imported" with the same timestamp.
+7. from/to selection by click vs shift-click with identical rings; clicking the current "to" gives a vN-vs-vN view.
+8. Version labels: "restored from v1" does not say what it undid; the lane title leaks into the accept label ("· v2").
+9. Version chips on main look clickable but do nothing.
+10. Lane titles keep referring to a slide number after the structure changed; one lane label still shows an internal id.
+Not tested: modified and moved entries (the demo deck's history had none).
