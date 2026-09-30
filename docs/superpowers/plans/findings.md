@@ -112,3 +112,4 @@ Targets rendered from the three mockups with the design plan; five rounds of Opu
 | 5 | 7.2 | 4 | moved hairlines through remark cards, 2px strip gaps, focus card label over the render |
 The round-5 fix landed after that verdict (see the final judge line below). Exit criterion (8) not reached within the five rounds.
 Leftovers the judge kept naming: empty paper under the rail on history (~360px) and main (~230px); alignment of ghost slots when a compare has both adds and removes is per-index, not joint.
+Final judge on the round-5 captures: 7.6, tier 4. Landed: unbroken moved hairlines, one 8px gap and a whole-thumb row end everywhere, same header on the three screens, wrapped what-changed titles. Still blocking: no continuous lane line with accent ticks under lane rows (the memorable element), the history rail not pinned at main's y, the focus "this lane's slides on main" underline on the wrong columns. A sixth round was run on those four directives.
