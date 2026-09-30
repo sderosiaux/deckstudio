@@ -1,7 +1,8 @@
-import type { Anchor, Brief, DeckState, Lane, Slide, SlideId, ThreadKey, ThreadMessage, Version } from '../../src/model/types.js';
+import type { Anchor, Brief, DeckState, Lane, Remark, Slide, SlideId, ThreadKey, ThreadMessage, Version } from '../../src/model/types.js';
 import type { BusEvent } from '../../src/server/bus.js';
+import type { CheckName, ChecksStatus } from '../../src/server/routes/checks.js';
 
-export type { BusEvent };
+export type { BusEvent, CheckName, ChecksStatus };
 
 export type LaneEvent = Extract<BusEvent, { type: 'lane.created' | 'lane.updated' | 'lane.closed' }>;
 export type AssistantEvent = Extract<BusEvent, { type: 'assistant.delta' | 'assistant.done' | 'tool.call' | 'agent.error' }>;
@@ -51,7 +52,7 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-async function send(method: 'POST' | 'DELETE', path: string, body?: unknown): Promise<Response> {
+async function send(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<Response> {
   const init: RequestInit = { method, headers: { accept: 'application/json' } };
   if (body !== undefined) {
     init.headers = { accept: 'application/json', 'content-type': 'application/json' };
@@ -119,6 +120,51 @@ export async function postMessage(key: ThreadKey, text: string, context: Anchor 
   await send('POST', `/api/threads/${seg(key)}/messages`, { text, context });
 }
 
+export function getBrief(): Promise<Brief> {
+  return getJson<Brief>('/api/brief');
+}
+
+export async function putBrief(brief: Brief): Promise<Brief> {
+  const res = await send('PUT', '/api/brief', brief);
+  return (await res.json()) as Brief;
+}
+
+/** Every remark, open ones first. */
+export function getRemarks(): Promise<Remark[]> {
+  return getJson<Remark[]>('/api/remarks');
+}
+
+export interface NewRemark {
+  anchor: Anchor;
+  text: string;
+  severity: Remark['severity'];
+}
+
+export async function postRemark(input: NewRemark): Promise<Remark> {
+  const res = await send('POST', '/api/remarks', input);
+  return (await res.json()) as Remark;
+}
+
+export async function resolveRemark(id: string): Promise<Remark> {
+  const res = await send('POST', `/api/remarks/${seg(id)}/resolve`);
+  return (await res.json()) as Remark;
+}
+
+/** Hands the remark to the co-author on thread `remark:<id>`; the lane it proposes arrives as `lane.created`. */
+export async function proposeRemark(id: string): Promise<void> {
+  await send('POST', `/api/remarks/${seg(id)}/propose`);
+}
+
+/** Starts the checks in the background (all four when `names` is omitted); progress arrives as `checks.status`. */
+export async function runChecks(names?: CheckName[]): Promise<{ started: CheckName[] }> {
+  const res = await send('POST', '/api/checks/run', names ? { names } : {});
+  return (await res.json()) as { started: CheckName[] };
+}
+
+export function getChecksStatus(): Promise<ChecksStatus> {
+  return getJson<ChecksStatus>('/api/checks/status');
+}
+
 /** The lane-related calls, grouped so components can take them as an injectable dependency. */
 export interface LaneApi {
   acceptChange(laneId: string, changeId: string): Promise<unknown>;
@@ -141,14 +187,53 @@ export interface FocusApi extends ThreadApi {
   refuseChange(laneId: string, changeId: string): Promise<Lane>;
 }
 
+/** Remark actions available from a post-it on main. */
+export interface RemarkApi {
+  proposeRemark(id: string): Promise<void>;
+  resolveRemark(id: string): Promise<unknown>;
+}
+
+/** Everything the brief & checks screen reads and writes, injectable for tests. */
+export interface BriefChecksApi {
+  getDeck(): Promise<DeckPayload>;
+  getBrief(): Promise<Brief>;
+  putBrief(brief: Brief): Promise<Brief>;
+  getRemarks(): Promise<Remark[]>;
+  proposeRemark(id: string): Promise<void>;
+  runChecks(names?: CheckName[]): Promise<{ started: CheckName[] }>;
+  getChecksStatus(): Promise<ChecksStatus>;
+  getLanes(): Promise<Lane[]>;
+  thumbFor(slideId: SlideId): Promise<ThumbStatus>;
+}
+
 export const laneApi: LaneApi = { acceptChange, refuseChange, discardLane };
 export const threadApi: ThreadApi = { getThread, postMessage };
 export const focusApi: FocusApi = { getDeck, getLane, getLanePreview, thumbFor, acceptChange, refuseChange, getThread, postMessage };
+export const remarkApi: RemarkApi = { proposeRemark, resolveRemark };
+export const briefChecksApi: BriefChecksApi = { getDeck, getBrief, putBrief, getRemarks, proposeRemark, runChecks, getChecksStatus, getLanes, thumbFor };
 
 /** Client-side routes. The server answers index.html for any non-API path, so these also work on reload. */
 export function focusPath(laneId: string, changeId: string): string {
   return `/lane/${seg(laneId)}/change/${seg(changeId)}`;
 }
+
+/** Main with a slide (or range) selected: `?select=<slideId>` and, for a range, `&to=<slideId>`. Arc selects nothing. */
+export function mainPath(anchor: Anchor): string {
+  if (anchor.kind === 'slide') return `/?select=${seg(anchor.slide)}`;
+  if (anchor.kind === 'range') return `/?select=${seg(anchor.from)}&to=${seg(anchor.to)}`;
+  return '/';
+}
+
+/** Reads what `mainPath` wrote. */
+export function selectionFromSearch(search: string): Anchor | null {
+  const q = new URLSearchParams(search);
+  const from = q.get('select');
+  if (!from) return null;
+  const to = q.get('to');
+  return to && to !== from ? { kind: 'range', from, to } : { kind: 'slide', slide: from };
+}
+
+export const BRIEF_PATH = '/brief';
 
 /** Changes the screen without a page load; App listens to popstate. */
 export function navigate(path: string): void {

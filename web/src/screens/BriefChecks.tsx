@@ -1,0 +1,344 @@
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import type { Anchor, Brief, Lane, Remark, SlideId } from '../../../src/model/types.js';
+import {
+  briefChecksApi,
+  focusPath,
+  mainPath,
+  navigate as defaultNavigate,
+  subscribe as defaultSubscribe,
+  thumbUrl,
+  type BriefChecksApi,
+  type BusEvent,
+  type CheckName,
+  type ChecksStatus,
+  type DeckPayload,
+} from '../api.js';
+import { anchorColumns } from '../components/LaneRow.js';
+import { RemarkCard } from '../components/Remark.js';
+import { Thumb } from '../components/Thumb.js';
+
+export interface BriefChecksProps {
+  api?: BriefChecksApi;
+  subscribe?(handler: (e: BusEvent) => void): () => void;
+  navigate?(path: string): void;
+}
+
+export const CHECK_ROWS: { name: CheckName; label: string }[] = [
+  { name: 'arc', label: 'narrative arc' },
+  { name: 'order', label: 'concept order' },
+  { name: 'gaps', label: 'gaps vs abstract' },
+  { name: 'render', label: 'render' },
+];
+
+const PATTERNS: { value: Brief['pattern']; label: string }[] = [
+  { value: 'solution-first', label: 'solution first, then decompose' },
+  { value: 'problem-driven', label: 'problem by problem, build up' },
+];
+
+type Load = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; deck: DeckPayload };
+type Save = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } | { kind: 'error'; message: string };
+
+const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+const sameBrief = (a: Brief, b: Brief): boolean =>
+  a.title === b.title && a.audience === b.audience && a.message === b.message && a.pattern === b.pattern && a.abstract === b.abstract;
+const openOf = (rs: Remark[], name: CheckName): Remark[] => rs.filter((r) => r.status === 'open' && r.origin === `check:${name}`);
+const hasWarn = (rs: Remark[], name: CheckName): boolean => openOf(rs, name).some((r) => r.severity === 'warn');
+
+/** Focus route for the first pending change of an open lane; undefined when nothing is left to review. */
+function laneHref(lanes: Lane[], laneId: string | null): string | undefined {
+  const lane = laneId ? lanes.find((l) => l.id === laneId && l.status === 'open') : undefined;
+  const first = lane?.changes.find((c) => c.status === 'pending');
+  return lane && first ? focusPath(lane.id, first.id) : undefined;
+}
+
+const card: CSSProperties = { background: 'var(--card)', borderRadius: 14, boxShadow: '0 1px 2px rgba(23,23,26,.04), 0 0 0 1px var(--line)', padding: 24, minHeight: 0, overflow: 'auto' };
+const h2: CSSProperties = { margin: '0 0 18px', fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' };
+const fieldLabel: CSSProperties = { display: 'block', fontSize: 14, fontWeight: 600, margin: '16px 0 8px' };
+const input: CSSProperties = { width: '100%', padding: '10px 14px', borderRadius: 8, border: '1px solid var(--line)', background: 'var(--card)', font: 'inherit', fontSize: 14, color: 'var(--ink)' };
+
+function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
+  const [draft, setDraft] = useState<Brief>(initial);
+  const saved = useRef<Brief>(initial);
+  const [save, setSave] = useState<Save>({ kind: 'idle' });
+
+  const persist = useCallback(
+    (next: Brief): void => {
+      if (sameBrief(next, saved.current)) return;
+      setSave({ kind: 'saving' });
+      api.putBrief(next).then(
+        (b) => {
+          saved.current = b;
+          setSave({ kind: 'saved' });
+        },
+        (err: unknown) => setSave({ kind: 'error', message: message(err) }),
+      );
+    },
+    [api],
+  );
+
+  const text = (key: 'title' | 'audience' | 'message' | 'abstract', label: string, multiline = false) => {
+    const common = {
+      id: `brief-${key}`,
+      value: draft[key],
+      onBlur: () => persist(draft),
+      style: multiline ? { ...input, minHeight: 72, resize: 'vertical' as const } : input,
+    };
+    return (
+      <>
+        <label htmlFor={common.id} style={fieldLabel}>{label}</label>
+        {multiline ? (
+          <textarea {...common} rows={key === 'abstract' ? 6 : 2} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} />
+        ) : (
+          <input {...common} type="text" onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} />
+        )}
+      </>
+    );
+  };
+
+  return (
+    <section style={card} aria-label="brief">
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+        <h2 style={h2}>brief</h2>
+        <span data-testid="brief-save" style={{ fontSize: 12, color: save.kind === 'error' ? 'var(--warn)' : 'var(--grey)' }}>
+          {save.kind === 'saving' ? 'saving…' : save.kind === 'saved' ? 'saved' : save.kind === 'error' ? `not saved: ${save.message}` : ''}
+        </span>
+      </div>
+      {text('title', 'title')}
+      {text('audience', 'audience')}
+      {text('message', 'message in one sentence', true)}
+      <fieldset style={{ border: 'none', padding: 0, margin: 0 }}>
+        <legend style={fieldLabel}>narrative pattern</legend>
+        {PATTERNS.map((p) => (
+          <label key={p.value} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 0', cursor: 'pointer' }}>
+            <input
+              type="radio"
+              name="brief-pattern"
+              value={p.value}
+              checked={draft.pattern === p.value}
+              onChange={() => {
+                // A radio has no meaningful blur: the choice is the commit.
+                const next = { ...draft, pattern: p.value };
+                setDraft(next);
+                persist(next);
+              }}
+              style={{ accentColor: 'var(--accent)', width: 18, height: 18 }}
+            />
+            {p.label}
+          </label>
+        ))}
+      </fieldset>
+      {text('abstract', 'abstract', true)}
+    </section>
+  );
+}
+
+/** Brief on the left, the four checks and their remarks in the middle, the deck on the right with anchored slides lit. */
+export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe, navigate = defaultNavigate }: BriefChecksProps) {
+  const [load, setLoad] = useState<Load>({ status: 'loading' });
+  const [brief, setBrief] = useState<Brief | null>(null);
+  const [remarks, setRemarks] = useState<Remark[]>([]);
+  const [lanes, setLanes] = useState<Lane[]>([]);
+  const [status, setStatus] = useState<ChecksStatus | null>(null);
+  const [thumbs, setThumbs] = useState<Record<SlideId, string | undefined>>({});
+  const [expanded, setExpanded] = useState<ReadonlySet<CheckName>>(new Set());
+  const [runError, setRunError] = useState<string | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  // Rows with warnings open by default, decided once on the first remarks load so a user's collapse sticks.
+  const autoExpanded = useRef(false);
+  const pendingThumbs = useRef(new Map<string, SlideId>());
+
+  const reportLive = useCallback((err: unknown) => setLiveError(message(err)), []);
+
+  const loadThumb = useCallback(
+    async (id: SlideId) => {
+      const t = await api.thumbFor(id);
+      if (t.ready) {
+        pendingThumbs.current.delete(t.hash);
+        setThumbs((prev) => ({ ...prev, [id]: thumbUrl(t.hash) }));
+      } else {
+        pendingThumbs.current.set(t.hash, id);
+      }
+    },
+    [api],
+  );
+
+  const loadDeck = useCallback(async () => {
+    try {
+      const deck = await api.getDeck();
+      setLoad({ status: 'ready', deck });
+      for (const id of deck.order) await loadThumb(id);
+    } catch (err) {
+      setLoad({ status: 'error', message: message(err) });
+    }
+  }, [api, loadThumb]);
+
+  const loadRemarks = useCallback(async () => {
+    const [rs, ls] = await Promise.all([api.getRemarks(), api.getLanes()]);
+    setRemarks(rs);
+    setLanes(ls);
+    setLiveError(null);
+    if (!autoExpanded.current) {
+      autoExpanded.current = true;
+      setExpanded(new Set(CHECK_ROWS.filter((c) => hasWarn(rs, c.name)).map((c) => c.name)));
+    }
+  }, [api]);
+
+  const loadStatus = useCallback(async () => setStatus(await api.getChecksStatus()), [api]);
+
+  useEffect(() => {
+    void loadDeck();
+    api.getBrief().then(setBrief, (err: unknown) => setLoad({ status: 'error', message: message(err) }));
+    loadRemarks().catch(reportLive);
+    loadStatus().catch(reportLive);
+    return subscribe((e) => {
+      if (e.type === 'remarks.changed') loadRemarks().catch(reportLive);
+      else if (e.type === 'lane.created' || e.type === 'lane.updated' || e.type === 'lane.closed') api.getLanes().then(setLanes, reportLive);
+      else if (e.type === 'checks.status') loadStatus().catch(reportLive);
+      else if (e.type === 'deck.changed') void loadDeck();
+      else if (e.type === 'thumb.ready') {
+        const id = pendingThumbs.current.get(e.hash);
+        if (id) loadThumb(id).catch(reportLive);
+      }
+    });
+  }, [api, subscribe, loadDeck, loadRemarks, loadStatus, loadThumb, reportLive]);
+
+  const run = (): void => {
+    setRunError(null);
+    api.runChecks().then(
+      () => loadStatus().catch(reportLive),
+      (err: unknown) => setRunError(message(err)),
+    );
+  };
+
+  const toggle = (name: CheckName): void =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+
+  if (load.status === 'error') {
+    return (
+      <div style={{ padding: 32 }}>
+        <p style={{ color: 'var(--warn)', fontWeight: 700 }}>Could not load the deck.</p>
+        <p className="muted mono">{load.message}</p>
+        <button type="button" onClick={() => void loadDeck()}>Retry</button>
+      </div>
+    );
+  }
+  if (load.status === 'loading' || !brief) return <div style={{ padding: 32 }} className="muted">Loading brief and checks…</div>;
+
+  const { deck } = load;
+  const running = new Set(status?.running ?? []);
+  const show = (anchor: Anchor): void => navigate(mainPath(anchor));
+  // Slides pointed at by an open remark of an expanded check, or by any open check remark when none is expanded.
+  const lit = new Set<SlideId>();
+  const litFrom = expanded.size > 0 ? CHECK_ROWS.filter((c) => expanded.has(c.name)) : CHECK_ROWS;
+  for (const c of litFrom) {
+    for (const r of openOf(remarks, c.name)) {
+      if (r.anchor.kind === 'arc') continue;
+      const cols = anchorColumns(r.anchor, deck.order);
+      if (cols) for (const id of deck.order.slice(cols.start, cols.start + cols.span)) lit.add(id);
+    }
+  }
+  const lastRunLabel = (name: CheckName): string => {
+    if (running.has(name)) return 'running…';
+    const at = status?.lastRun[name];
+    return at ? `last run ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'not run yet';
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <header style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '16px 24px' }}>
+        <a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }} style={{ color: 'var(--grey)', textDecoration: 'none', fontWeight: 600 }}>
+          ← main
+        </a>
+        <span className="muted mono">{deck.state.name} · v{deck.state.version}</span>
+        {runError ? <span style={{ color: 'var(--warn)', fontSize: 13 }}>{runError}</span> : null}
+        <button
+          type="button"
+          onClick={run}
+          disabled={running.size === CHECK_ROWS.length}
+          style={{ marginLeft: 'auto', padding: '11px 22px', borderRadius: 10, border: 'none', background: 'var(--accent)', color: '#fff', fontWeight: 700, fontSize: 15, cursor: 'pointer', opacity: running.size === CHECK_ROWS.length ? 0.6 : 1 }}
+        >
+          {running.size > 0 ? 'checks running…' : 'run checks'}
+        </button>
+      </header>
+      <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(300px, 1fr) minmax(380px, 1.2fr) minmax(300px, 1fr)', gap: 16, padding: '0 20px 20px' }}>
+        <BriefCard initial={brief} api={api} />
+
+        <section style={card} aria-label="checks">
+          <h2 style={h2}>checks</h2>
+          {liveError ? <p style={{ color: 'var(--warn)', fontSize: 12 }}>Remarks: {liveError}</p> : null}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {CHECK_ROWS.map(({ name, label }) => {
+              const open = openOf(remarks, name);
+              const warn = hasWarn(remarks, name);
+              const isOpen = expanded.has(name);
+              return (
+                <div key={name} data-testid="check-row" data-check={name} style={{ border: '1px solid var(--line)', borderRadius: 10 }}>
+                  <button
+                    type="button"
+                    aria-expanded={isOpen}
+                    onClick={() => toggle(name)}
+                    style={{ all: 'unset', boxSizing: 'border-box', width: '100%', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px' }}
+                  >
+                    <span
+                      data-testid="check-dot"
+                      data-status={warn ? 'warn' : 'ok'}
+                      aria-label={warn ? 'has warnings' : 'no warnings'}
+                      style={{ width: 16, height: 16, borderRadius: '50%', background: warn ? 'var(--warn)' : 'var(--ok)', flex: '0 0 auto' }}
+                    />
+                    <span style={{ fontWeight: 700, fontSize: 16 }}>{label}</span>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      {open.length ? `${open.length} remark${open.length > 1 ? 's' : ''} · ` : ''}
+                      {lastRunLabel(name)}
+                    </span>
+                    <span aria-hidden style={{ marginLeft: 'auto', color: 'var(--grey)', transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s ease' }}>⌄</span>
+                  </button>
+                  {isOpen ? (
+                    <div data-testid="check-remarks" style={{ padding: '0 12px 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {open.length === 0 ? (
+                        <p className="muted" style={{ margin: '0 6px', fontSize: 13 }}>
+                          {status?.lastRun[name] ? 'Nothing to flag.' : 'Not run yet. Use "run checks" to get remarks here.'}
+                        </p>
+                      ) : (
+                        open.map((r) => (
+                          <RemarkCard
+                            key={r.id}
+                            remark={r}
+                            order={deck.order}
+                            onShow={show}
+                            onPropose={(id) => api.proposeRemark(id)}
+                            laneHref={laneHref(lanes, r.laneId)}
+                            onOpenLane={navigate}
+                          />
+                        ))
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section style={card} aria-label="slides">
+          <h2 style={{ ...h2, fontSize: 18 }}>slides</h2>
+          {deck.order.length === 0 ? (
+            <p className="muted">No slides yet. Import a deck.html into the folder, then run checks.</p>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, var(--thumb-w))', gap: 'var(--col-gap)', justifyContent: 'center' }}>
+              {deck.order.map((id, i) => (
+                <div key={id} data-testid="brief-thumb" data-slide={id} data-lit={lit.has(id)} style={{ opacity: lit.has(id) ? 1 : 0.45, transition: 'opacity .15s ease' }}>
+                  <Thumb slideId={id} n={i + 1} title={deck.slides[id]?.title ?? id} url={thumbs[id]} selected={lit.has(id)} onClick={() => show({ kind: 'slide', slide: id })} />
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}

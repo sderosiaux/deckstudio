@@ -11,9 +11,11 @@ import { DeckStore } from '../store/deckStore.js';
 import { Bus } from './bus.js';
 import { LaneService } from './laneService.js';
 import { briefRoutes } from './routes/brief.js';
+import { checkRoutes } from './routes/checks.js';
 import { deckRoutes } from './routes/deck.js';
 import { laneRoutes } from './routes/lanes.js';
 import { presentRoutes } from './routes/present.js';
+import { remarkRoutes } from './routes/remarks.js';
 import { slideRoutes } from './routes/slides.js';
 import { threadRoutes } from './routes/threads.js';
 import { thumbRoutes } from './routes/thumbs.js';
@@ -69,6 +71,9 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   thumbRoutes(app, store, opts.thumbs, bus);
   presentRoutes(app, store);
   laneRoutes(app, store, new LaneService(store, bus), opts.thumbs, bus);
-  threadRoutes(app, store, opts.agent ?? defaultAgent(store, opts.thumbs, bus, (await store.state()).model));
+  const agent = opts.agent ?? defaultAgent(store, opts.thumbs, bus, (await store.state()).model);
+  threadRoutes(app, store, agent);
+  remarkRoutes(app, store, agent, bus);
+  checkRoutes(app, bus);
   return app;
 }
