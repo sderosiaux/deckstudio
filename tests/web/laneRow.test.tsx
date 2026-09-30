@@ -110,8 +110,57 @@ describe('LaneRow', () => {
     render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
     const cells = screen.getAllByTestId('lane-cell');
     expect(cells.map((c) => c.getAttribute('data-slide'))).toEqual(['s4', 's2', 's3']);
-    // s4 now sits in lane column 1 (deck column 1) and was at deck column 3: two columns right
-    expect(within(cells[0]!).getByTestId('move-connector').getAttribute('data-delta')).toBe('2');
+    // s4 now goes after s1, so it sits under main column 0 and was at column 3: three columns right.
+    // The region widens to include column 0.
+    expect(cells.map((c) => c.getAttribute('data-col'))).toEqual(['0', '1', '2']);
+    expect(within(cells[0]!).getByTestId('move-connector').getAttribute('data-delta')).toBe('3');
+    expect(screen.getByTestId('lane-region').style.gridColumn).toBe('1 / span 4');
+  });
+
+  it('gives buttons to a pending change on a slide outside the anchor range', () => {
+    const modifyS5: Change = { id: 'c5', kind: 'modify', slide: 's5', patch: { title: 'New s5' }, reason: 'r', status: 'pending' };
+    const p: LanePreviewPayload = { order, slides: { ...mainSlides, s5: slide('s5', 'New s5') }, skipped: [], thumbs: {} };
+    render(<LaneRow lane={lane({ changes: [modifyS5] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    expect(screen.getByRole('button', { name: 'accept change c5' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'refuse change c5' })).toBeTruthy();
+    const cell = screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === 's5')!;
+    expect(cell.getAttribute('data-col')).toBe('4');
+  });
+
+  it('places every cell under its own main column, inserts stacked in the column they follow', () => {
+    const insertAfterS3: Change = { id: 'c2', kind: 'insert', after: 's3', slide: slide('n1', 'Hook'), reason: 'hook', status: 'pending' };
+    const modifyS5: Change = { id: 'c5', kind: 'modify', slide: 's5', patch: { title: 'New s5' }, reason: 'r', status: 'pending' };
+    const p: LanePreviewPayload = {
+      order: ['s1', 's2', 's3', 'n1', 's4', 's5'],
+      slides: { ...mainSlides, n1: slide('n1', 'Hook'), s5: slide('s5', 'New s5') },
+      skipped: [],
+      thumbs: {},
+    };
+    render(<LaneRow lane={lane({ changes: [insertAfterS3, modifyS5] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    const region = screen.getByTestId('lane-region');
+    const start = Number(region.getAttribute('data-col-start'));
+    const at = (id: string) => screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === id)!;
+    // modify on s5 sits under deck column 5 (0-based 4), both by attribute and by its grid placement in the region
+    expect(at('s5').getAttribute('data-col')).toBe('4');
+    expect(Number(at('s5').style.gridColumn) + start).toBe(5);
+    expect(at('s4').getAttribute('data-col')).toBe('3');
+    // the inserted slide sits in s3's column, on the row below s3
+    expect(at('n1').getAttribute('data-col')).toBe('2');
+    expect(at('s3').style.gridColumn).toBe(at('n1').style.gridColumn);
+    expect(at('s3').style.gridRow).toBe('1');
+    expect(at('n1').style.gridRow).toBe('2');
+    // the thumb numbers follow the main columns
+    expect(within(at('s5')).getByTestId('thumb').getAttribute('aria-label')).toBe('Slide 5: New s5');
+  });
+
+  it('shows the failed card for a lane thumb whose hash failed, and clicking it retries the preview', () => {
+    const onRetry = vi.fn();
+    render(<LaneRow lane={lane()} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} failedThumbs={new Set(['hs3'])} onRetryThumbs={onRetry} onOpenChange={vi.fn()} />);
+    const cell = screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === 's3')!;
+    expect(cell.getAttribute('data-thumb-failed')).toBe('true');
+    expect((within(cell).getByTestId('thumb-image') as HTMLImageElement).getAttribute('src')).toMatch(/^data:image\/svg\+xml/);
+    fireEvent.click(within(cell).getByTestId('thumb'));
+    expect(onRetry).toHaveBeenCalledWith('l1');
   });
 });
 
@@ -165,6 +214,20 @@ describe('Thread', () => {
     emit({ type: 'assistant.done', thread: 'global', messageId: 'm2' });
     await waitFor(() => screen.queryByTestId('thread-streaming') === null);
     expect(screen.getAllByTestId('thread-message').map((m) => m.getAttribute('data-role'))).toEqual(['user', 'assistant']);
+  });
+
+  it('on hello (socket reopened) drops the partial stream and tool, and reloads the stored thread', async () => {
+    const { api, emit, subscribe, stored } = setup();
+    render(<Thread threadKey="global" context={{ kind: 'arc' }} order={order} slides={mainSlides} api={api} subscribe={subscribe} />);
+    await waitFor(() => (api.getThread as ReturnType<typeof vi.fn>).mock.calls.length === 1);
+    emit({ type: 'assistant.delta', thread: 'global', text: 'partial' });
+    emit({ type: 'tool.call', thread: 'global', name: 'mcp__deck__get_deck' });
+    expect(screen.getByTestId('thread-streaming')).toBeTruthy();
+    stored.push({ id: 'm2', thread: 'global', role: 'assistant', text: 'full reply', context: null, at: '2026-09-30T10:00:05.000Z' });
+    emit({ type: 'hello', version: null });
+    await waitFor(() => screen.queryAllByTestId('thread-message').length === 1);
+    expect(screen.queryByTestId('thread-streaming')).toBeNull();
+    expect(screen.getByTestId('thread-message').textContent).toContain('full reply');
   });
 });
 

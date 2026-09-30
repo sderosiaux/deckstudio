@@ -1,7 +1,13 @@
 import type { Anchor, Brief, DeckState, Lane, Slide, SlideId, ThreadKey, ThreadMessage, Version } from '../../src/model/types.js';
-import type { BusEvent } from '../../src/server/bus.js';
+import type { BusEvent as ServerBusEvent } from '../../src/server/bus.js';
 
-export type { BusEvent };
+/**
+ * `hello` arrives on every (re)open of the socket. `subscribe` emits it itself with `version: null`
+ * (the client cannot know the server's version); the server may also send its own with the deck version.
+ * Either way, events sent while the socket was down are lost, so a hello means "resync".
+ */
+export type HelloEvent = { type: 'hello'; version: number | null };
+export type BusEvent = ServerBusEvent | HelloEvent;
 
 export type LaneEvent = Extract<BusEvent, { type: 'lane.created' | 'lane.updated' | 'lane.closed' }>;
 export type AssistantEvent = Extract<BusEvent, { type: 'assistant.delta' | 'assistant.done' | 'tool.call' | 'agent.error' }>;
@@ -161,7 +167,7 @@ const BACKOFF_MAX_MS = 10_000;
 
 /**
  * Listens to server events over /ws. Reconnects with exponential backoff (reset after a successful open)
- * until the returned function is called.
+ * until the returned function is called. Every open, first or not, delivers `{ type: 'hello', version: null }`.
  */
 export function subscribe(handler: (e: BusEvent) => void): () => void {
   let socket: WebSocket | null = null;
@@ -176,6 +182,7 @@ export function subscribe(handler: (e: BusEvent) => void): () => void {
     socket = ws;
     ws.onopen = () => {
       delay = BACKOFF_MIN_MS;
+      if (!closed && socket === ws) handler({ type: 'hello', version: null });
     };
     ws.onmessage = (msg: MessageEvent) => {
       if (typeof msg.data !== 'string') return;
