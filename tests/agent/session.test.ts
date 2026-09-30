@@ -9,7 +9,7 @@ import { ThumbService } from '../../src/render/thumbs.js';
 import { buildApp } from '../../src/server/app.js';
 import { Bus, type BusEvent } from '../../src/server/bus.js';
 import { DeckStore } from '../../src/store/deckStore.js';
-import type { Brief, Lane, Slide, Snapshot, ThreadMessage } from '../../src/model/types.js';
+import type { Brief, Lane, Remark, Slide, Snapshot, ThreadMessage } from '../../src/model/types.js';
 import { tmpDir } from '../helpers/tmp.js';
 import { waitFor } from '../helpers/waitFor.js';
 import { themeCss } from '../render/themeCss.js';
@@ -149,6 +149,46 @@ describe('AgentSession', () => {
     await s.send('global', 'and now?', { kind: 'slide', slide: 's1' });
     expect(fake.calls[1]!.options.resume).toBe('sess-1');
     expect(fake.calls[1]!.prompt).toContain('Selected: slide s1');
+  });
+
+  it('lane thread header lists every change and the revise-or-fork instruction', async () => {
+    const fake = fakeQuery(async function* () {
+      yield assistant('ok');
+      yield success('sess-l');
+    });
+    await session(fake.impl).send('lane:l1', 'give me another take', null);
+    const prompt = fake.calls[0]!.prompt;
+    expect(prompt).toContain('c1 · modify · "Title s2" (s2) · the claim is buried under the setup · pending');
+    expect(prompt).toContain('c2 · remove · "Title s4" (s4) · repeats slide three · pending');
+    expect(prompt).toContain('Anchor slides: "Title s2" (s2), "Title s3" (s3), "Title s4" (s4)');
+    expect(prompt).toContain('call revise_lane on it (laneId "l1")');
+    expect(prompt).toContain('call propose_lane with a new label and mention both lanes');
+  });
+
+  it('remark thread header carries the remark text and the link_remark_lane instruction', async () => {
+    const remark: Remark = {
+      id: 'r1',
+      anchor: { kind: 'slide', slide: 's3' },
+      text: 'offsets are used before they are introduced',
+      origin: 'check:order',
+      severity: 'warn',
+      status: 'open',
+      laneId: null,
+      createdAt: '2026-09-30T00:00:00.000Z',
+    };
+    await store.putRemarks([remark]);
+    const fake = fakeQuery(async function* () {
+      yield assistant('ok');
+      yield success('sess-r');
+    });
+    await session(fake.impl).send('remark:r1', 'Propose a lane for this remark', null);
+    const prompt = fake.calls[0]!.prompt;
+    expect(prompt).toContain('offsets are used before they are introduced');
+    expect(prompt).toContain('Severity: warn');
+    expect(prompt).toContain('Anchor slides: "Title s3" (s3)');
+    expect(prompt).toContain('call propose_lane with anchor {"kind":"slide","slide":"s3"}');
+    expect(prompt).toContain('link_remark_lane({"remarkId":"r1","laneId":<the new lane id>})');
+    expect(prompt.endsWith('\n\nPropose a lane for this remark')).toBe(true);
   });
 
   it('does not stream tool input as text and reports tool calls', async () => {
