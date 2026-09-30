@@ -1,7 +1,8 @@
 import { useState, type CSSProperties } from 'react';
-import type { Anchor, Change, Lane, SlideId } from '../../../src/model/types.js';
-import { focusPath, navigate, thumbUrl, type LaneApi, type LanePreviewPayload } from '../api.js';
+import type { Anchor, Change, Lane, Remark, SlideId } from '../../../src/model/types.js';
+import { focusPath, navigate, remarkApi as defaultRemarkApi, thumbUrl, type LaneApi, type LanePreviewPayload, type RemarkApi } from '../api.js';
 import { ChangeButtons } from './ChangeButtons.js';
+import { RemarkPostIt } from './Remark.js';
 import { Thumb } from './Thumb.js';
 
 export interface LaneRowProps {
@@ -18,6 +19,9 @@ export interface LaneRowProps {
   failedThumbs?: ReadonlySet<string>;
   /** Re-requests the lane preview, which re-enqueues its thumbnails. */
   onRetryThumbs?(laneId: string): void;
+  /** Open remarks raised by a check on this lane's content (`sourceLaneId === lane.id`), pinned under the cell they anchor to. */
+  remarks?: readonly Remark[];
+  remarkApi?: RemarkApi;
 }
 
 // Shown in the thumb slot when the server reports a failed render; clicking that thumb re-requests it.
@@ -27,6 +31,16 @@ export const FAILED_THUMB = `data:image/svg+xml,${encodeURIComponent(
 )}`;
 
 const NO_FAILED: ReadonlySet<string> = new Set();
+const NO_REMARKS: readonly Remark[] = [];
+
+/** Lane slide a lane-scoped remark points at: the slide itself, or the first slide of a range in lane order. Null for arc. */
+function remarkSlide(anchor: Anchor, laneOrder: readonly SlideId[]): SlideId | null {
+  if (anchor.kind === 'arc') return null;
+  if (anchor.kind === 'slide') return anchor.slide;
+  const a = laneOrder.indexOf(anchor.from);
+  const b = laneOrder.indexOf(anchor.to);
+  return a >= 0 && b >= 0 && b < a ? anchor.to : anchor.from;
+}
 
 const openFocus = (laneId: string, changeId: string): void => navigate(focusPath(laneId, changeId));
 
@@ -138,7 +152,18 @@ function originTag(origin: Lane['origin']): string | null {
  * One open lane, laid out under main: the row uses the same column grid as the filmstrip and the lane
  * occupies only its anchor's columns, so each proposed slide sits under the slide it replaces.
  */
-export function LaneRow({ lane, preview, mainOrder, mainThumbs, api, onOpenChange = openFocus, failedThumbs = NO_FAILED, onRetryThumbs }: LaneRowProps) {
+export function LaneRow({
+  lane,
+  preview,
+  mainOrder,
+  mainThumbs,
+  api,
+  onOpenChange = openFocus,
+  failedThumbs = NO_FAILED,
+  onRetryThumbs,
+  remarks = NO_REMARKS,
+  remarkApi = defaultRemarkApi,
+}: LaneRowProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -162,6 +187,16 @@ export function LaneRow({ lane, preview, mainOrder, mainThumbs, api, onOpenChang
   const region = regionColumns(cols, cells);
   const skipped = preview ? lane.changes.filter((c) => c.status === 'pending' && preview.skipped.includes(c.id)) : [];
   const tag = originTag(lane.origin);
+  // Remarks pinned to a shown cell go under it; the rest (arc, or a slide not in the row) under the cells.
+  const cellIds = new Set(cells.map((c) => c.id));
+  const pinned = new Map<SlideId, Remark[]>();
+  const loose: Remark[] = [];
+  for (const r of remarks) {
+    const id = remarkSlide(r.anchor, preview?.order ?? []);
+    if (id !== null && cellIds.has(id)) pinned.set(id, [...(pinned.get(id) ?? []), r]);
+    else loose.push(r);
+  }
+  const postIt = (r: Remark) => <RemarkPostIt key={r.id} remark={r} onPropose={remarkApi.proposeRemark} onResolve={remarkApi.resolveRemark} />;
 
   const thumbFailed = (id: SlideId): boolean => {
     const t = preview?.thumbs[id];
@@ -269,10 +304,20 @@ export function LaneRow({ lane, preview, mainOrder, mainThumbs, api, onOpenChang
                   {cell.changes.map((c) => (
                     <ChangeButtons key={c.id} change={c} disabled={busy} onAccept={accept} onRefuse={refuse} />
                   ))}
+                  {(pinned.get(cell.id) ?? []).map(postIt)}
                 </div>
               ))}
             </div>
           )}
+          {preview && loose.length > 0 ? (
+            <div data-testid="lane-remarks" style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {loose.map((r) => (
+                <div key={r.id} style={{ width: 'var(--thumb-w)' }}>
+                  {postIt(r)}
+                </div>
+              ))}
+            </div>
+          ) : null}
           {skipped.length > 0 ? (
             <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
               {skipped.map((c) => (

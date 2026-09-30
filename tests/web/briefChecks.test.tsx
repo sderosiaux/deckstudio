@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { BriefChecks } from '../../web/src/screens/BriefChecks.js';
 import { RemarkPostIt, anchorLabel } from '../../web/src/components/Remark.js';
 import { mainPath, selectionFromSearch, type BriefChecksApi, type BusEvent, type ChecksStatus, type DeckPayload } from '../../web/src/api.js';
@@ -133,7 +133,6 @@ describe('BriefChecks', () => {
     expect(lit()).toEqual(['s3', 's4', 's5', 's6']);
 
     fireEvent.click(screen.getByRole('button', { name: 'run checks' }));
-    await waitFor(() => api.getChecksStatus.mock.calls.length >= 2);
     expect(api.runChecks).toHaveBeenCalledWith();
   });
 
@@ -160,6 +159,47 @@ describe('BriefChecks', () => {
     push({ type: 'remarks.changed' });
     await waitFor(() => within(row('arc')).getByTestId('check-dot').getAttribute('data-status') === 'warn');
     expect(within(row('order')).getByTestId('check-dot').getAttribute('data-status')).toBe('ok');
+  });
+});
+
+describe('BriefChecks live status', () => {
+  it('applies checks.status events from their payload: one status fetch on mount, none per event, one on a reconnect', async () => {
+    const api = stubApi();
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    // the initial status (arc ran, render never) has landed
+    await waitFor(() => row('arc').textContent?.includes('last run'));
+    expect(row('render').textContent).toContain('not run yet');
+    const runBtn = () => screen.getByRole('button', { name: /checks/ });
+
+    act(() => push({ type: 'checks.status', running: ['arc', 'render'] }));
+    expect(row('render').textContent).toContain('running…');
+    expect(runBtn().textContent).toBe('checks running…');
+    act(() => push({ type: 'checks.status', running: ['render'] }));
+    expect(row('arc').textContent).not.toContain('running…');
+    act(() => push({ type: 'checks.status', running: [] }));
+    expect(row('render').textContent).toContain('last run');
+    expect(runBtn().textContent).toBe('run checks');
+    expect(api.getChecksStatus).toHaveBeenCalledTimes(1);
+
+    // First open of the socket: the mount already loaded. A reopen means lost events: resync.
+    act(() => push({ type: 'hello', version: null }));
+    expect(api.getChecksStatus).toHaveBeenCalledTimes(1);
+    act(() => push({ type: 'hello', version: null }));
+    await waitFor(() => api.getChecksStatus.mock.calls.length === 2);
+  });
+
+  it('lane-scoped remarks do not light a check red, count, or show in its list', async () => {
+    const api = stubApi();
+    api.getRemarks.mockResolvedValue([remark('r_lane', { origin: 'check:render', anchor: { kind: 'slide', slide: 's3' }, sourceLaneId: 'l1' })]);
+    render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('brief-thumb').length === 6);
+    await waitFor(() => api.getRemarks.mock.calls.length === 1 && api.getLanes.mock.calls.length === 1);
+    expect(within(row('render')).getByTestId('check-dot').getAttribute('data-status')).toBe('ok');
+    fireEvent.click(header('render'));
+    expect(within(row('render')).queryAllByTestId('remark')).toHaveLength(0);
+    expect(screen.getAllByTestId('brief-thumb').filter((t) => t.getAttribute('data-lit') === 'true')).toHaveLength(0);
   });
 });
 

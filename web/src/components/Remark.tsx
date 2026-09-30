@@ -95,7 +95,7 @@ export interface PostItProps {
 
 const POST_IT_CHARS = 90;
 
-/** A remark pinned under its slide on main: truncated text, propose, resolve. */
+/** A remark pinned under its slide: truncated text, propose, resolve. Fills its container's width (a column, or the columns of a range). */
 export function RemarkPostIt({ remark, onPropose, onResolve }: PostItProps) {
   const [state, setState] = useState<{ kind: 'idle' } | { kind: 'busy' } | { kind: 'sent' } | { kind: 'error'; message: string }>({ kind: 'idle' });
   const act = (fn: () => Promise<unknown>, after: 'idle' | 'sent'): void => {
@@ -113,7 +113,8 @@ export function RemarkPostIt({ remark, onPropose, onResolve }: PostItProps) {
       data-remark={remark.id}
       title={remark.text}
       style={{
-        width: 'var(--thumb-w)',
+        boxSizing: 'border-box',
+        width: '100%',
         padding: '8px 10px',
         borderRadius: 6,
         background: warn ? '#FDF1EC' : '#FBF6E3',

@@ -41,7 +41,8 @@ type Save = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } | { kind: 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const sameBrief = (a: Brief, b: Brief): boolean =>
   a.title === b.title && a.audience === b.audience && a.message === b.message && a.pattern === b.pattern && a.abstract === b.abstract;
-const openOf = (rs: Remark[], name: CheckName): Remark[] => rs.filter((r) => r.status === 'open' && r.origin === `check:${name}`);
+// Remarks from a lane-scoped run describe that lane's preview, not main: they are shown on the lane row, not here.
+const openOf = (rs: Remark[], name: CheckName): Remark[] => rs.filter((r) => r.status === 'open' && r.origin === `check:${name}` && !r.sourceLaneId);
 const hasWarn = (rs: Remark[], name: CheckName): boolean => openOf(rs, name).some((r) => r.severity === 'warn');
 
 /** Focus route for the first pending change of an open lane; undefined when nothing is left to review. */
@@ -49,6 +50,16 @@ function laneHref(lanes: Lane[], laneId: string | null): string | undefined {
   const lane = laneId ? lanes.find((l) => l.id === laneId && l.status === 'open') : undefined;
   const first = lane?.changes.find((c) => c.status === 'pending');
   return lane && first ? focusPath(lane.id, first.id) : undefined;
+}
+
+const CHECK_NAMES: ReadonlySet<string> = new Set(CHECK_ROWS.map((c) => c.name));
+
+/** Applies a `checks.status` event: `running` is taken as is, a check that left it is stamped as just run. */
+export function applyRunning(prev: ChecksStatus | null, running: readonly string[], now: string): ChecksStatus {
+  const next = running.filter((n): n is CheckName => CHECK_NAMES.has(n));
+  const lastRun = { ...(prev?.lastRun ?? { arc: null, order: null, gaps: null, render: null }) };
+  for (const name of prev?.running ?? []) if (!next.includes(name)) lastRun[name] = now;
+  return { running: next, lastRun };
 }
 
 const card: CSSProperties = { background: 'var(--card)', borderRadius: 14, boxShadow: '0 1px 2px rgba(23,23,26,.04), 0 0 0 1px var(--line)', padding: 24, minHeight: 0, overflow: 'auto' };
@@ -190,10 +201,18 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
     api.getBrief().then(setBrief, (err: unknown) => setLoad({ status: 'error', message: message(err) }));
     loadRemarks().catch(reportLive);
     loadStatus().catch(reportLive);
+    let opens = 0;
     return subscribe((e) => {
-      if (e.type === 'remarks.changed') loadRemarks().catch(reportLive);
+      if (e.type === 'hello') {
+        // Events sent while the socket was down are lost: resync, except on the first open (the mount just loaded).
+        if (e.version !== null || ++opens > 1) {
+          loadStatus().catch(reportLive);
+          loadRemarks().catch(reportLive);
+        }
+      } else if (e.type === 'remarks.changed') loadRemarks().catch(reportLive);
       else if (e.type === 'lane.created' || e.type === 'lane.updated' || e.type === 'lane.closed') api.getLanes().then(setLanes, reportLive);
-      else if (e.type === 'checks.status') loadStatus().catch(reportLive);
+      // The event carries the running list: no refetch per event.
+      else if (e.type === 'checks.status') setStatus((prev) => applyRunning(prev, e.running, new Date().toISOString()));
       else if (e.type === 'deck.changed') void loadDeck();
       else if (e.type === 'thumb.ready') {
         const id = pendingThumbs.current.get(e.hash);
@@ -204,10 +223,8 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
 
   const run = (): void => {
     setRunError(null);
-    api.runChecks().then(
-      () => loadStatus().catch(reportLive),
-      (err: unknown) => setRunError(message(err)),
-    );
+    // Progress arrives as checks.status events; merging `started` here could re-mark a check that already finished.
+    api.runChecks().catch((err: unknown) => setRunError(message(err)));
   };
 
   const toggle = (name: CheckName): void =>
