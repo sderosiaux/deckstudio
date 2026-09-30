@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Event-Driven Memory for LLM Agent Swarms</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--paper:#FAF9F6;--ink:#17171A;--accent:#E4572E;--grey:#7A7873;--grey-2:#8C8983;--line:#D9D6CF;--card:#FFFFFF;--display:'Archivo',system-ui,sans-serif;--mono:'IBM Plex Mono',ui-monospace,monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#E9E7E1;overflow:hidden;font-family:var(--display);color:var(--ink)}
+#viewport{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+.slide{width:1280px;height:720px;background:var(--paper);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) scale(var(--s,1));transform-origin:center;display:none;overflow:hidden;padding:72px 96px}
+.slide.active{display:block}
+.notes{display:none}
+.eyebrow{font-size:28px;letter-spacing:.14em;text-transform:uppercase;color:var(--grey);font-weight:500}
+h1{font-size:96px;line-height:.98;letter-spacing:-.03em;font-weight:800}
+h2{font-size:82px;line-height:1;letter-spacing:-.03em;font-weight:800}
+.big{font-size:64px;line-height:1.12;letter-spacing:-.02em;font-weight:700}
+.cap{font-size:32px;line-height:1.3;color:var(--grey)}
+.acc{color:var(--accent)}
+.grey{color:var(--grey)}
+.strata{position:absolute;left:0;right:0;height:120px;pointer-events:none}
+.strata i{display:block;height:2px;background:var(--line);margin:0 0 22px}
+.strata i.a{background:var(--accent)}
+.strata.thin{height:60px;top:664px}
+.strata.thin i{margin:0 0 14px}
+svg text{font-family:var(--display)}
+svg .m{font-family:var(--mono)}
+.mono{position:absolute;background:var(--card);border:0;border-left:5px solid var(--ink);border-radius:10px;box-shadow:0 4px 12px rgba(23,23,26,.10);padding:16px 22px;font:28px/1.35 var(--mono);color:var(--ink);white-space:pre}
+.code{position:absolute;left:96px;top:186px;width:1088px;background:var(--card);border-radius:12px;box-shadow:0 6px 18px rgba(23,23,26,.10);padding:16px 26px 14px;font:18px/1.3 var(--mono);color:var(--ink);white-space:pre;overflow:hidden}
+.code .kw{font-weight:700}.code .st{color:var(--accent)}.code .cm{color:var(--grey)}
+.code .src{position:absolute;right:20px;bottom:10px;font-size:17px;color:var(--grey)}
+#story-btn{position:fixed;right:24px;top:22px;width:44px;height:44px;border-radius:22px;border:2px solid var(--line);background:var(--card);color:var(--grey);font:700 22px var(--display);cursor:pointer;z-index:5;display:flex;align-items:center;justify-content:center}
+#story-btn:hover{border-color:var(--ink);color:var(--ink)}
+body.story #story-btn{background:var(--accent);border-color:var(--accent);color:#fff}
+#story{position:fixed;right:24px;top:76px;width:480px;max-height:70vh;overflow:auto;background:var(--card);border-radius:12px;box-shadow:0 8px 24px rgba(23,23,26,.16);padding:22px 26px;font:24px/1.4 var(--display);color:var(--ink);z-index:5;display:none;white-space:normal}
+body.story #story{display:block}
+#story b{display:block;font-size:14px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
+#hud{position:fixed;right:18px;bottom:12px;font:14px var(--mono);color:#8A8A8A;user-select:none;display:none}
+body.hud #hud{display:block}
+</style>
+</head>
+<body>
+<div id="viewport">
+<section class="slide">
+  <div class="story" hidden>The whole picture first, then we build it from the bottom. Governance on top, projections above the log, disposable compute below. The log is the recorded truth; everything else is derived or replaceable.</div>
+  <h2 style="position:absolute;left:96px;top:72px">One log, everything derived</h2>
+  <img src="assets/s02.png" alt="" style="position:absolute;left:96px;top:176px;width:1088px;height:454px;object-fit:contain;object-position:center top">
+    <div class="strata thin"><i></i><i></i><i></i></div>
+  <aside class="notes">Four bands. Governance on top of every read and every tool call. Three families of projections. The log in the middle: messages, tasks, tool calls, results, corrections. Compute below, all of it disposable. It grows incrementally: a projection per new read pattern, a worker class per new execution pattern, the durable history underneath. Said, not shown: The log records truth. Projections are derived. Compute is disposable. External systems stay the source of truth for the facts they own.</aside>
+</section>
+
+<section class="slide">
+  <div class="story" hidden>The share consumer in six lines. Records are leased, not assigned; each one is acknowledged on its own: ACCEPT when the tool ran, RELEASE so another worker retries, REJECT for poison. One detail worth saying: a share group refuses auto.offset.reset, the start position is a group config on the broker.</div>
+  <h2 style="position:absolute;left:96px;top:72px">Lease, ack, release</h2>
+  <div class="code"><span class="src">ShareGroup.java · Kafka 4.3</span><span class="kw">var</span> props = Kafka.consumer(group);
+props.remove(<span class="st">&quot;auto.offset.reset&quot;</span>);                   <span class="cm">// the broker decides where to start</span>
+props.put(<span class="st">&quot;share.acknowledgement.mode&quot;</span>, <span class="st">&quot;explicit&quot;</span>); <span class="cm">// we acknowledge per record</span>
+
+<span class="kw">try</span> (<span class="kw">var</span> worker = <span class="kw">new</span> KafkaShareConsumer&lt;<span class="kw">String</span>, <span class="kw">String</span>&gt;(props)) {
+    worker.subscribe(List.of(topic));
+    <span class="kw">while</span> (done &lt; 5) {
+        <span class="kw">for</span> (<span class="kw">var</span> rec : worker.poll(Duration.ofSeconds(1))) {   <span class="cm">// leased, not owned</span>
+            <span class="kw">try</span> {
+                run(rec.value());                                  <span class="cm">// slow, non-deterministic</span>
+                worker.acknowledge(rec, AcknowledgeType.ACCEPT);   <span class="cm">// done</span>
+                done++;
+            } <span class="kw">catch</span> (RuntimeException transientFailure) {
+                worker.acknowledge(rec, AcknowledgeType.RELEASE);  <span class="cm">// someone else retries</span>
+            }
+        }
+        worker.commitSync();                                       <span class="cm">// flush the acks</span>
+    }
+}</div>
+  <div class="strata thin"><i></i><i></i><i></i></div>
+  <aside class="notes">Run against Kafka 4.3.0: five jobs, one transient failure released and redelivered, five acknowledged. share.acknowledgement.mode=explicit is what makes the per-record decision ours; implicit mode acknowledges on the next poll. The broker-side start position: kafka-configs --entity-type groups --add-config share.auto.offset.reset=earliest.</aside>
+</section>
+
+<section class="slide">
+  <div class="story" hidden>What a learned decision looks like on the wire: a bounded question in, a typed answer with probabilities out. No free text to parse. This is what a router or a triage step should call.</div>
+  <h2 style="position:absolute;left:96px;top:72px">Typed in, typed out</h2>
+  <div style="position:absolute;top:186px;width:528px;height:456px;background:var(--card);border:0;border-radius:12px;box-shadow:0 6px 18px rgba(23,23,26,.10);padding:18px 20px;font:22px/1.25 var(--mono);color:var(--ink);white-space:pre;left:96px;border-top:6px solid var(--ink)"><span class="grey" style="font-weight:700">POST /v1/systemone</span>
+{
+  <span style="color:#7A7873">"state"</span>: "fan 100 %, VPN down",
+  <span style="color:#7A7873">"model"</span>: "jev-latest",
+  <span style="color:#7A7873">"questions"</span>: {
+    <span style="color:#7A7873">"route"</span>: {
+      <span style="color:#7A7873">"type"</span>: "choice",
+      <span style="color:#7A7873">"criteria"</span>: [
+        "windows", "network", "macos"
+      ]
+    }
+  }
+}</div>
+  <div style="position:absolute;top:186px;width:528px;height:456px;background:var(--card);border:0;border-radius:12px;box-shadow:0 6px 18px rgba(23,23,26,.10);padding:18px 20px;font:22px/1.25 var(--mono);color:var(--ink);white-space:pre;left:656px;border-top:6px solid var(--accent)"><span class="acc" style="font-weight:700">200 OK</span>
+{
+  <span style="color:#7A7873">"model"</span>: "jev-1.13.0",
+  <span style="color:#7A7873">"answers"</span>: {
+    <span style="color:#7A7873">"route"</span>: {
+      <span style="color:#7A7873">"choice"</span>: <span class="acc" style="font-weight:700">"windows"</span>,
+      <span style="color:#7A7873">"probabilities"</span>: {
+        "windows": <span class="acc" style="font-weight:700">0.91</span>,
+        "network": <span class="acc" style="font-weight:700">0.06</span>,
+        "macos": <span class="acc" style="font-weight:700">0.03</span>
+      },
+      <span style="color:#7A7873">"confidence"</span>: <span class="acc" style="font-weight:700">0.91</span>
+    }
+  }
+}</div>
+  <svg viewBox="0 0 1280 720" style="position:absolute;inset:0" width="1280" height="720" aria-hidden="true">
+    <line x1="628" y1="414" x2="644" y2="414" stroke="#17171A" stroke-width="4"/><polygon points="640,403 656,414 640,425" fill="#17171A"/>
+  </svg>
+  <div class="strata thin"><i></i><i></i><i></i></div>
+  <aside class="notes">What a learned decision looks like on the wire. State is the text or JSON to judge; questions are typed: noul for a yes/no probability, choice for one option among yours, score for an ordered level. The answer is constrained to the options you supplied, with probabilities and a confidence; no free text to parse. This is the call a router or a triage step makes instead of a generative prompt. Endpoint POST api.typesafe.ai/v1/systemone; the case and the probabilities are illustrative, the schema is TypeSafe AI's documented System One API. Note: the real request writes criteria as an object of option → description; the array here is a shorthand for the slide.</aside>
+</section>
+</div>
+</body></html>
