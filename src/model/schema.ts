@@ -40,7 +40,7 @@ export const LaneSchema = z.object({
   origin: OriginSchema,
   baseVersion: z.number().int().nonnegative(),
   changes: z.array(ChangeSchema),
-  status: z.enum(['open', 'closed']),
+  status: z.enum(['draft', 'open', 'closed']),
   createdAt: z.string(),
 });
 export const RemarkSchema = z.object({

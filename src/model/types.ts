@@ -51,7 +51,7 @@ export interface Lane {
   origin: Origin;
   baseVersion: number;
   changes: Change[];
-  status: 'open' | 'closed';
+  status: 'draft' | 'open' | 'closed';
   createdAt: string;
 }
 
