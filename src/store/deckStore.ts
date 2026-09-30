@@ -156,7 +156,8 @@ export class DeckStore {
       if (!hash) throw new Error(`version ${n} lists slide "${id}" without an object hash`);
       const obj = await readJsonOrNull(this.path('objects', `${hash}.json`), SlideSchema);
       if (!obj) throw new Error(`version ${n}: object ${hash} for slide "${id}" is missing`);
-      slides[id] = obj;
+      // Objects are shared by content: the stored id is whichever slide wrote it first, so the key wins.
+      slides[id] = { ...obj, id };
     }
     return { order: v.order, slides };
   }
@@ -178,8 +179,10 @@ export class DeckStore {
     }
     const { version } = await this.state();
     const n = version + 1;
-    if (await exists(this.path('versions', `v${n}.json`))) throw new Error(`version ${n} already exists`);
 
+    // Write order makes deck.json the single commit point: objects, then the version file, then deck.json,
+    // then the slides/ working copy. A crash before deck.json leaves at most an orphan v{n}.json above the
+    // committed version, which the next commit overwrites.
     const hashes: Record<SlideId, string> = {};
     for (const id of next.order) {
       const s = next.slides[id]!;
@@ -188,12 +191,12 @@ export class DeckStore {
       const objPath = this.path('objects', `${hash}.json`);
       // Objects are content-addressed; the id is not part of the hash, so the stored id is whichever wrote it first.
       if (!(await exists(objPath))) await writeJsonAtomic(objPath, s);
-      await writeJsonAtomic(this.path('slides', `${id}.json`), s);
     }
     const v: Version = { n, order: [...next.order], slides: hashes, cause, createdAt: new Date().toISOString() };
     await writeJsonAtomic(this.path('versions', `v${n}.json`), v);
     await this.updateState((s) => ({ ...s, order: [...next.order], version: n }));
 
+    for (const id of next.order) await writeJsonAtomic(this.path('slides', `${id}.json`), next.slides[id]!);
     for (const f of await readdir(this.path('slides'))) {
       if (f.endsWith('.json') && !seen.has(f.slice(0, -5))) await rm(this.path('slides', f), { force: true });
     }

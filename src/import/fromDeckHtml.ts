@@ -2,9 +2,9 @@ import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { nanoid } from 'nanoid';
 import { parse, type HTMLElement, type Node } from 'node-html-parser';
-import type { Brief, DeckState, Slide, SlideKind, Snapshot, VersionCause } from '../model/types.js';
+import type { Brief, Slide, SlideKind, Snapshot, VersionCause } from '../model/types.js';
 
-/** The slice of DeckStore the importer needs. The real store is wired at integration. */
+/** The slice of DeckStore the importer needs; callers pass DeckStore itself. */
 export interface DeckWriter {
   init(dir: string, name: string, brief: Brief): Promise<{ commit(next: Snapshot, cause: VersionCause): Promise<unknown> }>;
 }
@@ -18,10 +18,8 @@ export interface ImportOptions {
   outDir: string;
   name: string;
   brief: Brief;
-  store?: DeckWriter;
+  store: DeckWriter;
 }
-
-const DEFAULT_MODEL = 'claude-opus-5';
 
 const newSlideId = (): string => `s_${nanoid(10)}`;
 const collapse = (s: string): string => s.replace(/\s+/g, ' ').trim();
@@ -95,8 +93,8 @@ async function exists(p: string): Promise<boolean> {
 
 /**
  * Import a single-file HTML deck (one `<section class="slide">` per slide) into a deck folder.
- * The importer owns theme.css and assets/; deck.json, brief.json and slides/ go through `store`
- * when given, otherwise they are written here in the store's layout at version 1.
+ * The importer owns theme.css and assets/; everything else goes through `store` (init gives v0,
+ * the import commit gives v1).
  */
 export async function importDeckHtml(opts: ImportOptions): Promise<ImportResult> {
   const { html, htmlDir, outDir, name, brief, store } = opts;
@@ -128,23 +126,13 @@ export async function importDeckHtml(opts: ImportOptions): Promise<ImportResult>
     slides: Object.fromEntries(parsed.map((p) => [p.slide.id, p.slide])),
   };
 
-  const writer = store ? await store.init(outDir, name, brief) : null;
+  const writer = await store.init(outDir, name, brief);
 
   await mkdir(join(outDir, 'assets'), { recursive: true });
   for (const [n, abs] of allSources) await copyFile(abs, join(outDir, 'assets', n));
   await writeFile(join(outDir, 'theme.css'), themeCss);
 
-  if (writer) {
-    await writer.commit(snapshot, { kind: 'import' });
-  } else {
-    await mkdir(join(outDir, 'slides'), { recursive: true });
-    for (const s of Object.values(snapshot.slides)) {
-      await writeFile(join(outDir, 'slides', `${s.id}.json`), JSON.stringify(s, null, 2) + '\n');
-    }
-    await writeFile(join(outDir, 'brief.json'), JSON.stringify(brief, null, 2) + '\n');
-    const deck: DeckState = { name, order: snapshot.order, version: 1, sessionId: null, model: DEFAULT_MODEL };
-    await writeFile(join(outDir, 'deck.json'), JSON.stringify(deck, null, 2) + '\n');
-  }
+  await writer.commit(snapshot, { kind: 'import' });
 
   return { dir: outDir, slides: parsed.length, assetsCopied: allSources.size, themeCss };
 }

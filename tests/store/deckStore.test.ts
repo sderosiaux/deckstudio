@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { access, readdir, readFile } from 'node:fs/promises';
+import { access, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DeckStore } from '../../src/store/deckStore.js';
 import { hashSlide } from '../../src/model/ids.js';
-import type { Brief, Lane, Remark, Slide, Snapshot, ThreadMessage } from '../../src/model/types.js';
+import type { Brief, Lane, Remark, Slide, Snapshot, ThreadMessage, Version } from '../../src/model/types.js';
 import { tmpDir } from '../helpers/tmp.js';
 
 const brief: Brief = { title: 'T', audience: 'devs', message: 'm', pattern: 'problem-driven', abstract: 'a' };
@@ -140,6 +140,35 @@ describe('DeckStore', () => {
     expect((await reopened.state()).sessionId).toBe('sess-1');
     await reopened.setSessionId(null);
     expect((await store.state()).sessionId).toBeNull();
+  });
+
+  it('snapshotAt gives each slide its version key as id even when two slides share an object', async () => {
+    const store = await DeckStore.init(dir, 'demo', brief);
+    const a = slide('a', 'same');
+    const b = { ...a, id: 'b' };
+    expect(hashSlide(a)).toBe(hashSlide(b));
+    await store.commit(snap(a, b), { kind: 'import' });
+    await store.commit(snap(slide('c')), { kind: 'accept', laneId: 'l', changeId: 'c' });
+    const at1 = await store.snapshotAt(1);
+    expect(at1).toEqual(snap(a, b));
+    const v3 = await store.commit(at1, { kind: 'restore', from: 1, entry: 'x' });
+    expect(v3.n).toBe(3);
+    expect(await store.snapshot()).toEqual(snap(a, b));
+  });
+
+  it('recovers from a crash that left an orphan version file above deck.json', async () => {
+    const store = await DeckStore.init(dir, 'demo', brief);
+    await store.commit(snap(slide('a')), { kind: 'import' });
+    const orphan: Version = { n: 2, order: ['zz'], slides: { zz: hashSlide(slide('zz')) }, cause: { kind: 'import' }, createdAt: '2026-09-30T00:00:00Z' };
+    await writeFile(join(dir, 'versions', 'v2.json'), JSON.stringify(orphan));
+    const v2 = await store.commit(snap(slide('a'), slide('b')), { kind: 'accept', laneId: 'l', changeId: 'c' });
+    expect(v2.n).toBe(2);
+    const state = await store.state();
+    expect(state).toMatchObject({ version: 2, order: ['a', 'b'] });
+    const onDisk = (await store.versions()).find((v) => v.n === 2);
+    expect(onDisk).toEqual(v2);
+    expect(onDisk?.order).toEqual(state.order);
+    expect(await store.snapshotAt(2)).toEqual(await store.snapshot());
   });
 
   it('setSessionId racing a commit loses neither update', async () => {

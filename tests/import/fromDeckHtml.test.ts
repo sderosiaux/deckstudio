@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { importDeckHtml, type DeckWriter } from '../../src/import/fromDeckHtml.js';
-import { DeckStateSchema, SlideSchema, BriefSchema } from '../../src/model/schema.js';
+import { importDeckHtml, type DeckWriter, type ImportOptions } from '../../src/import/fromDeckHtml.js';
+import { DeckStateSchema, SlideSchema, BriefSchema, VersionSchema } from '../../src/model/schema.js';
+import { DeckStore } from '../../src/store/deckStore.js';
 import type { Brief, Snapshot, VersionCause } from '../../src/model/types.js';
 import { tmpDir } from '../helpers/tmp.js';
 
@@ -18,7 +19,7 @@ describe('importDeckHtml', () => {
   it('imports three sections into a deck folder', async () => {
     const html = await readFile(join(fixtures, 'deck-3.html'), 'utf8');
     const outDir = join(out.dir, 'deck');
-    const res = await importDeckHtml({ html, htmlDir: fixtures, outDir, name: 'mini', brief });
+    const res = await importDeckHtml({ html, htmlDir: fixtures, outDir, name: 'mini', brief, store: DeckStore });
 
     expect(res).toMatchObject({ dir: outDir, slides: 3, assetsCopied: 1 });
     expect(res.themeCss).toContain('.slide{');
@@ -28,6 +29,11 @@ describe('importDeckHtml', () => {
     expect(deck).toMatchObject({ name: 'mini', version: 1, sessionId: null, model: 'claude-opus-5' });
     expect(deck.order).toHaveLength(3);
     for (const id of deck.order) expect(id).toMatch(/^s_[A-Za-z0-9_-]{10}$/);
+    const v0 = VersionSchema.parse(JSON.parse(await readFile(join(outDir, 'versions', 'v0.json'), 'utf8')));
+    const v1 = VersionSchema.parse(JSON.parse(await readFile(join(outDir, 'versions', 'v1.json'), 'utf8')));
+    expect(v0).toMatchObject({ n: 0, order: [] });
+    expect(v1).toMatchObject({ n: 1, order: deck.order, cause: { kind: 'import' } });
+    expect(await readdir(join(outDir, 'objects'))).toHaveLength(3);
     expect(BriefSchema.parse(JSON.parse(await readFile(join(outDir, 'brief.json'), 'utf8')))).toEqual(brief);
 
     const slides = await Promise.all(
@@ -64,7 +70,7 @@ describe('importDeckHtml', () => {
 <section class="slide"><h2>Words &amp; more</h2><p>hi</p></section>
 <section class="slide"><h2>End</h2></section>
 </body></html>`;
-    const res = await importDeckHtml({ html, htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief });
+    const res = await importDeckHtml({ html, htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief, store: DeckStore });
     expect(res.assetsCopied).toBe(0);
     const deck = JSON.parse(await readFile(join(out.dir, 'd', 'deck.json'), 'utf8')) as { order: string[] };
     const slides = await Promise.all(deck.order.map(async (id) => JSON.parse(await readFile(join(out.dir, 'd', 'slides', `${id}.json`), 'utf8')) as { kind: string; title: string; body: string }));
@@ -77,7 +83,7 @@ describe('importDeckHtml', () => {
     const html = `<html><head><style>.slide{}</style></head><body>
 <section class="slide"><h1>Event-Driven Memory<br>for LLM <span class="acc">Agent Swarms</span></h1><aside class="notes">n</aside></section>
 </body></html>`;
-    await importDeckHtml({ html, htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief });
+    await importDeckHtml({ html, htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief, store: DeckStore });
     const deck = JSON.parse(await readFile(join(out.dir, 'd', 'deck.json'), 'utf8')) as { order: string[] };
     const s = SlideSchema.parse(JSON.parse(await readFile(join(out.dir, 'd', 'slides', `${deck.order[0]}.json`), 'utf8')));
     expect(s).toMatchObject({ story: '', notes: 'n', title: 'Event-Driven Memory for LLM Agent Swarms', kind: 'cover' });
@@ -86,7 +92,7 @@ describe('importDeckHtml', () => {
 
   it('fails loudly when a referenced asset is missing', async () => {
     const html = `<html><head><style>.slide{}</style></head><body><section class="slide"><h2>x</h2><img src="nope/missing.png"></section></body></html>`;
-    await expect(importDeckHtml({ html, htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief })).rejects.toThrow(/missing\.png/);
+    await expect(importDeckHtml({ html, htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief, store: DeckStore })).rejects.toThrow(/missing\.png/);
   });
 
   it('rejects two different sources sharing a basename', async () => {
@@ -95,21 +101,27 @@ describe('importDeckHtml', () => {
     await mkdir(join(out.dir, 'sub'));
     await writeFile(join(out.dir, 'sub', 'a.png'), 'b');
     const html = `<html><head><style>.slide{}</style></head><body><section class="slide"><h2>x</h2><img src="a.png"></section><section class="slide"><h2>y</h2><img src="sub/a.png"></section></body></html>`;
-    await expect(importDeckHtml({ html, htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief })).rejects.toThrow(/a\.png/);
+    await expect(importDeckHtml({ html, htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief, store: DeckStore })).rejects.toThrow(/a\.png/);
   });
 
   it('refuses to import over an existing deck', async () => {
     const html = await readFile(join(fixtures, 'deck-3.html'), 'utf8');
     const outDir = join(out.dir, 'deck');
-    await importDeckHtml({ html, htmlDir: fixtures, outDir, name: 'mini', brief });
-    await expect(importDeckHtml({ html, htmlDir: fixtures, outDir, name: 'mini', brief })).rejects.toThrow(/already holds a deck/);
+    await importDeckHtml({ html, htmlDir: fixtures, outDir, name: 'mini', brief, store: DeckStore });
+    await expect(importDeckHtml({ html, htmlDir: fixtures, outDir, name: 'mini', brief, store: DeckStore })).rejects.toThrow(/already holds a deck/);
   });
 
   it('throws when there is no <section class="slide">', async () => {
-    await expect(importDeckHtml({ html: '<html><body></body></html>', htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief })).rejects.toThrow(/section/);
+    await expect(importDeckHtml({ html: '<html><body></body></html>', htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief, store: DeckStore })).rejects.toThrow(/section/);
   });
 
-  it('delegates persistence to a store when given', async () => {
+  it('requires a store: there is no fallback writer', () => {
+    // @ts-expect-error store is mandatory
+    const opts: ImportOptions = { html: '', htmlDir: out.dir, outDir: join(out.dir, 'd'), name: 'k', brief };
+    expect(opts.store).toBeUndefined();
+  });
+
+  it('delegates persistence to the store', async () => {
     const calls: { dir: string; name: string; brief: Brief; commits: { next: Snapshot; cause: VersionCause }[] } = { dir: '', name: '', brief, commits: [] };
     const store: DeckWriter = {
       async init(dir, name, b) {
