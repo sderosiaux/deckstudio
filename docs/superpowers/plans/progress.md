@@ -10,3 +10,5 @@
 - M1 review: 7 lenses, 23 confirmed / 0 rejected (docs/superpowers/plans/review-m1.json, findings.md). Fixes running as three parallel agents (security / store+model / render).
 ## M2
 - Wave A (Tasks 8, 9): done, merged. Verified: 134 tests green. Notes: tools ctx has runCheck; link_remark_lane added; lane preview returns thumbs map for changed slides; orphan-only lanes get closed (open question for the UI).
+- M1 fixes: three agents (security / store+model / render) merged; one import conflict in theme.ts resolved. Verified: `pnpm typecheck && pnpm test` → 159 tests green; /fonts served; CSP on /api/present; thumbnails re-rendered with vendored fonts.
+- M1 complete.
