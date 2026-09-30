@@ -25,7 +25,7 @@ export function thumbRoutes(app: FastifyInstance, store: DeckStore, thumbs: Thum
           () => bus.emit({ type: 'thumb.ready', hash, slideId: slide.id }),
           (err: unknown) => {
             app.log.error({ err, slideId: slide.id }, 'thumbnail render failed');
-            bus.emit({ type: 'agent.error', message: `thumbnail render failed for ${slide.id}`, thread: 'global' });
+            bus.emit({ type: 'thumb.failed', hash, slideId: slide.id, message: err instanceof Error ? err.message : String(err) });
           },
         )
         .finally(() => inflight.delete(hash));

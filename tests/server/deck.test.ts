@@ -37,6 +37,7 @@ describe('server core', () => {
   let thumbs: ThumbService;
   let app: FastifyInstance;
   let events: BusEvent[];
+  let deckDir: string;
 
   beforeAll(async () => {
     tmp = await tmpDir();
@@ -46,7 +47,7 @@ describe('server core', () => {
   });
 
   beforeEach(async () => {
-    const deckDir = join(tmp.dir, `deck-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    deckDir = join(tmp.dir, `deck-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     const store = await DeckStore.init(deckDir, 'demo', brief);
     await store.commit(snap(five), { kind: 'import' });
     await writeFile(join(deckDir, 'theme.css'), themeCss);
@@ -115,6 +116,28 @@ describe('server core', () => {
     expect(events).toEqual([]);
   });
 
+  it('PATCH rejects a body that fails validateBody with its reasons, without committing', async () => {
+    const res = await app.inject({ method: 'PATCH', url: '/api/slides/s3', payload: { body: '<ul><li>x</li></ul><script>alert(1)</script>' } });
+    expect(res.statusCode).toBe(400);
+    const json = res.json();
+    expect(json.error).toMatch(/body/i);
+    expect(json.reasons).toEqual(expect.arrayContaining([expect.stringMatching(/<ul>/), expect.stringMatching(/<script>/)]));
+    expect((await app.inject({ method: 'PATCH', url: '/api/slides/s3', payload: { body: '   ' } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: '/api/versions' })).json()).toHaveLength(2);
+    expect(events).toEqual([]);
+  });
+
+  it('PATCH rejects asset names that escape the assets folder and accepts plain or assets/<name> ones', async () => {
+    for (const bad of ['../deck.json', 'assets/../deck.json', 'assets/..', '..', '/etc/passwd', 'a\\b', 'assets/sub/x.png', 'x/y.png', 'assets/', '']) {
+      const res = await app.inject({ method: 'PATCH', url: '/api/slides/s3', payload: { assets: [bad] } });
+      expect(res.statusCode, bad).toBe(400);
+    }
+    expect((await app.inject({ method: 'GET', url: '/api/versions' })).json()).toHaveLength(2);
+    const ok = await app.inject({ method: 'PATCH', url: '/api/slides/s3', payload: { assets: ['assets/s02.png', 's02.png'] } });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().assets).toEqual(['assets/s02.png', 's02.png']);
+  });
+
   it('two concurrent PATCHes produce sequential versions, the second on top of the first', async () => {
     const [a, b] = await Promise.all([
       app.inject({ method: 'PATCH', url: '/api/slides/s1', payload: { title: 'A' } }),
@@ -164,6 +187,27 @@ describe('server core', () => {
     expect((await app.inject({ method: 'GET', url: '/api/thumbs/nothex.png' })).statusCode).toBe(404);
   });
 
+  it('a failed thumbnail render emits thumb.failed for that slide', async () => {
+    class FailingThumbs extends ThumbService {
+      override thumb(): Promise<never> {
+        return Promise.reject(new Error('boom'));
+      }
+    }
+    const failing = new FailingThumbs({ cacheDir: join(deckDir, 'cache-failing'), themeCss, assetsDir: join(deckDir, 'assets') });
+    const other = await buildApp({ deckDir, thumbs: failing });
+    const seen: BusEvent[] = [];
+    other.bus.on('any', (e) => seen.push(e));
+    try {
+      const hash = await failing.thumbHash(five[2]!);
+      const res = await other.inject({ method: 'GET', url: '/api/thumbs/for/s3' });
+      expect(res.json()).toEqual({ hash, ready: false });
+      await waitFor(() => seen.some((e) => e.type === 'thumb.failed'));
+      expect(seen).toEqual([{ type: 'thumb.failed', hash, slideId: 's3', message: 'boom' }]);
+    } finally {
+      await other.close();
+    }
+  });
+
   it('GET /assets/* serves the deck assets folder', async () => {
     const res = await app.inject({ method: 'GET', url: '/assets/s02.png' });
     expect(res.statusCode).toBe(200);
@@ -183,6 +227,34 @@ describe('server core', () => {
     expect(html).toContain('story of s3');
     expect(html).toContain('ArrowRight');
     expect(html).toContain('location.hash');
+  });
+
+  it('GET /api/present sends a CSP whose script nonce matches the player script, and a fresh nonce per response', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/present' });
+    const csp = String(res.headers['content-security-policy'] ?? '');
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("img-src 'self' data:");
+    expect(csp).toContain("style-src 'self' 'unsafe-inline' https://fonts.googleapis.com");
+    expect(csp).toContain("font-src 'self' https://fonts.gstatic.com data:");
+    const nonce = /script-src 'nonce-([A-Za-z0-9+/=_-]+)'/.exec(csp)?.[1];
+    expect(nonce).toBeTruthy();
+    expect(csp).not.toContain("'unsafe-inline' 'nonce");
+    const scripts = [...res.body.matchAll(/<script\b([^>]*)>/g)].map((m) => m[1]!);
+    const executable = scripts.filter((attrs) => !attrs.includes('type="application/json"'));
+    expect(executable).toEqual([` nonce="${nonce}"`]);
+    for (const s of five) expect(res.body).toContain(`>${s.title}</h2>`);
+    const again = await app.inject({ method: 'GET', url: '/api/present' });
+    expect(String(again.headers['content-security-policy'])).not.toContain(nonce!);
+  });
+
+  it('present page isolates a slide body that tries to close the surrounding markup', async () => {
+    await app.inject({ method: 'PATCH', url: '/api/slides/s2', payload: { body: '</section></div><p>escaped</p><div><b>open' } });
+    const html = (await app.inject({ method: 'GET', url: '/api/present' })).body;
+    expect(html.match(/<section class="slide"/g)).toHaveLength(5);
+    expect(html.match(/<\/section>/g)).toHaveLength(5);
+    const s2 = /<section class="slide" data-id="s2"[\s\S]*?<\/section>/.exec(html)?.[0] ?? '';
+    expect(s2).toContain('<p>escaped</p><div><b>open</b></div>');
+    expect(html.indexOf('data-id="s3"')).toBeGreaterThan(html.indexOf('<p>escaped</p>'));
   });
 
   it('present page plays like the original deck: #n, arrows, "s" story panel, "n" notes to console', async () => {
