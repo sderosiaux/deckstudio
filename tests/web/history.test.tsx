@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { History } from '../../web/src/screens/History.js';
 import { VersionLine } from '../../web/src/components/VersionLine.js';
 import { bRowCells } from '../../web/src/components/DiffFilmstrips.js';
-import type { BusEvent, DeckPayload, HistoryApi } from '../../web/src/api.js';
+import { openVersionAsLane, type BusEvent, type DeckPayload, type HistoryApi } from '../../web/src/api.js';
 import { diffVersions } from '../../src/model/ops.js';
 import type { Slide, SlideId, Snapshot, Version } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
@@ -41,22 +41,33 @@ const stubApi = () => {
     getVersionSnapshot: vi.fn(async (n: number) => snaps[n]!),
     getHistoryDiff: vi.fn(async (a: number, b: number) => ({ a, b, entries: diffVersions(snaps[a]!, snaps[b]!) })),
     restoreEntry: vi.fn(async () => undefined),
-    openVersionAsLane: vi.fn(async (n: number) => ({
-      id: 'lv',
-      label: `v${n}`,
-      anchor: { kind: 'arc' as const },
-      origin: 'user' as const,
-      baseVersion: 3,
-      changes: [],
-      status: 'open' as const,
-      createdAt: '2026-09-30T00:00:00.000Z',
-    })),
+    openVersionAsLane: vi.fn(async (_n: number) => ({ laneId: 'lv' })),
     thumbFor: vi.fn(async (id: SlideId) => ({ hash: `h${id}`, ready: true })),
   };
   return api satisfies HistoryApi;
 };
 
 const noEvents = (_h: (e: BusEvent) => void) => () => undefined;
+
+/** A bus the test drives: emit() reaches every subscribed handler. */
+const fakeBus = () => {
+  const handlers = new Set<(e: BusEvent) => void>();
+  return {
+    subscribe: (h: (e: BusEvent) => void) => {
+      handlers.add(h);
+      return () => void handlers.delete(h);
+    },
+    emit: (e: BusEvent) => {
+      for (const h of handlers) h(e);
+    },
+  };
+};
+
+const deferred = <T,>() => {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+};
 const versionButton = (n: number) => within(screen.getAllByTestId('version').find((v) => v.getAttribute('data-version') === String(n))!).getByRole('button');
 const kinds = (testId: string) => screen.queryAllByTestId(testId).map((m) => `${m.getAttribute('data-kind')}:${m.getAttribute('data-slide')}`).sort();
 
@@ -97,9 +108,14 @@ describe('History', () => {
     expect(within(cells[3]!).getByTestId('diff-marker').getAttribute('data-kind')).toBe('removed');
   });
 
-  it('restore posts the entry with from = a, then reloads the versions', async () => {
+  it('restore posts the entry with from = a, then reloads once, on the server deck.changed', async () => {
     const api = stubApi();
-    render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    const bus = fakeBus();
+    // The server announces the new main version on the bus; the restore itself triggers no client reload.
+    api.restoreEntry.mockImplementation(async () => {
+      bus.emit({ type: 'deck.changed', version: 4 });
+    });
+    render(<History api={api} subscribe={bus.subscribe} navigate={vi.fn()} />);
     await waitFor(() => screen.queryAllByTestId('version').length === 3);
     fireEvent.click(versionButton(1));
     await waitFor(() => screen.queryAllByTestId('diff-entry').some((e) => e.getAttribute('data-kind') === 'removed'));
@@ -107,7 +123,63 @@ describe('History', () => {
     fireEvent.click(within(removed).getByRole('button', { name: /restore/ }));
     await waitFor(() => api.restoreEntry.mock.calls.length === 1);
     expect(api.restoreEntry).toHaveBeenCalledWith(1, { kind: 'removed', slide: 's4', wasAt: 3 });
-    await waitFor(() => api.getVersions.mock.calls.length === 2);
+    await waitFor(() => api.getVersions.mock.calls.length >= 2);
+    // Restore settled (button back to idle): any client-side reload would have started by now.
+    await waitFor(() => screen.queryByText('restoring…') === null);
+    expect(api.getVersions).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops a stale refresh answer that lands after a newer one', async () => {
+    const api = stubApi();
+    const bus = fakeBus();
+    const first = deferred<DeckPayload>();
+    const v4 = snap([slide('s1'), slide('s3'), slide('s2', 'Our Solution'), slide('s6')]);
+    const deck4: DeckPayload = { ...deck, state: { ...deck.state, version: 4, order: v4.order }, order: v4.order, slides: v4.slides };
+    api.getDeck.mockImplementationOnce(() => first.promise).mockImplementation(async () => deck4);
+    render(<History api={api} subscribe={bus.subscribe} navigate={vi.fn()} />);
+    bus.emit({ type: 'deck.changed', version: 4 });
+    await waitFor(() => screen.queryByText('demo · v4') !== null);
+    // The mount-time refresh answers last, with the older main: it must not overwrite v4.
+    await act(async () => {
+      first.resolve(deck);
+      await first.promise;
+    });
+    expect(screen.queryByText('demo · v3')).toBeNull();
+    expect(screen.getByText('demo · v4')).toBeTruthy();
+  });
+
+  it('on deck.changed, re-requests only the thumbs of slides whose content changed', async () => {
+    const api = stubApi();
+    const bus = fakeBus();
+    render(<History api={api} subscribe={bus.subscribe} navigate={vi.fn()} />);
+    // Default pair v2..v3: every slide of v3 matches main, so all get main's thumb.
+    await waitFor(() => screen.queryAllByTestId('thumb-image').length > 0 && api.thumbFor.mock.calls.length === 5);
+    const s1Before = within(screen.getByTestId('row-b')).getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's1')!;
+    const s1Src = within(s1Before).getByTestId('thumb-image').getAttribute('src');
+
+    // v4: s5 edited on main. Only s5 must be re-requested.
+    const s5b = { ...slide('s5'), body: '<p>s5 edited</p>' };
+    const v4 = snap([slide('s1'), slide('s3'), slide('s2', 'Our Solution'), slide('s6'), s5b]);
+    snaps[4] = v4;
+    const deck4: DeckPayload = { ...deck, state: { ...deck.state, version: 4 }, slides: v4.slides };
+    api.getDeck.mockImplementation(async () => deck4);
+    api.getVersions.mockImplementation(async () => [1, 2, 3, 4].map(version));
+    api.thumbFor.mockClear();
+    api.thumbFor.mockImplementation(async (id: SlideId) => ({ hash: id === 's5' ? 'hs5b' : `h${id}`, ready: true }));
+    try {
+      bus.emit({ type: 'deck.changed', version: 4 });
+      await waitFor(() => api.getHistoryDiff.mock.calls.some(([a, b]) => a === 2 && b === 4));
+      await waitFor(() => api.thumbFor.mock.calls.length > 0);
+      await waitFor(() => {
+        const s5 = within(screen.getByTestId('row-b')).getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's5');
+        return s5 ? within(s5).queryByTestId('thumb-image')?.getAttribute('src') === '/api/thumbs/hs5b.png' : false;
+      });
+      expect(api.thumbFor.mock.calls).toEqual([['s5']]);
+      const s1 = within(screen.getByTestId('row-b')).getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's1')!;
+      expect(within(s1).getByTestId('thumb-image').getAttribute('src')).toBe(s1Src);
+    } finally {
+      delete snaps[4];
+    }
   });
 
   it('opens version a as a lane, then goes to main', async () => {
@@ -120,6 +192,19 @@ describe('History', () => {
     await waitFor(() => navigate.mock.calls.length === 1);
     expect(api.openVersionAsLane).toHaveBeenCalledWith(1);
     expect(navigate).toHaveBeenCalledWith('/');
+  });
+
+  it('api.openVersionAsLane resolves to the server answer { laneId }', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ laneId: 'lane-7' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const res: { laneId: string } = await openVersionAsLane(2);
+      expect(res).toEqual({ laneId: 'lane-7' });
+      expect(fetchMock.mock.calls[0]![0]).toBe('/api/history/open-as-lane');
+      expect(JSON.parse(String(fetchMock.mock.calls[0]![1]!.body))).toEqual({ n: 2 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('shows main thumbnails only for slides whose content matches main', async () => {

@@ -82,17 +82,36 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
   const [mainThumbs, setMainThumbs] = useState<Record<SlideId, ThumbStatus>>({});
   const [reload, setReload] = useState(0);
   const latest = useRef<number | undefined>(undefined);
-  const requested = useRef(new Set<SlideId>());
+  /** Thumbnail requests per slide; the token lets an answer for since-invalidated content be ignored. */
+  const requested = useRef(new Map<SlideId, object>());
+  /** Serialized content of each slide of the main last shown; tells which thumbnails a new main invalidates. */
+  const shownSlides = useRef<Record<SlideId, string>>({});
+  const generation = useRef(0);
 
-  /** Reloads versions and main. When b was the latest version, b follows the new latest so the comparison stays "against now". */
+  /**
+   * Reloads versions and main. When b was the latest version, b follows the new latest so the comparison stays "against now".
+   * Only the thumbnails of slides whose content changed (or that left main) are dropped and asked again; an answer
+   * overtaken by a newer refresh is discarded.
+   */
   const refresh = useCallback(async () => {
+    const gen = ++generation.current;
     try {
       const [vs, d] = await Promise.all([api.getVersions(), api.getDeck()]);
+      if (gen !== generation.current) return;
       const before = latest.current;
       const after = latestOf(vs);
       latest.current = after;
-      requested.current.clear();
-      setMainThumbs({});
+      const stamps: Record<SlideId, string> = Object.fromEntries(d.order.map((id) => [id, JSON.stringify(d.slides[id] ?? null)]));
+      const stale = Object.keys({ ...shownSlides.current, ...stamps }).filter((id) => shownSlides.current[id] !== stamps[id]);
+      shownSlides.current = stamps;
+      for (const id of stale) requested.current.delete(id);
+      if (stale.length > 0) {
+        setMainThumbs((prev) => {
+          const next = { ...prev };
+          for (const id of stale) delete next[id];
+          return next;
+        });
+      }
       setDeck(d);
       setVersions(vs);
       setLoadError(null);
@@ -103,7 +122,7 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
       });
       setReload((r) => r + 1);
     } catch (err) {
-      setLoadError(message(err));
+      if (gen === generation.current) setLoadError(message(err));
     }
   }, [api]);
 
@@ -148,10 +167,15 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
     for (const s of [compared.a, compared.b]) for (const id of s.order) if (s.slides[id] && sameSlide(s.slides[id], deck.slides[id])) ids.add(id);
     for (const id of ids) {
       if (requested.current.has(id)) continue;
-      requested.current.add(id);
+      const token = {};
+      requested.current.set(id, token);
       api.thumbFor(id).then(
-        (t) => setMainThumbs((prev) => ({ ...prev, [id]: t })),
-        () => requested.current.delete(id),
+        (t) => {
+          if (requested.current.get(id) === token) setMainThumbs((prev) => ({ ...prev, [id]: t }));
+        },
+        () => {
+          if (requested.current.get(id) === token) requested.current.delete(id);
+        },
       );
     }
   }, [api, compared, deck]);
@@ -162,8 +186,9 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
     if (!compared) return;
     setBusy(key);
     setActionError(null);
+    // No reload here: the server announces the new main with deck.changed, which refreshes the screen once.
     api.restoreEntry(compared.pair.a, e).then(
-      () => refresh(),
+      () => undefined,
       (err: unknown) => setActionError(message(err)),
     ).finally(() => setBusy(null));
   };
