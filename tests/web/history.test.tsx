@@ -247,6 +247,10 @@ describe('History', () => {
     expect(button('removed').getAttribute('aria-label')).toMatch(/^restore \(bring back\)/);
     expect(button('modified').getAttribute('aria-label')).toMatch(/^restore \(revert content\)/);
     expect(button('moved').getAttribute('aria-label')).toMatch(/^restore \(move back\)/);
+    // The verb is visible in the row, not only in the tooltip (M5 persona friction 2).
+    const does = (kind: string) => within(screen.getAllByTestId('diff-entry').find((e) => e.getAttribute('data-kind') === kind)!).getByTestId('diff-entry-does').textContent;
+    expect(does('added')).toBe('restore: remove from main');
+    expect(does('removed')).toBe('restore: bring back');
     const panel = screen.getByRole('complementary', { name: 'what changed' });
     expect(within(panel).getByText('added in v3')).toBeTruthy();
     expect(within(panel).getAllByText(/^slide \d+$/)).toHaveLength(4);

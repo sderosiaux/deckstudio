@@ -353,6 +353,8 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.35 }}>
                     <span style={{ display: 'block' }}>{d.what}</span>
                     <span className="muted" data-testid="diff-entry-title" style={{ marginTop: 2, fontSize: 'var(--fs-meta)', lineHeight: '16px', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden' }} title={d.title}>{d.title}</span>
+                    {/* What the button does, in the row itself: a tooltip alone hid that restoring an added slide deletes it. */}
+                    <span className="muted" data-testid="diff-entry-does" style={{ display: 'block', marginTop: 2, fontSize: 'var(--fs-meta)', lineHeight: '16px' }}>restore: {does}</span>
                   </span>
                   <button
                     type="button"
