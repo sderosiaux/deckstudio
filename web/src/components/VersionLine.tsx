@@ -53,6 +53,20 @@ const node = (marked: boolean, current: boolean): CSSProperties => ({
   transition: 'border-color .15s ease, background .15s ease',
 });
 
+/** The rail keeps a label's first clause ('added "X"' of 'added "X" · Hook: …'); the tooltip has the whole of it. */
+export const railCause = (cause: string): string => cause.split(' · ')[0]!.trim();
+
+/** What made the version, on up to two 12px lines: a quoted slide title reads whole rather than cut mid-word. */
+const causeStyle: CSSProperties = {
+  display: '-webkit-box',
+  WebkitBoxOrient: 'vertical',
+  WebkitLineClamp: 2,
+  overflow: 'hidden',
+  lineHeight: '16px',
+  maxHeight: 32,
+  overflowWrap: 'anywhere',
+};
+
 /** The versions of main as a thin rail, oldest to newest: a node per version, its name and fingerprint under it. */
 export function VersionLine({ versions, current, selection, onSelect, navigate = defaultNavigate }: VersionLineProps) {
   const sorted = [...versions].sort((a, b) => a.n - b.n);
@@ -86,7 +100,7 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
                   <span style={{ fontWeight: 700, color: marked ? 'var(--accent)' : 'var(--ink)' }}>v{v.n}</span>
                   {isCurrent ? <span className="meta">now</span> : null}
                 </span>
-                <span className="meta" style={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cause}</span>
+                <span className="meta" data-testid="version-cause" style={causeStyle}>{railCause(cause)}</span>
                 <span className="mono meta" style={{ display: 'block' }}>{hash}</span>
               </>
             );
@@ -99,7 +113,7 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
                 data-selected={picked}
                 aria-current={isCurrent ? 'true' : undefined}
                 title={`v${v.n}, ${cause}, ${new Date(v.createdAt).toLocaleString()}`}
-                style={{ flex: '0 0 128px', width: 128, paddingRight: 16 }}
+                style={{ flex: '0 0 152px', width: 152, paddingRight: 16 }}
               >
                 {selectable ? (
                   <button type="button" aria-pressed={picked !== undefined} aria-label={`v${v.n}: click to compare from, shift-click to compare to`} onClick={(e) => onSelect(v.n, e.shiftKey ? 'b' : 'a')} style={box}>

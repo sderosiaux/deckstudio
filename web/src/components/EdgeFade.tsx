@@ -107,7 +107,7 @@ export function EdgeFade({ visible, testId = 'edge-fade' }: { visible: VisibleCo
             <span
               key={i}
               data-testid={`${testId}-count`}
-              style={{ position: 'absolute', left: 0, right: 0, top: r.top, transform: 'translateY(-50%)', textAlign: 'center', fontSize: 'var(--fs-meta)', color: 'var(--grey)', lineHeight: 1 }}
+              style={{ position: 'absolute', left: 0, right: 0, top: r.top, transform: 'translateY(-50%)', textAlign: 'center', fontSize: 'var(--fs-row)', fontWeight: 500, color: 'var(--grey)', lineHeight: 1 }}
             >
               +{r.hidden}
             </span>

@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react';
+import { useLayoutEffect, useState, type CSSProperties, type RefObject } from 'react';
 import type { Anchor, Change, Lane, Remark, SlideId } from '../../../src/model/types.js';
 import { focusPath, navigate, remarkApi as defaultRemarkApi, thumbUrl, type LaneApi, type LanePreviewPayload, type RemarkApi } from '../api.js';
 import { ChangeButtons } from './ChangeButtons.js';
@@ -304,7 +304,7 @@ export function LaneRow({
                         className="edge-frame"
                         style={cell.dest ? movedStyle : removedStyle}
                       >
-                        {cell.dest ? <MoveMark col={cell.col} dest={cell.dest} /> : 'removed'}
+                        {cell.dest ? <MoveMark title={cell.title} at={cell.dest.at} /> : 'removed'}
                       </a>
                     ) : (
                       <>
@@ -359,8 +359,10 @@ export function LaneRow({
   );
 }
 
-/** Columns between a slot's centre and the gap before `boundary`, signed (negative = the slide goes left). */
-export const moveDistance = (col: number, boundary: number): number => boundary - col - 0.5;
+/** Where the moved hairline runs, from the left edge of its column: the same x on main's thumb and in the lane slot. */
+const MOVE_X = 4;
+/** Height of the hairline inside the slot, down to its end dot beside the "moved to" line. */
+const MOVE_END = 8;
 
 const slotBox: CSSProperties = {
   position: 'relative',
@@ -377,27 +379,86 @@ const slotBox: CSSProperties = {
 };
 /** The dashed outline means "removed", and only that. */
 const removedStyle: CSSProperties = { ...slotBox, border: '1px dashed var(--accent)' };
-/** A moved slide's old column: no outline, only the hairline leaving it and where the slide goes. */
-const movedStyle: CSSProperties = slotBox;
+/** A moved slide's old column: no outline; the hairline from main's thumb comes down its left edge, the words beside it. */
+const movedStyle: CSSProperties = { ...slotBox, alignItems: 'stretch', justifyContent: 'flex-start', paddingLeft: MOVE_X + 7 };
 
 /**
- * A moved slide leaving its column: a short accent hairline from a dot at the middle of the slot out through the
- * side it goes to, and a grey "to 24" (its new position in the lane) above it.
+ * A moved slide's slot: the end of the accent hairline that leaves the slide's thumb on main (drawn by MoveRisers
+ * down to the slot's top), then "moved to 24" beside it and the slide's title under that, so the slot names what moves.
  */
-function MoveMark({ col, dest }: { col: number; dest: { boundary: number; at: number } }) {
-  const d = moveDistance(col, dest.boundary);
-  const side = d < 0 ? { right: '50%' } : { left: '50%' };
+function MoveMark({ title, at }: { title: string; at: number }) {
   return (
     <>
-      <span style={{ lineHeight: '16px', marginBottom: 28 }}>to {dest.at}</span>
+      <span data-testid="move-connector" aria-hidden style={{ position: 'absolute', top: 0, left: MOVE_X, width: 1, height: MOVE_END, background: 'var(--accent)', pointerEvents: 'none' }} />
+      <span aria-hidden style={{ position: 'absolute', top: MOVE_END - 2, left: MOVE_X - 2, width: 5, height: 5, borderRadius: 999, background: 'var(--accent)', pointerEvents: 'none' }} />
+      <span style={{ lineHeight: '16px', whiteSpace: 'nowrap' }}>moved to {at}</span>
       <span
-        data-testid="move-connector"
-        data-distance={d}
-        aria-hidden
-        style={{ position: 'absolute', top: '50%', ...side, width: 'calc(var(--thumb-w) / 2 + var(--col-gap) / 2)', height: 1, background: 'var(--accent)', pointerEvents: 'none' }}
-      />
-      {/* Where the slide stood: the hairline starts from a dot at the slot's centre. */}
-      <span aria-hidden style={{ position: 'absolute', top: 'calc(50% - 2px)', left: 'calc(50% - 2px)', width: 5, height: 5, borderRadius: 999, background: 'var(--accent)', pointerEvents: 'none' }} />
+        data-testid="moved-title"
+        style={{ fontWeight: 500, lineHeight: '16px', color: 'var(--ink)', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden', overflowWrap: 'anywhere' }}
+      >
+        {title}
+      </span>
+    </>
+  );
+}
+
+interface Riser {
+  key: string;
+  x: number;
+  top: number;
+  height: number;
+}
+
+/**
+ * The vertical part of every moved mark under `root`: a 1px accent hairline from the bottom of the slide's thumb on
+ * main down to its slot in the lane row. Drawn behind the rows (remark cards cover it where they cross), measured
+ * from the laid out strip, so it follows the column width and whatever sits between main and the lane.
+ * `root` must be positioned and form a stacking context (z-index 0) so the hairlines can sit under its rows.
+ */
+export function MoveRisers({ root, deps }: { root: RefObject<HTMLElement | null>; deps: readonly unknown[] }) {
+  const [risers, setRisers] = useState<Riser[]>([]);
+  useLayoutEffect(() => {
+    const el = root.current;
+    if (!el) return;
+    let frame = 0;
+    const update = (): void => {
+      frame = 0;
+      const box = el.getBoundingClientRect();
+      const next = [...el.querySelectorAll<HTMLElement>('[data-testid="moved-slot"]')].flatMap((slot, i) => {
+        const id = slot.closest('[data-testid="lane-cell"]')?.getAttribute('data-slide');
+        const thumb = id ? el.querySelector(`[data-strip="main"] [data-testid="thumb"][data-slide="${CSS.escape(id)}"] .edge-frame`) : null;
+        if (!thumb) return [];
+        const from = thumb.getBoundingClientRect();
+        const to = slot.getBoundingClientRect();
+        if (to.top <= from.bottom) return [];
+        return [{ key: `${id}:${i}`, x: Math.round(to.left - box.left + MOVE_X), top: Math.round(from.bottom - box.top), height: Math.round(to.top - from.bottom) }];
+      });
+      setRisers((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+    };
+    const schedule = (): void => {
+      if (!frame) frame = requestAnimationFrame(update);
+    };
+    update();
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
+    ro?.observe(el);
+    const mo = typeof MutationObserver === 'undefined' ? null : new MutationObserver(schedule);
+    mo?.observe(el, { childList: true, subtree: true });
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      ro?.disconnect();
+      mo?.disconnect();
+    };
+  }, [root, ...deps]);
+  return (
+    <>
+      {risers.map((r) => (
+        <span
+          key={r.key}
+          data-testid="move-riser"
+          aria-hidden
+          style={{ position: 'absolute', zIndex: -1, left: r.x, top: r.top, width: 1, height: r.height, background: 'var(--accent)', pointerEvents: 'none' }}
+        />
+      ))}
     </>
   );
 }

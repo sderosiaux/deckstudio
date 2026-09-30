@@ -300,7 +300,8 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
             </button>
           ) : null}
         </ScreenHeader>
-        <section aria-label="compared versions" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: '8px 24px 8px' }}>
+        {/* The pair sizes to its rows; the rail follows 64px under the lower one (12px strip padding + 8 + 44). */}
+        <section aria-label="compared versions" style={{ flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '8px 24px 8px' }}>
           {diffError ? (
             <p style={{ color: 'var(--warn)' }}>Could not compare: {diffError}</p>
           ) : !pair ? (
@@ -317,8 +318,8 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
             />
           )}
         </section>
-        {/* The version line is the rail at the bottom, as on main. */}
-        <div style={{ padding: '14px 24px 16px' }}>
+        {/* The version line is a thin rail under the compared rows, as on main under the lanes. */}
+        <div style={{ padding: '44px 24px 16px' }}>
           <p className="meta" style={{ margin: '0 0 10px calc(var(--gutter) + 6px)' }}>click a version to compare from it, shift-click to compare to it</p>
           <VersionLine versions={versions} current={deck.state.version} selection={pair ?? undefined} onSelect={select} />
         </div>

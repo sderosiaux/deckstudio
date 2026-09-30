@@ -5,7 +5,8 @@
   --font: 'Archivo', system-ui, sans-serif; --mono: 'IBM Plex Mono', ui-monospace, monospace;
   --radius: 6px; --shadow: 0 4px 12px rgba(23, 23, 26, .08);
   /* One column grid for the filmstrip and the lanes; .fit-columns sizes the columns to its own width. */
-  --gutter: 120px; --thumb-w: 60px; --thumb-h: 80px; --col-gap: 6px; --fit-cols: 14;
+  /* Thumbs are 16:9 like the slides, so a render scales into its card whole: --thumb-h always follows --thumb-w. */
+  --gutter: 120px; --thumb-w: 96px; --thumb-h: calc(var(--thumb-w) * 9 / 16); --col-gap: 4px; --fit-cols: 10;
   /* Type scale: meta, body, row labels, screen title. */
   --fs-meta: 12px; --fs-body: 13px; --fs-row: 15px; --fs-title: 20px;
 }
@@ -45,11 +46,15 @@ button { font: inherit; }
 
 /*
  * A scrolling canvas whose deck columns fit its width: --fit-cols columns between the gutter and the right edge
- * (the 12px are the rows' 6px side padding), never below 52px nor above 72px. The column width is set on the
- * canvas's children so that 100cqw resolves against the canvas itself.
+ * (the 12px are the rows' 6px side padding), never below 80px nor above 128px: ten 16:9 columns keep a slide
+ * readable as a whole slide, the rest runs on behind the fade and its count. The column width is set on the
+ * canvas's children so that 100cqw resolves against the canvas itself; the height is redeclared there so it follows.
  */
 .fit-columns { container-type: inline-size; }
-.fit-columns > * { --thumb-w: clamp(52px, calc((100cqw - var(--gutter) - 12px - (var(--fit-cols) - 1) * var(--col-gap)) / var(--fit-cols)), 72px); }
+.fit-columns > * {
+  --thumb-w: clamp(80px, calc((100cqw - var(--gutter) - 12px - (var(--fit-cols) - 1) * var(--col-gap)) / var(--fit-cols)), 128px);
+  --thumb-h: calc(var(--thumb-w) * 9 / 16);
+}
 
 /* Every screen header: the screen's way back ("main") in the 120px gutter, the title on the column start (x = 144). */
 .screen-header { display: flex; align-items: baseline; gap: 12px; padding: 18px 24px 14px; }

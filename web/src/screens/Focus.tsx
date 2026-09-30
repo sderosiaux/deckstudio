@@ -78,8 +78,8 @@ export function textChanges(change: Change, before: Slide | undefined): { field:
  * scales to its column (16:9 kept), so both slides fit next to the thread instead of the second one falling under the fold.
  */
 const FOCUS_CSS = `
-.focus-pair { display: grid; grid-template-columns: minmax(0, 560px); justify-content: start; gap: 24px; }
-@media (min-width: 1280px) { .focus-pair { grid-template-columns: repeat(2, minmax(0, 560px)); } }
+.focus-pair { display: grid; grid-template-columns: minmax(0, 450px); justify-content: start; gap: 24px; }
+@media (min-width: 1280px) { .focus-pair { grid-template-columns: repeat(2, minmax(0, 450px)); } }
 .focus-pair > [data-testid="slide-preview"] { width: 100% !important; height: auto !important; aspect-ratio: 16 / 9; flex: none !important; }
 `;
 
@@ -282,7 +282,8 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
               {short}, change {change ? index + 1 : '–'} of {n}
             </h1>
           </ScreenHeader>
-          <main style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 24px 0', display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* One left edge: the body starts on the title's column (24px padding + the 120px gutter), as the strips below. */}
+          <main style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 24px 0 calc(24px + var(--gutter))', display: 'flex', flexDirection: 'column', gap: 16 }}>
             {!change ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
                 <p style={{ margin: 0 }}>
@@ -303,12 +304,12 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
                   {left ? <SlidePreview {...left} /> : null}
                   {right ? <SlidePreview {...right} /> : null}
                 </div>
-                <p data-testid="focus-reason" style={{ margin: 0, display: 'flex', gap: 12, alignItems: 'baseline', fontSize: 13, maxWidth: 1144 }}>
+                <p data-testid="focus-reason" style={{ margin: 0, display: 'flex', gap: 12, alignItems: 'baseline', fontSize: 13, maxWidth: 924 }}>
                   <span className="meta">{change.kind}</span>
                   <span style={{ color: 'var(--grey)' }}>{change.reason}</span>
                 </p>
                 {texts.length > 0 ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1144, width: '100%' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 924, width: '100%' }}>
                     {texts.map((t) => (
                       <TextDiff key={t.field} label={t.field} before={t.before} after={t.after} />
                     ))}

@@ -406,7 +406,7 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
           {deck.order.length === 0 ? (
             <p className="muted">No slides yet. Import a deck.html into the folder, then run checks.</p>
           ) : (
-            <div style={{ '--thumb-w': '96px', '--thumb-h': '96px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, var(--thumb-w))', gap: 10, justifyContent: 'start' } as CSSProperties}>
+            <div style={{ '--thumb-w': '96px', '--thumb-h': '54px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, var(--thumb-w))', gap: 10, justifyContent: 'start' } as CSSProperties}>
               {deck.order.map((id, i) => (
                 <div key={id} data-testid="brief-thumb" data-slide={id} data-lit={lit.has(id)} style={{ opacity: lit.has(id) ? 1 : 0.45, transition: 'opacity .15s ease' }}>
                   <Thumb slideId={id} n={i + 1} title={deck.slides[id]?.title ?? id} url={thumbs[id]} selected={lit.has(id)} onClick={() => show({ kind: 'slide', slide: id })} />

@@ -18,7 +18,7 @@ const RINGS = {
   ink: '0 0 0 2px var(--paper), 0 0 0 4px var(--ink)',
 } as const;
 
-/** A card the size of one grid column, filled by the rendered slide. */
+/** A 16:9 card the width of one grid column (--thumb-h follows --thumb-w), holding the rendered slide. */
 const frame = (selected: boolean, ring: keyof typeof RINGS): CSSProperties => ({
   width: 'var(--thumb-w)',
   height: 'var(--thumb-h)',
@@ -29,11 +29,8 @@ const frame = (selected: boolean, ring: keyof typeof RINGS): CSSProperties => ({
   transition: 'box-shadow .15s ease',
 });
 
-/*
- * The slide covers the whole card. Cards are narrower than 16:9, so the render is cropped on the right: the deck's
- * titles are left aligned, and their start is what identifies a slide at this size.
- */
-const picture: CSSProperties = { width: '100%', height: '100%', display: 'block', objectFit: 'cover', objectPosition: 'left center' };
+/* The whole slide scaled into the card, never cropped: a strip reads as the deck, titles included. */
+const picture: CSSProperties = { width: '100%', height: '100%', display: 'block', objectFit: 'contain' };
 
 /**
  * One slide in a strip: the rendered slide (a grey block until the PNG is ready), its number under it unless
@@ -52,7 +49,7 @@ export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbe
       aria-pressed={selected}
       aria-label={`Slide ${n}: ${title}`}
       onClick={onClick}
-      style={{ all: 'unset', position: 'relative', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 4, width: 'var(--thumb-w)', flex: '0 0 auto' }}
+      style={{ all: 'unset', position: 'relative', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 6, width: 'var(--thumb-w)', flex: '0 0 auto' }}
     >
       <div className={selected ? 'thumb-selected edge-frame' : 'edge-frame'} style={frame(selected, ring)}>
         {showImage ? (

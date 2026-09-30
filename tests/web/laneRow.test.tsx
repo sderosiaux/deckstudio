@@ -125,31 +125,28 @@ describe('LaneRow', () => {
     expect(screen.getByTestId('lane-region').style.gridColumn).toBe('3 / span 1');
   });
 
-  it('leaves an unoutlined slot with its buttons at a moved slide\'s own column: a hairline leaving it and where it goes', () => {
+  it('leaves an unoutlined slot with its buttons at a moved slide\'s own column: the hairline end, where it goes and what moves', () => {
     const move: Change = { id: 'c9', kind: 'move', slide: 's4', after: 's1', reason: 'earlier', status: 'pending' };
     const moved: LanePreviewPayload = { order: ['s1', 's4', 's2', 's3', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
     render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
     const cells = screen.getAllByTestId('lane-cell');
     expect(cells.map((c) => `${c.getAttribute('data-slide')}:${c.getAttribute('data-col')}`)).toEqual(['s2:1', 's3:2', 's4:3']);
     const slot = within(cells[2]!).getByTestId('moved-slot');
-    // s4 lands before column 1, two and a half columns left of its slot.
-    expect(slot.textContent).toBe('to 2');
     expect(slot.style.border).toBe('');
-    expect(within(slot).getByTestId('move-connector').getAttribute('data-distance')).toBe('-2.5');
+    expect(slot.textContent).toContain('moved to 2');
+    expect(within(slot).getByTestId('moved-title').textContent).toBe(mainSlides.s4!.title);
+    expect(within(slot).getByTestId('move-connector')).toBeTruthy();
     expect(within(cells[2]!).getByRole('button', { name: 'accept change c9' })).toBeTruthy();
     expect(screen.getByTestId('lane-region').style.gridColumn).toBe('2 / span 3');
   });
 
-  it('points a move right when the slide lands after its slot', () => {
+  it('names the new position of a slide moved further on', () => {
     const move: Change = { id: 'c9', kind: 'move', slide: 's2', after: 's3', reason: 'swap', status: 'pending' };
     const moved: LanePreviewPayload = { order: ['s1', 's3', 's2', 's4', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
     render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
     const cell = screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === 's2')!;
     expect(cell.getAttribute('data-col')).toBe('1');
-    // lands before column 3 (after s3): one and a half columns right of the slot's centre
-    expect(within(cell).getByTestId('move-connector').getAttribute('data-distance')).toBe('1.5');
-    expect(within(cell).getByTestId('move-connector').style.left).toBe('50%');
-    expect(within(cell).getByTestId('moved-slot').textContent).toBe('to 3');
+    expect(within(cell).getByTestId('moved-slot').textContent).toContain('moved to 3');
   });
 
   it('gives buttons to a pending change on a slide outside the anchor range', () => {

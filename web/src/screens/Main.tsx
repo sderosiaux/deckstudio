@@ -26,7 +26,7 @@ import {
 } from '../api.js';
 import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { FAILED_THUMB, LaneRow, anchorColumns, laneLetter } from '../components/LaneRow.js';
+import { FAILED_THUMB, LaneRow, MoveRisers, anchorColumns, laneLetter } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
 import { RemarkRow, placeCards, type Pinned } from '../components/RemarkRow.js';
 import { ScreenHeader } from '../components/ScreenHeader.js';
@@ -384,6 +384,7 @@ export function Main() {
   }, [reloadAll, reloadRemarks, refreshThumb, schedule]);
 
   const canvas = useRef<HTMLElement>(null);
+  const rows = useRef<HTMLDivElement>(null);
   const deckLength = load.status === 'ready' ? load.deck.order.length : 0;
   // Columns of main in sight: the strip ends on a fade and a count, and no remark card runs past the edge.
   const visible = useVisibleColumns(canvas, '[data-strip="main"] [data-testid="thumb"]', [load.status, deckLength, lanes.length]);
@@ -512,13 +513,16 @@ export function Main() {
           </a>
           <a href="/api/present" className="btn-primary" style={{ alignSelf: 'center' }}>Present</a>
         </ScreenHeader>
-        <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {/* Sized to its rows (scrolling past the window height): the versions rail follows 48px under the lowest lane element. */}
+        <div style={{ position: 'relative', flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <main ref={canvas} data-testid="canvas" className="fit-columns" onClick={clearOnEmpty} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '8px 32px 24px 24px' }}>
             {deck.order.length === 0 ? (
               <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
             ) : (
               // max-content: the filmstrip and the lane rows scroll together, so lane columns stay under main's.
-              <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 24 }}>
+              // z-index 0: a stacking context, so the moved hairlines pass under the rows and the remark cards.
+              <div ref={rows} style={{ position: 'relative', zIndex: 0, width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 24 }}>
+                <MoveRisers root={rows} deps={[deck.order, lanes, previews]} />
                 <div
                   onClickCapture={(e) => {
                     shift.current = e.shiftKey;
@@ -584,7 +588,8 @@ export function Main() {
           </main>
           <EdgeFade visible={visible} />
         </div>
-        <div style={{ padding: '14px 24px 16px' }}>
+        {/* 24px here plus the canvas's 24px bottom padding. */}
+        <div style={{ padding: '24px 24px 16px' }}>
           <VersionLine versions={versions} current={deck.state.version} />
         </div>
       </div>

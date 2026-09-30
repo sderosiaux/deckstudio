@@ -51,7 +51,7 @@ export function SlidePreview({ label, variant, title = '', url, missingText = ''
       {variant === 'missing' ? (
         <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--grey)', fontSize: 15 }}>{missingText}</div>
       ) : url !== undefined && !failed ? (
-        <img src={url} alt={title} draggable={false} onError={() => setFailed(true)} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+        <img src={url} alt={title} draggable={false} onError={() => setFailed(true)} style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
       ) : (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 32, textAlign: 'center', background: 'var(--line)' }}>
           <strong style={{ fontSize: 22 }}>{title}</strong>
