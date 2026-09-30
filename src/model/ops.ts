@@ -88,10 +88,30 @@ function fieldEqual(a: Slide, b: Slide, f: (typeof PATCH_FIELDS)[number]): boole
   return a[f] === b[f];
 }
 
+/** Indices of one longest strictly increasing subsequence of `xs` (patience sorting, O(n log n)). */
+function longestIncreasing(xs: readonly number[]): number[] {
+  const tails: number[] = []; // tails[k] = index in xs of the smallest tail of an increasing run of length k+1
+  const prev: number[] = new Array<number>(xs.length).fill(-1);
+  xs.forEach((x, i) => {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (xs[tails[mid]!]! < x) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo > 0) prev[i] = tails[lo - 1]!;
+    tails[lo] = i;
+  });
+  const out: number[] = [];
+  for (let i = tails.length > 0 ? tails[tails.length - 1]! : -1; i >= 0; i = prev[i]!) out.push(i);
+  return out.reverse();
+}
+
 /**
  * Diff by slide id. Entries are emitted as: removed (in a's order), added, modified, moved (in b's order).
- * A common slide is 'moved' when its rank among the slides present in both snapshots changed,
- * so pure insertions/removals never produce moves.
+ * Among slides present in both snapshots, the longest run that kept its relative order stays put;
+ * every other common slide is 'moved'. This is a minimal move set, and pure insertions/removals never produce moves.
  */
 export function diffVersions(a: Snapshot, b: Snapshot): DiffEntry[] {
   const inA = new Set(a.order);
@@ -110,8 +130,9 @@ export function diffVersions(a: Snapshot, b: Snapshot): DiffEntry[] {
   const commonA = a.order.filter((id) => inB.has(id));
   const commonB = b.order.filter((id) => inA.has(id));
   const rankA = new Map(commonA.map((id, i) => [id, i]));
-  const moved: DiffEntry[] = commonB.flatMap((id, rank) =>
-    rankA.get(id) === rank ? [] : [{ kind: 'moved' as const, slide: id, from: a.order.indexOf(id), to: b.order.indexOf(id) }],
+  const kept = new Set(longestIncreasing(commonB.map((id) => rankA.get(id)!)).map((i) => commonB[i]!));
+  const moved: DiffEntry[] = commonB.flatMap((id) =>
+    kept.has(id) ? [] : [{ kind: 'moved' as const, slide: id, from: a.order.indexOf(id), to: b.order.indexOf(id) }],
   );
 
   return [...removed, ...added, ...modified, ...moved];

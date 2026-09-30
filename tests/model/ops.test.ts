@@ -178,12 +178,9 @@ describe('diffVersions', () => {
     expect(d).toContainEqual({ kind: 'added', slide: 'n1', at: 1 });
     expect(d).toContainEqual({ kind: 'removed', slide: 's3', wasAt: 2 });
     expect(d).toContainEqual({ kind: 'modified', slide: 's4', fields: ['title', 'assets'] });
-    // common ids in a: s1 s2 s4 s5 -> in b: s1 s4 s5 s2; rank changed for s2, s4, s5
-    expect(d).toContainEqual({ kind: 'moved', slide: 's2', from: 1, to: 4 });
-    expect(d).toContainEqual({ kind: 'moved', slide: 's4', from: 3, to: 2 });
-    expect(d).toContainEqual({ kind: 'moved', slide: 's5', from: 4, to: 3 });
-    expect(d.filter((e) => e.kind === 'moved' && e.slide === 's1')).toEqual([]);
-    expect(d).toHaveLength(6);
+    // common ids in a: s1 s2 s4 s5 -> in b: s1 s4 s5 s2; only s2 left the longest kept run
+    expect(d.filter((e) => e.kind === 'moved')).toEqual([{ kind: 'moved', slide: 's2', from: 1, to: 4 }]);
+    expect(d).toHaveLength(4);
   });
   it('insertion and removal alone do not produce moves', () => {
     const a = fixture();
@@ -194,6 +191,26 @@ describe('diffVersions', () => {
       { kind: 'removed', slide: 's3', wasAt: 2 },
       { kind: 'added', slide: 'n1', at: 0 },
     ]);
+  });
+  it('moving the last slide to the front reports exactly one move', () => {
+    const ids = ['1', '2', '3', '4', '5'];
+    const slides = Object.fromEntries(ids.map((id) => [id, slide(id)]));
+    const d = diffVersions({ order: ids, slides }, { order: ['5', '1', '2', '3', '4'], slides });
+    expect(d).toEqual([{ kind: 'moved', slide: '5', from: 4, to: 0 }]);
+  });
+  it('swapping two adjacent slides reports at most two moves', () => {
+    const ids = ['1', '2', '3', '4', '5'];
+    const slides = Object.fromEntries(ids.map((id) => [id, slide(id)]));
+    const d = diffVersions({ order: ids, slides }, { order: ['1', '3', '2', '4', '5'], slides });
+    expect(d.every((e) => e.kind === 'moved')).toBe(true);
+    expect(d.length).toBeGreaterThanOrEqual(1);
+    expect(d.length).toBeLessThanOrEqual(2);
+    for (const e of d) expect(['2', '3']).toContain(e.slide);
+  });
+  it('a full reversal keeps one slide in place', () => {
+    const ids = ['1', '2', '3', '4', '5'];
+    const slides = Object.fromEntries(ids.map((id) => [id, slide(id)]));
+    expect(diffVersions({ order: ids, slides }, { order: [...ids].reverse(), slides })).toHaveLength(4);
   });
   it('identical snapshots produce no diff', () => {
     expect(diffVersions(fixture(), fixture())).toEqual([]);
