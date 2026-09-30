@@ -28,7 +28,7 @@ export function VersionLine({ versions, current }: VersionLineProps) {
         <ol style={{ listStyle: 'none', margin: 0, padding: '4px 0', display: 'flex', gap: 8, overflowX: 'auto', minWidth: 0 }}>
           {sorted.map((v) => {
             const isCurrent = v.n === current;
-            const cause = describeCause(v.cause);
+            const cause = (v as Version & { label?: string }).label ?? describeCause(v.cause);
             return (
               <li
                 key={v.n}

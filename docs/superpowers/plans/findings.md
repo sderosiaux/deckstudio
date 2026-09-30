@@ -25,3 +25,16 @@
 - CONFIRMED · Stop depending on the network at render time: serve Archivo and IBM Plex Mono woff2 locally through the existing ASSET_ORIGIN route, and hash the font bytes (or the theme's font version). If fonts stay remote, check document.fonts.check('70
 - CONFIRMED · Compute the longest increasing subsequence of commonB mapped through rankA. Only mark as moved the common slides that are not in the LIS.
 - CONFIRMED · In snapshotAt (src/store/deckStore.ts:175), change the assignment to `slides[id] = { ...obj, id };` so each slide gets its version key back as its id.
+
+## M2 persona test (real UI)
+- major · Lane > new slide thumbnail (slide 2 'Two answers, one already exists'): The proposed slide can't be opened at a readable size. Click and double-click do nothing, the thumbnail is about 160px wide, and at that size the wrapped title appears to overlap the orange subtitle, 
+- major · Footer > versions bar: Version chips are not interactive. v2 is labelled with internal IDs ('accept c_Gikf6UQ8tn (l_WRr6mTonxN)'), and v0 and v1 are both 'import' with the same timestamp. There is no way to see what changed
+- major · Thread > co-author reply: The reply came in French although I wrote in English. **bold** shows as literal asterisks. It ends with implementation jargon ('tout dans 96..1184 / 160..640, min 24px').
+- minor · Thread while working: Progress is shown as raw tool identifiers: 'using mcp__deck__get_slide…', 'mcp__deck__render_slide…', 'mcp__deck__propose_lane…'.
+- minor · Main strip after accept: Once the change is merged, the new slide 2 looks like every other slide. Nothing marks it as just inserted, and nothing says that slides 2–29 were renumbered to 3–30.
+- minor · Lane > change rationale: The explanation of the change exists only as a hover tooltip on the check and cross buttons. It refers to 'slide 2' meaning the old slide 2, which is slide 3 after the insert.
+- minor · Thread > context chip after accept: The selection silently widened from 'slides 1–6' to 'slides 1–7' after the insert. It is technically the same slides, but the anchor changed without my doing anything.
+- minor · Main strip > range selection: After shift-clicking, only slide 6 has the selected border. Slide 1 loses its highlight, and the range shows only as a thin orange bar underneath. Slide 6 is also half hidden behind the thread panel, 
+- minor · Lane after accepting its only change: The lane disappears the moment its last change is accepted, so the refuse and discard buttons could not be tested. There was also no undo right after accepting.
+- minor · Lane header: A small empty tab or box is drawn above the lane title, with no evident purpose.
+- minor · Tooling note (not a product defect): agent-browser could not hold Shift across separate commands, so the shift-click had to be sent from a script with shiftKey=true. A real user would not hit this.

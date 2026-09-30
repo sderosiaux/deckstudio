@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import type React from 'react';
 import type { Anchor, Slide, SlideId, ThreadKey, ThreadMessage } from '../../../src/model/types.js';
 import type { BusEvent, ThreadApi } from '../api.js';
 import { ContextChip } from './ContextChip.js';
@@ -20,6 +21,34 @@ const time = (iso: string): string => {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
+
+const TOOL_WORDS: Record<string, string> = {
+  mcp__deck__get_deck: 'reading the deck', mcp__deck__get_slide: 'reading a slide', mcp__deck__render_slide: 'rendering a draft',
+  mcp__deck__propose_lane: 'proposing a lane', mcp__deck__revise_lane: 'revising the lane', mcp__deck__add_remark: 'writing a remark',
+  mcp__deck__generate_image: 'generating an image', mcp__deck__run_check: 'running a check', mcp__deck__link_remark_lane: 'linking the remark',
+  Read: 'reading a file', Glob: 'listing files', Grep: 'searching files', Bash: 'running a command', WebFetch: 'fetching a page', WebSearch: 'searching the web',
+};
+export function describeTool(name: string): string {
+  return TOOL_WORDS[name] ?? name.replace(/^mcp__deck__/, '').replace(/_/g, ' ');
+}
+
+/** Minimal inline markdown: **bold**, `code`, *italic*. Anything else stays as written. */
+export function renderInline(text: string): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*\n]+\*)/g;
+  let last = 0; let k = 0;
+  for (const m of text.matchAll(re)) {
+    const i = m.index ?? 0;
+    if (i > last) out.push(text.slice(last, i));
+    const tok = m[0];
+    if (tok.startsWith('**')) out.push(<strong key={k++}>{tok.slice(2, -2)}</strong>);
+    else if (tok.startsWith('`')) out.push(<code key={k++} className="mono">{tok.slice(1, -1)}</code>);
+    else out.push(<em key={k++}>{tok.slice(1, -1)}</em>);
+    last = i + tok.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
 
 /** A conversation with the co-author. The reply streams in from `assistant.delta`; on `assistant.done` the stored thread is reloaded. */
 export function Thread({ threadKey, context, order, slides, api, subscribe, onClearContext, title = 'thread' }: ThreadProps) {
@@ -109,14 +138,14 @@ export function Thread({ threadKey, context, order, slides, api, subscribe, onCl
               <strong style={{ color: m.role === 'assistant' ? 'var(--accent)' : 'var(--ink)' }}>{m.role === 'assistant' ? 'co-author' : 'you'}</strong>
               <span className="muted">{time(m.at)}</span>
             </div>
-            <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{m.text}</div>
+            <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{renderInline(m.text)}</div>
           </div>
         ))}
         {streaming || tool ? (
           <div data-testid="thread-streaming" style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
             <strong style={{ fontSize: 12, color: 'var(--accent)' }}>co-author</strong>
             {streaming ? <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{streaming}</div> : null}
-            {tool ? <span className="muted mono" style={{ fontSize: 11 }}>using {tool}…</span> : null}
+            {tool ? <span className="muted" style={{ fontSize: 11 }}>{describeTool(tool)}…</span> : null}
           </div>
         ) : null}
         {agentError ? (

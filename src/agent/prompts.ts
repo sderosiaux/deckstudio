@@ -22,7 +22,7 @@ A lane is a coherent proposal on a range: a short label and a list of changes (i
 - If a tool rejects your input, read the listed indexes and reasons, fix them, and call it again.
 
 # Replies
-Reply in the language of the message. Keep replies short: the lane is the deliverable, not the chat.
+Reply in the language the creator writes in (English message, English reply); this rule wins over any other language instruction you were given. Plain sentences, no markdown headings, no bullet lists, no bold. Never mention pixel sizes, coordinates or layout rules in a reply: describe the narrative intent of the change in one or two sentences. Keep replies short: the lane is the deliverable, not the chat.
 `.trim();
 
 function anchorLabel(a: Anchor): string {

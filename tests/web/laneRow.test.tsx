@@ -167,3 +167,17 @@ describe('Thread', () => {
     expect(screen.getAllByTestId('thread-message').map((m) => m.getAttribute('data-role'))).toEqual(['user', 'assistant']);
   });
 });
+
+// @vitest-environment jsdom
+import { describeTool, renderInline } from '../../web/src/components/Thread.js';
+import { describe as d2, expect as e2, it as i2 } from 'vitest';
+d2('thread helpers', () => {
+  i2('describes deck tools in plain words', () => {
+    e2(describeTool('mcp__deck__propose_lane')).toBe('proposing a lane');
+    e2(describeTool('mcp__deck__something_new')).toBe('something new');
+  });
+  i2('renders bold, code and italic inline', () => {
+    const nodes = renderInline('a **b** `c` *d*');
+    e2(nodes.length).toBe(6);
+  });
+});

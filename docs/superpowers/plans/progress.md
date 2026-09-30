@@ -14,3 +14,6 @@
 - M1 complete.
 - Wave B (Tasks 10, 11): done, merged (conflicts in app.ts imports and Main.tsx resolved, failed-thumb retry kept). Verified: 178 tests green; `DECKSTUDIO_E2E=1 pnpm e2e` green (real SDK: lane proposed on slides 1–6, one insert accepted → v2, 30 slides, thumb rendered, 59 s).
 - Architect: allowedTools shadowing hole closed (Bash was auto-approved, bypassing the write guard); imageGen wired (src/agent/imageGen.ts).
+## M3
+- Tasks 12, 13 merged (focus screen, local thread routing). Verified: 191 tests green.
+- Persona M2 (real UI via agent-browser): scenario completed. Top frictions fixed: (1) proposed slide unreadable → focus screen from M3; (2) version chips with internal ids → human labels from /api/versions; (3) co-author replied in French to English, raw markdown, pixel jargon → reply rules in SYSTEM_APPEND, inline markdown + plain tool names in the thread. Remaining minor frictions logged in review-m2-persona (see findings.md).

@@ -76,3 +76,11 @@ describe('contextHeader', () => {
     expect(h).not.toContain('revise_lane on it');
   });
 });
+
+describe('reply rules', () => {
+  it('tell the co-author to answer in the creator language and without layout jargon', async () => {
+    const { SYSTEM_APPEND } = await import('../../src/agent/prompts.js');
+    expect(SYSTEM_APPEND).toMatch(/language the creator writes in/);
+    expect(SYSTEM_APPEND).toMatch(/Never mention pixel sizes/);
+  });
+});
