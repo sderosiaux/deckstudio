@@ -1,8 +1,9 @@
-import { hashSlide, newId } from '../model/ids.js';
-import { diffVersions, rebaseLane } from '../model/ops.js';
+import { newId } from '../model/ids.js';
+import { diffVersions } from '../model/ops.js';
 import type { Change, DiffEntry, Lane, Slide, SlideId, SlidePatch, Snapshot, Version } from '../model/types.js';
 import type { DeckStore } from '../store/deckStore.js';
 import type { Bus } from './bus.js';
+import { emitLaneRebase, rebaseOpenLanesAfterMain } from './laneService.js';
 
 /** A history request the caller can act on; `status` is the HTTP code the route answers with. */
 export class HistoryError extends Error {
@@ -31,13 +32,14 @@ function patchOf(from: Slide, to: Slide): SlidePatch {
   return patch;
 }
 
+const pick = (patch: SlidePatch, fields: readonly (keyof SlidePatch)[]): SlidePatch =>
+  Object.fromEntries(Object.entries(patch).filter(([f]) => fields.includes(f as keyof SlidePatch))) as SlidePatch;
+
 /** Order with `id` placed so that it ends up at index `at` (clamped to the end). `order` must not contain `id`. */
 function placeAt(order: readonly SlideId[], id: SlideId, at: number): SlideId[] {
   const i = Math.max(0, Math.min(at, order.length));
   return [...order.slice(0, i), id, ...order.slice(i)];
 }
-
-const hasPending = (l: Lane): boolean => l.changes.some((c) => c.status === 'pending');
 
 export class HistoryService {
   constructor(
@@ -58,22 +60,11 @@ export class HistoryService {
       const main = await this.store.snapshot();
       const next = inverse(past, main, entry);
       const version = await this.store.commit(next, { kind: 'restore', from, entry: JSON.stringify(entry) });
-      // Main moved under the open lanes, exactly as after an accept: orphan what no longer applies.
-      const updated: Lane[] = [];
-      for (const l of (await this.store.lanes()).filter((x) => x.status === 'open')) {
-        const rebased = rebaseLane(l, next);
-        const lane: Lane = hasPending(rebased) ? rebased : { ...rebased, status: 'closed' };
-        if (JSON.stringify(lane) === JSON.stringify(l)) continue;
-        await this.store.putLane(lane);
-        updated.push(lane);
-      }
-      return { version, updated };
+      // Main moved under the open lanes, exactly as after an accept.
+      return { version, rebase: await rebaseOpenLanesAfterMain(this.store, next) };
     });
     this.bus.emit({ type: 'deck.changed', version: out.version.n });
-    for (const l of out.updated) {
-      this.bus.emit({ type: 'lane.updated', laneId: l.id });
-      if (l.status === 'closed') this.bus.emit({ type: 'lane.closed', laneId: l.id });
-    }
+    emitLaneRebase(this.bus, out.rebase);
     return out.version;
   }
 
@@ -128,8 +119,10 @@ function inverse(past: Snapshot, main: Snapshot, entry: DiffEntry): Snapshot {
     case 'modified': {
       if (!then) throw stale(`slide ${id} is not in the source version`);
       if (!now) throw stale(`slide ${id} is not on main`);
-      if (hashSlide(then) === hashSlide(now)) throw stale(`slide ${id} already has its source content`);
-      return { order: [...main.order], slides: { ...main.slides, [id]: { ...copySlide(then), id } } };
+      // Only the fields the entry names go back; later edits to the other fields of the slide stay.
+      const patch = pick(patchOf(now, then), entry.fields);
+      if (Object.keys(patch).length === 0) throw stale(`slide ${id} already has its source ${entry.fields.join(', ') || 'content'}`);
+      return { order: [...main.order], slides: { ...main.slides, [id]: { ...now, ...patch, id } } };
     }
     case 'moved': {
       if (!then) throw stale(`slide ${id} is not in the source version`);
@@ -147,6 +140,10 @@ function inverse(past: Snapshot, main: Snapshot, entry: DiffEntry): Snapshot {
  * keeps every slide placed so far, plus the slides the diff left in place, in target order: each newly placed
  * slide lands right after its target predecessor, which is exactly between it and the next unmoved slide.
  * (Emitting all inserts before all moves would not: an insert after a slide that moves later stays behind.)
+ * A placement whose target predecessor stays put is anchored on a stable slide, so it commutes with every other
+ * change. Only runs of adjacent placed slides chain on each other and need list order: with `after`-only anchors
+ * no fixed choice reproduces a run under every accept order (A,P1,P2 anchored all on A comes out reversed when
+ * accepted in list order), so a chained insert that is accepted early fails with 409 and a chained move lands wrong.
  */
 function changesToward(main: Snapshot, target: Snapshot, n: number): Change[] {
   const entries = diffVersions(main, target);
