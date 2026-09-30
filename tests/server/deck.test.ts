@@ -279,6 +279,8 @@ describe('server core', () => {
     // Escape leaves the player for the workbench on the current slide.
     expect(html).toContain("e.key==='Escape'");
     expect(html).toContain("'/?select='");
+    // e / Enter open the slide screen on the current slide.
+    expect(html).toContain("'/slide/'");
   });
 
   it('GET /api/present sends a CSP whose script nonce matches the player script, and a fresh nonce per response', async () => {
