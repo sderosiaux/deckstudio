@@ -7,3 +7,5 @@
 - 2026-09-30 · Slide.assets stores the same string as the body src ("assets/<basename>"), not a bare name.
 - 2026-09-30 · Thumbnails load Archivo and IBM Plex Mono from Google Fonts at render time; offline renders fall back to system fonts rather than bundling font files.
 - 2026-09-30 · diffVersions reports "moved" by rank change among common ids (may over-report after one move); acceptable for v1, revisit with an LIS rule if the history screen reads badly.
+- 2026-09-30 · Slide bodies are sanitized with DOMPurify over jsdom (allowlist, balanced re-serialization) instead of regexes: the M1 review broke the regex sanitizer three different ways. The present page also gets a CSP with a nonce for the player script.
+- 2026-09-30 · Archivo and IBM Plex Mono woff2 (latin) are vendored under src/render/fonts and served through the render asset origin and /fonts on the app, so renders are deterministic offline and font bytes are part of the thumb hash.

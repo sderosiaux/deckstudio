@@ -1,1 +1,27 @@
 # Findings
+
+## M1 review (base 90ae47c, head 5716ed0): 7 lenses, 23 confirmed, 0 rejected
+
+- CONFIRMED · In Review Focus 3, render a reference slide with the same title and a sanitized body (e.g. `<div><b>unclosed</b></div>`) and assert that the result is byte-equal to it, or at least not equal to a blank-page render. That way running the scri
+- CONFIRMED · Stop using the regex and sanitize with a real HTML parser (DOMPurify/jsdom or sanitize-html) that drops every on* attribute and script/javascript: URLs; at minimum change the attribute separator to `[\s/]*` and strip `(?<=[\s/"'])on[a-z0-9_
+- CONFIRMED · Pick one convention. The simplest fix: have the importer store bare names (`assets: [...sources.keys()]`). The alternative: strip a leading `assets/` in ThumbService.assetPath. Either way, add a test that uses the importer's format.
+- CONFIRMED · Stop stripping with a regex: parse with a real HTML sanitizer (e.g. DOMPurify/sanitize-html with script and on* denied), or at minimum run the strip passes in a loop until the output stops changing and send a CSP `script-src 'self'` (nonce 
+- CONFIRMED · Make `store` required, or default it to DeckStore and always go through init()+commit(); delete the fallback writer and the duplicated DEFAULT_MODEL.
+- CONFIRMED · Isolate each slide body so its tags cannot close outer elements. Parse and re-serialize each body into balanced markup before concatenating (for example with a DOM parser such as parse5 or jsdom, or with a template element), or render each 
+- CONFIRMED · In hashFor, remove a leading 'assets/' from the name before resolving it (e.g. name.replace(/^\/*assets\//, '')), or have the importer store bare asset names; also add a regression test that uses 'assets/<name>'.
+- CONFIRMED · Replace the regex sanitizer with an allowlist sanitizer (e.g. DOMPurify via jsdom or sanitize-html), which drops on* attributes, javascript: URLs and srcdoc. Add a CSP (script-src 'self' plus a nonce for the player) on /api/present, and add
+- CONFIRMED · Swap the regex denylist for an allowlist sanitizer (e.g. DOMPurify/sanitize-html) that drops iframe/object/embed/srcdoc and javascript: URLs, and add a strict CSP (script-src 'self' or nonce, frame-src 'none') on /api/present.
+- CONFIRMED · Use one asset-name convention: either have the importer store bare names (`[...sources.keys()]`), or have `hashFor` strip a leading `assets/` before `assetPath`. Then change the test fixtures to the importer's format (`assets/s02.png`) and 
+- CONFIRMED · Remove the unconditional rm in scripts/import-sf.ts so the importer's deck.json guard fails the run. Only wipe the folder behind an explicit --force flag, and move it to a timestamped backup first.
+- CONFIRMED · In start(), add browser.on('disconnected', () => { this.browser = null; this.page = null; }). Then in screenshot(), relaunch lazily with `if (!this.page || this.page.isClosed()) await this.start()` before calling setContent.
+- CONFIRMED · In the PATCH handler, when patch.body is defined, call validateBody and return 400 with the reasons if it fails. Also reject asset names that contain '/', '\\' or '..', or that are absolute, either in SlidePatchSchema or in the route.
+- CONFIRMED · Add a dedicated `{ type: 'thumb.failed'; hash; slideId; message }` BusEvent, emit it at thumbs.ts:28 instead of agent.error, and handle it in Main.tsx onEvent by marking that slide's thumb as failed with a retry option.
+- CONFIRMED · Treat deck.json as the only commit point: write objects and versions/v{n}.json first (overwrite any orphan v{n}.json whose n is above deck.json's version instead of throwing), bump deck.json next, and only then rewrite slides/*.json. On ope
+- CONFIRMED · In snapshotAt (src/store/deckStore.ts:159), use `slides[id] = { ...obj, id };` so the version's key, not the stored object's id, sets the slide id.
+- CONFIRMED · Stop render correctness from depending on Google Fonts. Either self-host the woff2 files and serve them through the existing ASSET_ORIGIN route, or have the render context abort requests to fonts.googleapis.com and fonts.gstatic.com, or use
+- CONFIRMED · Make the two layers agree on one form. Either have the importer store bare basenames in Slide.assets (and update decisions.md), or resolve Slide.assets entries against the deck root (strip a leading 'assets/' in hashFor), and add a regressi
+- CONFIRMED · Remove the hand-rolled fallback: make `store` required, or default it to DeckStore, so the import always runs DeckStore.init plus commit(snapshot, {kind:'import'}) and produces versions/v0.json, v1.json and the full layout.
+- CONFIRMED · Replace the regex sanitizer with an allowlist sanitizer (e.g. DOMPurify/sanitize-html) that drops iframe/object/embed/srcdoc and non-http(s)/data-image URL schemes, have validateBody reject bodies the sanitizer would change, and add a CSP (
+- CONFIRMED · Stop depending on the network at render time: serve Archivo and IBM Plex Mono woff2 locally through the existing ASSET_ORIGIN route, and hash the font bytes (or the theme's font version). If fonts stay remote, check document.fonts.check('70
+- CONFIRMED · Compute the longest increasing subsequence of commonB mapped through rankA. Only mark as moved the common slides that are not in the LIS.
+- CONFIRMED · In snapshotAt (src/store/deckStore.ts:175), change the assignment to `slides[id] = { ...obj, id };` so each slide gets its version key back as its id.

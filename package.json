@@ -25,6 +25,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.285",
     "@fastify/static": "^10.1.5",
     "@fastify/websocket": "^11.3.1",
+    "dompurify": "^3.4.16",
     "fastify": "^5.12.5",
     "nanoid": "^6.0.1",
     "node-html-parser": "^9.0.4",
@@ -37,6 +38,7 @@
   "devDependencies": {
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^26.6.3",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

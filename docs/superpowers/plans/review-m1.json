@@ -1,0 +1,472 @@
+{
+ "confirmed": [
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "I tested an untracked copy of the repo in /tmp/ds-repro (`git archive HEAD | tar -x`, with node_modules symlinked). No tracked files were changed. I made the two mutations the reviewer described:\n- src/render/thumbs.ts:75 \u2192 `javaScriptEnabled: true`\n- src/render/theme.ts sanitizeBody \u2192 `return body;` added as the first line, so no sanitizing happens\n\nCommand: `cd /tmp/ds-repro && npx vitest run tests/render/thumbs.test.ts`\n\nOutput:\n```\n \u276f tests/render/thumbs.test.ts (5 tests | 1 failed) 764ms\n   \u276f ThumbService (real Chromium) (5)\n     \u00d7 render does not run scripts even if the html still contains one 67ms\n FAIL ... > render does not run scripts even if the html still contains one\nAssertionError: expected false to be true\n \u276f tests/render/thumbs.test.ts:54:25   expect(b.equals(a)).toBe(true);\n      Tests  1 failed | 4 passed (5)\n```\n\nThe 'Review Focus 3' test ('renders an unbalanced body with a script to a 1280x720 PNG') still passes with both safeguards removed and the `document.body.innerHTML=\"\"` script running. The cause is that `screenshot()` always captures a fixed 1280x720 clip (src/render/thumbs.ts:157), so `pngSize` always returns 1280x720. The only test that fails is the next one (line 51), which injects a script outside the sanitizer path. So the only thing that catches a script running is JS being disabled. Nothing checks that the unbalanced-tag / script-in-body case is sanitized or keeps the stage intact.",
+   "fix_hint": "In Review Focus 3, render a reference slide with the same title and a sanitized body (e.g. `<div><b>unclosed</b></div>`) and assert that the result is byte-equal to it, or at least not equal to a blank-page render. That way running the script or losing the stage makes the test fail."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "At 5716ed0, running `npx tsx /tmp/repro_san.ts`, which imports sanitizeBody from src/render/theme.ts, printed:\n\"<img/onerror=alert(1) src=x>\" -> \"<img/onerror=alert(1) src=x>\"   (unchanged)\n\"<img src=\\\"x\\\"onerror=alert(1)>\" -> \"<img src=\\\"x\\\"onerror=alert(1)>\"   (unchanged)\n\"<img src=x onerror=alert(1)>\" -> \"<img src=x>\"   (control case: stripped)\n\nWhy: the tag regex at theme.ts:32 needs `\\s+` before every attribute. With `/` or a quote directly before the next attribute, the whole tag fails to match, so the replacer never runs and the tag passes through unchanged.\n\nPath to /api/present: src/server/routes/present.ts:23 slideSection \u2192 assembleSlideHtml \u2192 sanitizeBody(slide.body). The result is inlined into the /api/present HTML on the app origin. A grep of src/ for content-security, helmet and csp found no CSP header. Browsers treat `<img/onerror=...>` and `\"x\"onerror=` as valid attributes, so onerror runs.\n\nI did not open a browser and run PATCH then /present end to end. The browser parsing behaviour is standard HTML5 tokenizer behaviour.",
+   "fix_hint": "Stop using the regex and sanitize with a real HTML parser (DOMPurify/jsdom or sanitize-html) that drops every on* attribute and script/javascript: URLs; at minimum change the attribute separator to `[\\s/]*` and strip `(?<=[\\s/\"'])on[a-z0-9_-]*\\s*=...` inside any `<tag ...>` span."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Code path: the importer at src/import/fromDeckHtml.ts:88 sets `assets: [...].map(n => `assets/${n}`)`. src/cli/main.ts:24 builds ThumbService with `assetsDir: join(deckDir, 'assets')`. thumbs.ts assetPath (line 178) does `resolve(this.assetsDir, name)`, which gives <deck>/assets/assets/x.png. readFile throws there, so hashFor folds in 'missing' and never hashes the asset bytes. tests/render/thumbs.test.ts:21 uses `assets: ['s02.png']`, and the real deck slides (e.g. decks/dss-sf-2026/slides/s_1bPtQ4g3u6.json) contain \"assets/...\" entries.\n\nI wrote my own repro at /tmp/dsverify/v.mts. It sets up a ThumbService with assetsDir=<tmp>/assets, hashes a slide once with assets ['assets/x.png'] and once with ['x.png'], overwrites x.png with different bytes, then hashes both again.\nCommand: `cd /Users/sderosiaux/code/personal/deckstudio && npx tsx /tmp/dsverify/v.mts`\nOutput: `importer-style changes after edit? false | basename changes? true`\n\nResult: for imported slides, replacing an asset under the same name leaves the thumb hash unchanged, so the stale cached PNG keeps being served. Nothing tracked was modified.",
+   "fix_hint": "Pick one convention. The simplest fix: have the importer store bare names (`assets: [...sources.keys()]`). The alternative: strip a leading `assets/` in ThumbService.assetPath. Either way, add a test that uses the importer's format."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced at 5716ed0 in /Users/sderosiaux/code/personal/deckstudio (no files touched):\nnpx tsx -e \"import {sanitizeBody, assembleSlideHtml} from './src/render/theme.ts'; console.log(JSON.stringify(sanitizeBody('<scr</script>ipt>alert(1)</scr</script>ipt>'))); console.log(assembleSlideHtml({title:'t',kind:'content',body:'<scr</script>ipt>alert(1)</scr</script>ipt>'},{themeCss:'',assetsBaseUrl:'/a'}).includes('<script>alert(1)</script>'))\"\nOutput:\n\"<script>alert(1)</script>\"\ntrue\n\nWhy it happens, in src/render/theme.ts:27-36: the input contains no literal `<script`, so neither pass 1 (`<script\\b\u2026</script>`) nor pass 2 (unclosed `<script\u2026$`) matches. Pass 3 then strips each `</script>`, and the leftover pieces join into `<script>alert(1)</script>`. The attribute pass leaves it alone because it has no on* attributes.\n\nThe claimed path to the browser holds up in code. src/server/routes/present.ts:22-28 slideSection \u2192 assembleSlideHtml \u2192 sanitizeBody. GET /api/present inlines that section into a page that runs its own PLAYER <script>, and no CSP header is set. PATCH /api/slides/:id (src/server/routes/slides.ts:17-26) only checks SlidePatchSchema and never calls validateBody. Even validateBody (src/model/ops.ts:123) would let this payload through, because it only rejects `<\\s*script\\b` and the payload has no such substring.\n\nI did not start the server and run the curl + /present step. The browser-execution part rests on the code path above plus the confirmed sanitizer output.",
+   "fix_hint": "Stop stripping with a regex: parse with a real HTML sanitizer (e.g. DOMPurify/sanitize-html with script and on* denied), or at minimum run the strip passes in a loop until the output stops changing and send a CSP `script-src 'self'` (nonce the player) on /api/present."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "I reproduced this at 5716ed0. I wrote a throwaway vitest at tests/_tmp_repro/repro.test.ts and ran `npx vitest run tests/_tmp_repro/repro.test.ts --reporter=verbose`. The test calls importDeckHtml({html: deck-3.html, htmlDir: tests/fixtures, outDir: mkdtemp, name, brief}) without `store`, then DeckStore.open(outDir). I deleted the test afterwards, and `git status` is clean. Output:\nfiles assets,brief.json,deck.json,slides,theme.css\nsnapshot slides 3\nversions ERR ENOENT: no such file or directory, scandir '.../deck/versions'\nsnapshotAt(1) ERR version 1 does not exist\nlanes ERR ENOENT: no such file or directory, scandir '.../deck/lanes'\ncommit ERR ENOENT: no such file or directory, open '.../deck/objects/f35d9ca7....json.29473.b9aa163eac52.tmp'\nThe `else` branch at src/import/fromDeckHtml.ts:139-146 writes only slides/, brief.json and a deck.json with version 1. It creates no versions/, objects/ or lanes/ directory. DEFAULT_MODEL is copied at fromDeckHtml.ts:24, duplicating deckStore.ts:18 (same value, 'claude-opus-5'). Caveat on impact: the only production caller, scripts/import-sf.ts:25, passes `store: DeckStore`, so the broken layout is only produced by callers that omit `store`, such as tests/import/fromDeckHtml.test.ts. The API 500 and failed PATCH follow from the failing versions() and commit() calls above, but I did not reproduce them through HTTP.",
+   "fix_hint": "Make `store` required, or default it to DeckStore and always go through init()+commit(); delete the fallback writer and the duplicated DEFAULT_MODEL."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "I wrote a throwaway test at /tmp/presentprobe/probe.test.ts. It calls the real presentRoutes from src/server/routes/present.ts with a fake Fastify app and a fake store, using three slides with bodies '<p>one</p></div>', '<p>two</p>', '<p>three</p>'. It captures the HTML the route sends and loads it in Playwright Chromium with page.setContent.\n\nCommand: `cd /Users/sderosiaux/code/personal/deckstudio && npx vitest run --root /tmp/presentprobe --dir /tmp/presentprobe`\n\nOutput: `RESULT {\"direct\":1,\"all\":3,\"hud\":\"1 / 1\"}` and then `AssertionError: expected 1 to be 3`.\n\nWhat this shows: `#viewport>.slide` matches only 1 slide. All three `.slide` sections exist in the DOM, but slides 2 and 3 are no longer inside #viewport. The player's HUD shows \"1 / 1\", so it silently skips 2 of the 3 slides.\n\nCause: sanitizeBody (src/render/theme.ts:27) only strips scripts and on* attributes. It does not balance tags. The HTML parser handles the stray `</div>` by closing both the open section and div#viewport, because section is not a scope boundary for a div end tag.\n\n`git status --porcelain` is empty afterwards, so no tracked files were changed.",
+   "fix_hint": "Isolate each slide body so its tags cannot close outer elements. Parse and re-serialize each body into balanced markup before concatenating (for example with a DOM parser such as parse5 or jsdom, or with a template element), or render each slide in its own container that is not parsed together with the others."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "The bug reproduces at 5716ed0. hashFor lives at src/render/thumbs.ts:151, not :313, since the file is only 200 lines long. It calls assetPath(name) at :170, which does resolve(this.assetsDir, name). The importer writes asset entries as `assets/${n}` (src/import/fromDeckHtml.ts:86, and tests/import/fromDeckHtml.test.ts:45 expects ['assets/s02.png']). cli/main.ts:24 and tests/server/deck.test.ts:54 both pass assetsDir: join(deckDir,'assets'). So hashFor reads <deck>/assets/assets/p.png, gets ENOENT and hashes the constant 'missing'.\n\nThrowaway test at /tmp/thumbrepro/repro.test.ts, with a temp config at /tmp/thumbrepro/vitest.config.mjs. It creates ThumbService({assetsDir: dir/assets}) and a slide with assets:['assets/p.png']. It writes p.png='one', calls thumbHash, overwrites p.png with 'two', and calls thumbHash again. As a control, it repeats the same steps with assets:['p.png'].\n\nCommand: cd /Users/sderosiaux/code/personal/deckstudio && npx vitest run --root /tmp/thumbrepro --config /tmp/thumbrepro/vitest.config.mjs\n\nOutput: \"assets/p.png hash changes: false | bare p.png hash changes: true\", then \"AssertionError: expected 'b48094e35eb115ecc52f5c798da67fe77a79d\u2026' not to be 'b48094e35eb115ecc52f5c798da67fe77a79d\u2026'\" and \"Tests 1 failed (1)\".\n\nThe control shows the hashing works when the name has no prefix, so the cause is the 'assets/' prefix. The comment above hashFor at :149-150 says replacing an asset file invalidates the cache, which is not true for the entries the importer actually writes. No tracked files were modified (git status --porcelain is empty).",
+   "fix_hint": "In hashFor, remove a leading 'assets/' from the name before resolving it (e.g. name.replace(/^\\/*assets\\//, '')), or have the importer store bare asset names; also add a regression test that uses 'assets/<name>'."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Throwaway vitest at /tmp/sanrepro/s.test.ts (since deleted; working tree clean on main at 5716ed0). It imports sanitizeBody from src/render/theme.ts, asserts each output equals a dummy value so the received value gets printed, and was run with `npx vitest run --root /private/tmp/sanrepro`. Output:\n- `<img/onerror=alert(1) src=x>` \u2192 Received \"<img/onerror=alert(1) src=x>\" (unchanged)\n- `<svg/onload=alert(1)>` \u2192 Received \"<svg/onload=alert(1)>\" (unchanged)\n- `<a href=\"javascript:alert(1)\">x</a>` \u2192 Received unchanged\n- `<iframe srcdoc=\"<script>alert(1)</script>\"></iframe>` \u2192 Received `<iframe srcdoc=\"\"></iframe>`. The script regex happened to strip the script here. The `srcdoc` attribute itself is kept, so an entity-encoded payload (`&lt;script&gt;`) would get through, though I did not test that case.\n- Control: `<img src=x onerror=alert(1)>` \u2192 \"<img src=x>\" (whitespace-preceded handler is stripped, as the reviewer said).\nCause: in src/render/theme.ts:27-36 the tag regex's open group is `<[a-zA-Z][^\\s/>]*`. When a tag uses a slash separator, the attrs group cannot match, so the whole tag falls through untouched, and the handler strip only matches `\\s+on...`. src/server/routes/present.ts puts assembleSlideHtml output inline in /api/present next to an inline `<script>` player. That route sets no CSP (no Content-Security-Policy or helmet anywhere in src/server). PATCH /api/slides/:id (src/server/routes/slides.ts:17) accepts `body`. tests/render/theme.test.ts:8 only covers handlers preceded by whitespace. I did not run the end-to-end PATCH-then-open-in-a-browser step. The sanitizer output reaching the HTML page unchanged is enough for a browser to fire onerror on `<img/onerror=... src=x>`.",
+   "fix_hint": "Replace the regex sanitizer with an allowlist sanitizer (e.g. DOMPurify via jsdom or sanitize-html), which drops on* attributes, javascript: URLs and srcdoc. Add a CSP (script-src 'self' plus a nonce for the player) on /api/present, and add test cases for slash-separated handlers, javascript: hrefs and srcdoc."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced, both statically and in a real browser.\n\nTest file: /tmp/xssrepro/xss.test.ts (throwaway; no tracked files were modified and git status is clean).\nCommand: `cd /Users/sderosiaux/code/personal/deckstudio && npx vitest run --root /private/tmp/xssrepro --silent=false --reporter=verbose`\n\nWhat it does:\n1. Runs sanitizeBody (src/render/theme.ts:27) on two payloads:\n   - the reviewer's `<iframe srcdoc=\"&lt;script&gt;parent.fetch('/api/brief',{method:'PUT',...})&lt;/script&gt;\">`\n   - `<iframe src=\"javascript:parent.fetch('/api/brief?v=iframejs',{method:'PUT',...})\">`\n2. Builds the page with assembleSlideHtml, the same function /api/present uses through slideSection in src/server/routes/present.ts:22-27.\n3. Serves that page from a local HTTP server and opens it in Playwright Chromium.\n4. Records every PUT request that reaches the server.\n\nOutput:\n```\nsrcdoc unchanged = true\niframeJs unchanged = true\nPUT hits on same-origin server: [ '/api/brief?v=iframejs', '/api/brief' ]\n \u2713 xss.test.ts > sanitizer passthrough + execution in browser 1755ms\n```\n\nThe sanitizer returns both payloads unchanged. Both payloads then run and send a same-origin PUT to /api/brief via parent.fetch.\n\nWhy it runs in present mode: /api/present (present.ts:54-80) puts the slide bodies straight into the app-origin HTML. There is no CSP header and no sandbox on the page.\n\nNot tested: `<object data=javascript:>` and `<a href=javascript:>`. The a-href case also needs a user click.",
+   "fix_hint": "Swap the regex denylist for an allowlist sanitizer (e.g. DOMPurify/sanitize-html) that drops iframe/object/embed/srcdoc and javascript: URLs, and add a strict CSP (script-src 'self' or nonce, frame-src 'none') on /api/present."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "I reproduced this with a throwaway vitest test in /tmp/thumbrepro-mine-hCSa/r.test.ts. It was run with `npx vitest run --root $D --config $D/vitest.config.mjs` from /Users/sderosiaux/code/personal/deckstudio, and the repo was left clean (`git status -sb` \u2192 `## main`).\n\nSteps: import tests/fixtures/deck-3.html into a tmp deck using importDeckHtmlFile, pick the slide that has assets, and build `new ThumbService({assetsDir: <deck>/assets})`. Call thumbHash, overwrite <deck>/assets/s02.png with other bytes, then call thumbHash again.\n\nOutput:\n```\nassetPath = /var/folders/.../ds-RHl83Y/deck/assets/assets/s02.png\nh1 9e607f26d46e6f365246eeb2c1befb19efbdf53cad2d0791e27e39bf24818c0e\nh2 9e607f26d46e6f365246eeb2c1befb19efbdf53cad2d0791e27e39bf24818c0e\nsame = true\nAssertionError: expected '9e607f...' not to be '9e607f...'\n```\n\nCause:\n- src/import/fromDeckHtml.ts:86 stores `assets: ['assets/<name>']`.\n- src/render/thumbs.ts:171-181 `assetPath` resolves that name against `assetsDir` (already `<deck>/assets`), which doubles the `assets/` prefix. `readFile` then throws and the hash takes the 'missing' branch at thumbs.ts:163, so the asset-bytes part of the hash never changes.\n- tests/render/thumbs.test.ts:22 uses a bare `'s02.png'`, so the tests can't catch this.\n\nA separate run by a parallel agent also showed the contrast: `assets/p.png hash changes: false | bare p.png hash changes: true`.\n\nThe same doubling should also affect `serveAsset` (thumbs.ts:187) only if the page requests `/assets/assets/...`. It doesn't: the body uses `assets/s02.png` against ASSET_BASE_URL, so rendering itself is probably fine. I didn't check that.",
+   "fix_hint": "Use one asset-name convention: either have the importer store bare names (`[...sources.keys()]`), or have `hashFor` strip a leading `assets/` before `assetPath`. Then change the test fixtures to the importer's format (`assets/s02.png`) and add a test that replacing an asset changes the hash."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced in a /tmp copy of the repo (git archive HEAD \u2192 /tmp/dsrepro, node_modules symlinked). The real decks/ and tracked files were not touched, and git status stays clean.\n1. `npx tsx scripts/import-sf.ts` printed \"imported 29 slides, 20 assets into /private/tmp/dsrepro/decks/dss-sf-2026\" and created versions/ containing v0.json and v1.json.\n2. Started the server with `DECKSTUDIO_PORT=4199 npx tsx src/cli/main.ts decks/dss-sf-2026`, then ran `curl -X PATCH localhost:4199/api/slides/s_6lA1E0hK-N -d '{\"title\":\"x\"}'`. The response had title \"x\", and versions/ then held v0.json, v1.json and v2.json.\n3. Ran `npx tsx scripts/import-sf.ts` again. It printed only \"imported 29 slides, 20 assets into ...\" and exited 0. Afterwards versions/ held only v0.json and v1.json, and `grep -l '\"x\"' slides/*` found nothing (\"edit gone\").\nCause: scripts/import-sf.ts:24 runs `await rm(outDir, { recursive: true, force: true })` with no condition, before importDeckHtmlFile. That wipes out the 'already holds a deck' guard at src/import/fromDeckHtml.ts:103 before it can run. decks/* is in .gitignore, so the data cannot be recovered from git. src/cli/main.ts:20 tells users to run `pnpm import:sf`.\nLeftover: /tmp/dsrepro was not deleted because a hook blocked the rm -rf. It can be removed by hand.",
+   "fix_hint": "Remove the unconditional rm in scripts/import-sf.ts so the importer's deck.json guard fails the run. Only wipe the folder behind an explicit --force flag, and move it to a timestamped backup first."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Throwaway script /tmp/thumbrepro/repro.mts (no tracked files touched, `git status -sb` \u2192 `## main` clean). It starts ThumbService, finds only the Chromium PIDs spawned by this service (pgrep before and after start), renders once, sends kill -9 to those PIDs, then calls render() three more times.\n\nCommand: `cd /Users/sderosiaux/code/personal/deckstudio && ./node_modules/.bin/tsx /tmp/thumbrepro/repro.mts`\n\nOutput:\n```\nown chromium pids: 4\nrender before kill ok, bytes= 4948\nattempt 1 FAILED: page.setContent: Target page, context or browser has been closed\nattempt 2 FAILED: page.setContent: Target page, context or browser has been closed\nattempt 3 FAILED: page.setContent: Target page, context or browser has been closed\n```\n\nCode confirms the cause. src/render/thumbs.ts:139-141 reads the cached `this.page` with no liveness check, and start() (line 70) returns early while `this.browser` is set. Grep over src/ finds no 'disconnected' / isConnected / isClosed handling anywhere. The only start() call is src/cli/main.ts:25, at boot. So once Chromium dies, every later thumb()/render() rejects until the process restarts. I tested at the ThumbService level, not through PATCH /api/slides + GET /api/thumbs/for over HTTP. That route goes through the same enqueue \u2192 screenshot path.",
+   "fix_hint": "In start(), add browser.on('disconnected', () => { this.browser = null; this.page = null; }). Then in screenshot(), relaunch lazily with `if (!this.page || this.page.isClosed()) await this.start()` before calling setContent."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced against the real app at 5716ed0 by running a throwaway tsx script. It used the real buildApp, a real DeckStore in a mktemp deck dir and a stub ThumbService, sent requests with app.inject, and changed no tracked files (`git status` is clean). The script is at /tmp/slpatch-XXXX/repro.ts. I did not use a shared vitest file because /tmp/dsrepro belonged to another concurrent agent and its contents changed while I was using it.\n\nOutput:\nR1 200 {\"id\":\"s1\",...,\"body\":\"<script>x</script><ul><li>a</li></ul>\",\"assets\":[\"../../../etc/passwd\"],\"kind\":\"text\"}\nR2 200 {...,\"body\":\"   \",\"assets\":[\"../../../etc/passwd\"],...}   (a whitespace-only body is also accepted)\nSTORED {\"id\":\"s1\",...,\"body\":\"   \",\"assets\":[\"../../../etc/passwd\"],...}   (read back from a fresh DeckStore.open)\nVERSIONS show n=2 and n=3 with cause {\"kind\":\"accept\",\"laneId\":\"manual\",\"changeId\":\"manual\"}, so each bad PATCH commits a new version.\n\nRoot cause: src/server/routes/slides.ts:18-27 only runs SlidePatchSchema.safeParse (defined in src/model/schema.ts:10/14, where `assets` is z.array(z.string()) and `body` is an unconstrained string) and then goes straight to applyChange. validateBody (src/model/ops.ts:126) is never called on this path, and a grep shows it is not called anywhere in src.\n\nCaveat on the assets half: the traversal string is stored and hashed into the content-addressed slide object. The one filesystem consumer, ThumbService.hashFor, goes through assetPath (src/render/thumbs.ts:178-179), which uses a resolve/relative guard and marks such names 'invalid'. So no file outside assetsDir was read in this path. The unvalidated persistence is real, but I did not show an actual file read.",
+   "fix_hint": "In the PATCH handler, when patch.body is defined, call validateBody and return 400 with the reasons if it fails. Also reject asset names that contain '/', '\\\\' or '..', or that are absolute, either in SlidePatchSchema or in the route."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "I wrote a throwaway vitest file, tests/server/zz_tmp_thumbfail.test.ts, ran it, and deleted it afterwards. `git status -sb` came back clean (`## main`).\n\nThe test sets up Fastify with thumbRoutes and a real Bus with an 'any' listener. The ThumbService stub's thumb() rejects with Error('browser died'), and its thumbPath points to a file that doesn't exist. It then sends GET /api/thumbs/for/s_abc and asserts:\n- the only bus event is exactly {type:'agent.error', message:'thumbnail render failed for s_abc', thread:'global'}\n- no thumb.ready event is emitted\n\nCommand: `npx vitest run tests/server/zz_tmp_thumbfail.test.ts`\nOutput: `Test Files 1 passed (1) / Tests 1 passed (1)`\n\nServer side (src/server/routes/thumbs.ts:28): `bus.emit({ type: 'agent.error', message: \\`thumbnail render failed for ${slide.id}\\`, thread: 'global' })`. The Bus forwards every event to WS clients through 'any'. The BusEvent union (src/server/bus.ts) has no thumb-failure event, so the renderer has nothing else to emit.\n\nClient side (web/src/screens/Main.tsx:51-58): onEvent only handles 'deck.changed' and 'thumb.ready'. `grep -rn \"agent.error\" web/src` finds no handler anywhere in the web client. refreshThumb (Main.tsx:17-26) stores the hash in `pending` when ready=false and never retries or shows an error, so the thumb stays undefined (placeholder) with nothing in the UI saying the render failed.\n\nCaveat: I reproduced this at the server/bus level. I did not run it in a browser to see the grey placeholder, and the M2 chat-thread claim is a prediction.",
+   "fix_hint": "Add a dedicated `{ type: 'thumb.failed'; hash; slideId; message }` BusEvent, emit it at thumbs.ts:28 instead of agent.error, and handle it in Main.tsx onEvent by marking that slide's thumb as failed with a retry option."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "I reproduced it through the real HTTP route with a throwaway, untracked vitest file (tests/server/zz_crash_tmp.test.ts). I deleted the file after the run and `git status -sb` shows the tree is clean.\n\nSetup:\n- DeckStore.init, then commit v1 with slide s1, so deck.json is at version 1.\n- Copied versions/v1.json to versions/v2.json with n=2. This mimics a crash between deckStore.ts:194 and :195.\n- buildApp({deckDir, thumbs}), then 3 PATCHes to /api/slides/s1 with {title:'x'+i}.\n\nCommand: `npx vitest run tests/server/zz_crash_tmp.test.ts`\n\nOutput, the same line three times (req-1, req-2, req-3):\n{\"level\":50,...,\"req\":{\"method\":\"PATCH\",\"url\":\"/api/slides/s1\"},\"res\":{\"statusCode\":500},\"err\":{\"type\":\"Error\",\"message\":\"version 2 already exists\",\"stack\":\"Error: version 2 already exists\\n    at DeckStore.commit (src/store/deckStore.ts:181:66)\\n    at src/server/routes/slides.ts:28:23\"}}\n\nEvery PATCH returns 500. Neither DeckStore.open nor buildApp detects or cleans up the orphan version file, so the deck stays stuck until someone deletes v2.json by hand.\n\nThe second half of the claim was not run, only confirmed by reading the code. A crash after line 191 and before 194 leaves slides/<id>.json holding content that no version records. snapshot() reads main from slides/, so that content shows up.",
+   "fix_hint": "Treat deck.json as the only commit point: write objects and versions/v{n}.json first (overwrite any orphan v{n}.json whose n is above deck.json's version instead of throwing), bump deck.json next, and only then rewrite slides/*.json. On open, rebuild slides/ from the version deck.json points to, so an orphan v{n}.json or half-written slide files are repaired."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "The bug reproduces at 5716ed0. Nothing was committed and no tracked files were changed (`git status -sb` shows a clean `## main`).\n\nCause: `hashSlide` (src/model/ids.ts:21-23) hashes only title, story, notes, body, assets and kind, and leaves out the id. `commit()` writes `objects/<hash>.json` only if that file doesn't exist yet (deckStore.ts:~186), so the stored object keeps the id of the first slide that wrote it. `snapshotAt()` (deckStore.ts:159) then sets `slides[id] = obj` as stored, without correcting the id.\n\nScript `/tmp/repro_dup.mts`:\n1. `DeckStore.init` in a temp dir.\n2. Commit order `['s_a','s_b']`, where both slides have the same content: `{title:'Same', story:'s', notes:'n', body:'b', assets:[], kind:'text'}`.\n3. Call `snapshotAt(1)` and print `id -> slides[id].id` for each slide.\n4. Call `store.commit(snap, {kind:'restore', from:1})`.\n\nCommand: `cd /Users/sderosiaux/code/personal/deckstudio && pnpm exec tsx /tmp/repro_dup.mts`\n\nOutput:\n```\ns_a -> s_a\ns_b -> s_a\ncommit threw: slide keyed \"s_b\" carries id \"s_a\"\n```",
+   "fix_hint": "In snapshotAt (src/store/deckStore.ts:159), use `slides[id] = { ...obj, id };` so the version's key, not the stored object's id, sets the slide id."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "I ran the real ThumbService from src/render/thumbs.ts at 5716ed0 with a throwaway script, /tmp/fontstall/repro.mts, using `./node_modules/.bin/tsx /tmp/fontstall/repro.mts` from the deckstudio repo. After start(), the script adds a route on the service's own page context: `route('https://fonts.googleapis.com/**', () => {})`, which never answers and stands in for a stalled network. A second run uses `route.abort('namenotresolved')` for a fast DNS failure. A third fresh service, with no interception, re-requests the same slide.\n\nOutput:\n```\nstalled A FAIL after 15002 ms: page.setContent: Timeout 15000ms exceeded.\nstalled B FAIL after 15001 ms: page.setContent: Timeout 15000ms exceeded.\ndns-fail OK cached= false 51 ms 397c4f1431bc\nonline same slide cached= true 397c4f1431bc\n```\nTotal run time was 30.8s.\n\nWhat this shows:\n1. Every render waits the full RENDER_TIMEOUT_MS and then throws. thumbs.ts:141 calls `setContent(html, {waitUntil:'load', timeout: 15000})`, and assembleSlideHtml always includes FONTS_LINK (theme.ts:56).\n2. The single-worker queue (enqueue) runs the jobs one after another, so N slides take N\u00d715s.\n3. A fast DNS failure falls back to system fonts in 51ms, as the theme.ts:3 comment says. A stall does not fall back; it fails.\n4. hashFor hashes only the HTML and asset bytes. The fallback-font PNG (hash 397c4f1431bc) was therefore served as `cached=true` once the network was back, and it will stay cached.\n\nI did not test the /etc/hosts blackhole variant. The route stall covers the same code path.\n\nNo tracked files were modified. `git status` shows an untracked tests/zz_repro_tmp.test.ts that I did not create; I left it alone.",
+   "fix_hint": "Stop render correctness from depending on Google Fonts. Either self-host the woff2 files and serve them through the existing ASSET_ORIGIN route, or have the render context abort requests to fonts.googleapis.com and fonts.gstatic.com, or use waitUntil:'domcontentloaded' with a short, bounded wait for document.fonts. In each case, put a fonts marker in the hashFor key."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced at 5716ed0 using a throwaway vitest file, tests/render/zz_repro.test.ts. It was deleted after the run and `git status -sb` stayed clean on main.\n\nThe test imports tests/fixtures/deck-3.html with importDeckHtml (no store; the store argument has no effect on Slide.assets). It builds ThumbService with assetsDir=<deck>/assets, the same wiring as src/cli/main.ts:24 and tests/server/deck.test.ts:54. It computes thumbHash for the slide that has assets, overwrites <deck>/assets/s02.png with different bytes, and computes thumbHash again.\n\nCommand: `npx vitest run tests/render/zz_repro.test.ts`\n\nOutput:\nREPRO assets=[\"assets/s02.png\"] assetsDir=s02.png SAME hash after asset bytes changed\nAssertionError: expected '9e607f26d46e6f365246eeb2c1befb19efbdf\u2026' not to be '9e607f26d46e6f365246eeb2c1befb19efbdf\u2026'\nTests  1 failed (1)\n\nCause: src/import/fromDeckHtml.ts:86 stores `assets/${n}`. assetPath (src/render/thumbs.ts, around line 178) does resolve(assetsDir, 'assets/s02.png'), which gives <deck>/assets/assets/s02.png. readFile fails on that path, so hashFor takes the 'missing' branch and the hash no longer depends on the asset bytes.\n\nserveAsset is not affected. The rendered page requests /assets/assets/s02.png? No: the HTML src is 'assets/s02.png' against base http://deckstudio.assets/assets, which may resolve differently. I didn't check this, so the rendering path is unverified.",
+   "fix_hint": "Make the two layers agree on one form. Either have the importer store bare basenames in Slide.assets (and update decisions.md), or resolve Slide.assets entries against the deck root (strip a leading 'assets/' in hashFor), and add a regression test that runs an imported deck through thumbHash."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced at 5716ed0. I wrote a throwaway test, tests/zz_repro_tmp.test.ts, ran it and deleted it afterwards. The test calls importDeckHtml({html: <tests/fixtures/deck-3.html>, htmlDir: tests/fixtures, outDir: <mkdtemp>/deck, name: 'x', brief}) without `store`, then runs DeckStore.open(out) followed by versions(), snapshotAt(1) and lanes(). I ran it with `npx vitest run tests/zz_repro_tmp.test.ts`. Output:\nLS assets,brief.json,deck.json,slides,theme.css\nOPENED\nversions ERR ENOENT: no such file or directory, scandir '/var/folders/.../imp-JuF5Ys/deck/versions'\nsnapshotAt1 ERR version 1 does not exist\nlanes ERR ENOENT: no such file or directory, scandir '/var/folders/.../imp-JuF5Ys/deck/lanes'\nThe cause is the no-store branch in src/import/fromDeckHtml.ts (lines 139-147). It writes only slides/, brief.json and a deck.json with version:1. It skips everything DeckStore.init creates (the LAYOUT_DIRS objects/, versions/, lanes/, threads/ and cache/thumbs/, plus remarks.json and versions/v0.json) and it never writes versions/v1.json. DeckStore.open only checks for deck.json, so it accepts the folder, and the later calls fail. Mitigating factor: the only caller today, scripts/import-sf.ts:25, passes `store: DeckStore`, so it takes the working path. The broken path is the default one, used when a caller follows the plan's signature. No tracked files were modified. The untracked tests/render/zz-repro-fonts.test.ts in git status was already there and is not mine.",
+   "fix_hint": "Remove the hand-rolled fallback: make `store` required, or default it to DeckStore, so the import always runs DeckStore.init plus commit(snapshot, {kind:'import'}) and produces versions/v0.json, v1.json and the full layout."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "I reproduced it with a throwaway test at /tmp/xssrepro/repro.test.ts. It imports sanitizeBody and assembleSlideHtml from src/render/theme.ts and validateBody from src/model/ops.ts. The payload was the reviewer's iframe srcdoc plus the javascript: link, with an <object data=\"data:text/html,...\"> added.\nCommand: cd /Users/sderosiaux/code/personal/deckstudio && npx vitest run --root /tmp/xssrepro repro.test.ts --disableConsoleIntercept\nOutput:\nSANITIZED: <iframe srcdoc=\"&lt;script&gt;parent.alert(1)&lt;/script&gt;\"></iframe><a href=\"javascript:alert(2)\">x</a><object data=\"data:text/html,<b>x</b>\"></object>\nUNCHANGED: true\nVALIDATE: {\"ok\":true}\nIN_DOC: true   (assembleSlideHtml output still contains the srcdoc payload)\nTests 1 passed\n\nWhy this reaches the present player:\n- sanitizeBody (theme.ts:27-36) has only two rules. It removes <script> tags with a regex and drops attributes whose names start with \"on\". It never looks at srcdoc, href/src URL schemes, iframe, object or embed.\n- validateBody (ops.ts:120-130) rejects only <ul>, <ol> and a literal <script. The entity-encoded &lt;script&gt; inside srcdoc gets past it.\n- /api/present (src/server/routes/present.ts) runs every slide through assembleSlideHtml. It sends the result as text/html with an inline <script> player, so JavaScript is on in that page.\n- I searched src for \"content-security\", \"helmet\" and \"sandbox\" and found nothing, so no CSP and no iframe sandbox sit in front of it.\n- The PATCH /api/slides/:id route (slides.ts:17-34) only parses against SlidePatchSchema before applyChange, so a direct edit stores the body as is.\n- An iframe srcdoc with no sandbox attribute is same-origin with its parent, so parent.alert(1) runs in the /api/present page. The javascript: link runs when clicked.\n\nLimitation: I did not start the server or open a browser. The alert actually firing rests on standard HTML behaviour, not on something I watched happen.\n\nNote: an untracked tests/render/zz_repro.test.ts was already in the repo. I did not create it and left it alone. I modified no tracked files.",
+   "fix_hint": "Replace the regex sanitizer with an allowlist sanitizer (e.g. DOMPurify/sanitize-html) that drops iframe/object/embed/srcdoc and non-http(s)/data-image URL schemes, have validateBody reject bodies the sanitizer would change, and add a CSP (script-src 'self' with a nonce for the player) on /api/present."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Throwaway vitest test, first at /tmp/dsrepro/fonts.test.ts. Run from /tmp, vitest could not resolve its own module, so I copied it to tests/render/zz-repro-fonts.test.ts in the repo, ran it, and deleted it; `git status -sb` shows `## main`, clean. The test mocks `playwright.chromium.launch` to simulate being offline: Chromium gets `--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND, MAP fonts.gstatic.com ~NOTFOUND`, so only the font hosts are unreachable. Steps:\n1. Start ThumbService offline and call `thumb(slide)` on a slide styled with Archivo.\n2. Stop it, start a new ThumbService online with the same cacheDir, and call `thumb(slide)` again.\n3. Call `render()` on the same assembled HTML online to get a fresh PNG.\n\nCommand: `npx vitest run tests/render/zz-repro-fonts.test.ts --silent=false --reporter=verbose`\nOutput:\n{\"offHash\":\"7835ad27...da581\",\"offCached\":false,\"onHash\":\"7835ad27...da581\",\"onCached\":true,\"offLen\":29831,\"freshLen\":28919,\"identical\":false}\n \u2713 fonts not in hash > offline thumb is cached and reused online 665ms\n\nSo the hash is the same offline and online. Online, the cached offline PNG (fallback fonts) is served with `cached:true`, even though an online render gives different bytes (Archivo loaded). The hash in `hashFor` (src/render/thumbs.ts:151-171) covers only the size, the HTML and the asset bytes; FONTS_LINK (src/render/theme.ts:4) is remote and its availability never enters the hash. `thumb()` returns early when the file exists (thumbs.ts:115), so the bad thumb stays until cache/thumbs is deleted.\nNot reproduced: the 15s RENDER_TIMEOUT_MS failure on a slow network. With DNS failing, the font request fails fast and `setContent` with `waitUntil: 'load'` still resolves. That part is plausible for a slow network but unverified.",
+   "fix_hint": "Stop depending on the network at render time: serve Archivo and IBM Plex Mono woff2 locally through the existing ASSET_ORIGIN route, and hash the font bytes (or the theme's font version). If fonts stay remote, check document.fonts.check('700 1em Archivo') after load and skip writing to the cache when it is false."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "This is at deckstudio 5716ed0. At src/model/ops.ts:111-115, a common slide gets flagged as 'moved' whenever its rank among common slides changed (`rankA.get(id) === rank`). If one slide moves to the front, every other slide's rank shifts by one.\n\nI wrote a throwaway test at /tmp/dvrepro/repro.test.ts. It imports diffVersions and uses the same slides map for both snapshots, with a=['1','2','3','4','5'] and b=['5','1','2','3','4']. I ran it from the deckstudio directory with this command:\n`npx vitest run --root /tmp/dvrepro --dir /tmp/dvrepro --reporter=verbose`\n\nThe test printed:\n[{\"kind\":\"moved\",\"slide\":\"5\",\"from\":4,\"to\":0},{\"kind\":\"moved\",\"slide\":\"1\",\"from\":0,\"to\":1},{\"kind\":\"moved\",\"slide\":\"2\",\"from\":1,\"to\":2},{\"kind\":\"moved\",\"slide\":\"3\",\"from\":2,\"to\":3},{\"kind\":\"moved\",\"slide\":\"4\",\"from\":3,\"to\":4}]\n\nAll 5 slides are reported as moved, when only '5' should be. No tracked files were modified.",
+   "fix_hint": "Compute the longest increasing subsequence of commonB mapped through rankA. Only mark as moved the common slides that are not in the LIS."
+  },
+  {
+   "verdict": "CONFIRMED",
+   "evidence": "Reproduced at HEAD 5716ed0 with a throwaway tsx script, /tmp/dsrepro/repro.ts. No tracked files were modified.\n\nThe script runs DeckStore.init in a mkdtemp dir. It then commits order ['s_a','s_b'] with two slides of identical content (empty title, story, notes and body, no assets, kind 'text') and cause {kind:'import'}. Next it calls snapshotAt(1) and commits that snapshot with cause {kind:'restore',from:1}.\n\nCommand:\n`cd /Users/sderosiaux/code/personal/deckstudio && npx tsx /tmp/dsrepro/repro.ts`\n\nOutput:\n```\nsnapshotAt(1).slides.s_b.id = s_a\nrestore commit error = slide keyed \"s_b\" carries id \"s_a\"\n```\n\nRoot cause:\n- `hashSlide` (src/model/ids.ts) leaves the id out of the hash, so both slides get the same hash.\n- `commit` writes the object file only if it does not already exist (deckStore.ts:~194). The file therefore keeps the first writer's id, 's_a'.\n- `snapshotAt` (deckStore.ts:175) returns that object unchanged as `slides[id] = obj`, so the `s_b` entry comes back with id 's_a'.\n- `commit` then rejects the snapshot through its `s.id !== id` check.",
+   "fix_hint": "In snapshotAt (src/store/deckStore.ts:175), change the assignment to `slides[id] = { ...obj, id };` so each slide gets its version key back as its id."
+  }
+ ],
+ "rejected": [],
+ "reviews": [
+  {
+   "findings": [
+    {
+     "file": "src/render/thumbs.ts",
+     "line": 141,
+     "severity": "medium",
+     "claim": "Every thumbnail render blocks on the remote Google Fonts stylesheet (FONTS_LINK in theme.ts:4) because setContent waits for 'load'. On a stalled network (captive portal, conference wifi, proxy blackhole) each render waits the full 15s RENDER_TIMEOUT_MS and then throws, so the single-worker queue takes N\u00d715s and produces no thumbnails. The comment in theme.ts:3 claims rendering falls back to system fonts, but with a stalled connection it fails instead. A fast DNS failure does fall back, and the cache key has no font state, so a fallback-font PNG stays cached for good.",
+     "repro": "Verified. Playwright context with javaScriptEnabled:false and route('https://fonts.googleapis.com/**', () => {}) (never answered); page.setContent('<link rel=stylesheet href=https://fonts.googleapis.com/css2?family=Archivo>\u2026', {waitUntil:'load', timeout:3000}) throws 'Timeout 3000ms exceeded'. In the app, point fonts.googleapis.com at 10.255.255.1 in /etc/hosts, open a 20-slide deck: about 5 minutes of timeouts, every thumb fails with agent.error."
+    },
+    {
+     "file": "web/src/screens/Main.tsx",
+     "line": 52,
+     "severity": "low",
+     "claim": "Every deck.changed (even a one-field PATCH on one slide) makes each open client re-run the whole reload: GET /api/deck, GET /api/versions, then N sequential /api/thumbs/for calls. Server-side, each of those calls re-reads the slide JSON, re-assembles the HTML, and re-reads and SHA-256s the full bytes of every asset the slide lists (thumbs.ts:151-168). Nothing memoizes asset hashes by mtime/size, so one edit costs O(slides \u00d7 asset bytes) disk reads and hashing per client.",
+     "repro": "Import the SF deck (pnpm import:sf) and open 2 browser tabs. Run curl -X PATCH localhost:4177/api/slides/<id> -H 'content-type: application/json' -d '{\"title\":\"x\"}'. The server log/fs trace (e.g. `sudo fs_usage -f filesys node | grep assets`) shows every asset file read twice per slide per tab, although only one slide changed."
+    },
+    {
+     "file": "src/server/routes/thumbs.ts",
+     "line": 18,
+     "severity": "low",
+     "claim": "When a thumb is not cached, the route hashes the slide (reading all asset bytes) through thumbHash, then calls thumbs.thumb(slide), which re-assembles the HTML and hashes every asset again (thumbs.ts:108-109). Asset I/O and hashing run twice per cache miss.",
+     "repro": "Add a counter to readFile in ThumbService.hashFor. Request GET /api/thumbs/for/<id> for an uncached slide with one asset: the asset is read twice before the screenshot, plus once more by serveAsset."
+    },
+    {
+     "file": "src/render/thumbs.ts",
+     "line": 112,
+     "severity": "low",
+     "claim": "The render queue has no bound and no supersession. Each intermediate content hash of a slide edited in quick succession enqueues its own Chromium render, and stale ones are never cancelled, so the thumb for the current content waits behind every obsolete render. The inflight dedupe in routes/thumbs.ts only collapses identical hashes.",
+     "repro": "Send 20 PATCH /api/slides/<id> with titles t1..t20 back to back while a tab is open. Each deck.changed triggers /api/thumbs/for/<id> with a new hash, so 20 renders queue and the t20 thumb.ready arrives only after all 19 stale PNGs are rendered and written."
+    },
+    {
+     "file": "src/store/deckStore.ts",
+     "line": 184,
+     "severity": "low",
+     "claim": "commit() rewrites slides/<id>.json with atomic tmp+rename and runs an exists() check on objects/<hash>.json for every slide in the deck on every commit, then readdirs slides/. A single-slide manual edit costs O(N) file writes and fsyncs instead of O(changed).",
+     "repro": "On a 30-slide deck, run one PATCH /api/slides/<id>. `ls -l --time-style=full-iso slides/` shows all 30 files with a new mtime."
+    },
+    {
+     "file": "src/server/routes/versions.ts",
+     "line": 10,
+     "severity": "low",
+     "claim": "GET /api/versions/:n reads and zod-parses every versions/v*.json only to check that n exists, although snapshotAt already reads v{n}.json directly. Combined with the client fetching the full /api/versions list on every deck.changed (Main.tsx:31), per-request cost grows linearly with history, and every accept adds a version.",
+     "repro": "Script 1000 PATCH edits (1000 versions), then time `curl localhost:4177/api/versions/3`. It reads 1000 files. The GET /api/versions that follows each deck.changed also returns and parses all 1000 on every client."
+    },
+    {
+     "file": "src/render/thumbs.ts",
+     "line": 117,
+     "severity": "low",
+     "claim": "cache/thumbs grows without bound. Every distinct content hash (every intermediate edit, every theme change) leaves a PNG of hundreds of KB, and nothing prunes hashes that no longer belong to main, any version, or any lane.",
+     "repro": "Run 100 PATCH edits on one slide with a tab open, then `ls cache/thumbs | wc -l`: 100+ PNGs, of which only the latest is referenced by main."
+    }
+   ]
+  },
+  {
+   "findings": [
+    {
+     "file": "src/store/deckStore.ts",
+     "line": 175,
+     "severity": "high",
+     "claim": "snapshotAt returns the content-addressed object as-is, so any two slides with identical content (duplicate slide, two empty/placeholder slides) come back with the wrong id: slides['s_b'].id === 's_a'. Committing that snapshot (the planned restore path, plan line 375) throws `slide keyed \"s_b\" carries id \"s_a\"`, and diff/restore logic keyed on slide.id is wrong. Fix: `slides[id] = { ...obj, id }`.",
+     "repro": "tsx script: DeckStore.init(tmp); commit({order:['s_a','s_b'], slides:{s_a:mk('s_a'), s_b:mk('s_b')}}) with identical content; snapshotAt(1).slides.s_b.id prints 's_a'; commit(snapshotAt(1), {kind:'restore',from:1}) throws 'slide keyed \"s_b\" carries id \"s_a\"' (verified)."
+    },
+    {
+     "file": "src/render/thumbs.ts",
+     "line": 313,
+     "severity": "medium",
+     "claim": "hashFor resolves each slide.assets entry against assetsDir, but assets are stored as 'assets/<name>' (importer, fromDeckHtml.ts:87) and assetsDir is already <deck>/assets (cli/main.ts), so it looks up <deck>/assets/assets/<name>, always hashes 'missing', and replacing an asset file never invalidates the cached thumbnail. The comment above it says the opposite.",
+     "repro": "ThumbService({assetsDir: dir/assets}); write assets/p.png='one'; h1=thumbHash({...assets:['assets/p.png']}); overwrite p.png='two'; h2=thumbHash(...) -> h1 === h2 (verified: 'hash changes after asset replace: false')."
+    },
+    {
+     "file": "src/model/ops.ts",
+     "line": 113,
+     "severity": "medium",
+     "claim": "diffVersions' rank-based move detection flags every slide whose rank among common slides changed, so moving one slide from the end to the front reports all N slides as moved rather than just the one. The lane/diff UI (connector per moved slide) and the 'moved correctly' test goal get noise proportional to deck size. It needs an LIS/minimal-move computation.",
+     "repro": "diffVersions({order:['1','2','3','4','5']}, {order:['5','1','2','3','4']}) with the same slides -> moved entries for ['5','1','2','3','4'] (verified); expected only '5'."
+    },
+    {
+     "file": "src/store/deckStore.ts",
+     "line": 194,
+     "severity": "low",
+     "claim": "commit deletes stale slides/<id>.json after updating deck.json, and snapshot() (used by the unlocked GET /api/deck and /api/present) reads deck.json and then each slide file. A read that overlaps a commit removing a slide can read the old order, then find the file deleted, and throw 'deck.json lists slide ... missing', which surfaces as a 500. Reads can also mix new slide content with the old order, because slide files are written before deck.json.",
+     "repro": "Loop GET /api/deck concurrently with PATCH/commit sequences that remove a slide (store.withLock(()=>store.commit(snapWithout)) ); intermittent 500 'deck.json lists slide \"s_x\" but slides/s_x.json is missing'."
+    },
+    {
+     "file": "web/src/screens/Main.tsx",
+     "line": 37,
+     "severity": "low",
+     "claim": "reload awaits refreshThumb for every slide inside the same try as the deck load, so one failing thumbFor (such as a 404 for a slide removed by a commit whose deck.changed WS event has not arrived yet, or a transient error) replaces the whole loaded filmstrip with the 'Could not load the deck' error screen, even though the deck loaded fine.",
+     "repro": "Load the UI, then remove a slide via commit while reload is still iterating thumbs, before the WS event lands (or make /api/thumbs/for/:id return 500 for one slide): the screen switches to the error state instead of just a placeholder for that thumb."
+    },
+    {
+     "file": "src/import/fromDeckHtml.ts",
+     "line": 141,
+     "severity": "low",
+     "claim": "When importDeckHtml runs without a store, it writes deck.json with version 1 but creates no versions/ dir, versions/v0/v1.json, objects/ or lanes/. DeckStore.open accepts the folder, but store.versions() fails with readdir ENOENT, so GET /api/versions returns 500 and the web Main screen, which Promise.alls getVersions, never loads. snapshotAt(1) also throws.",
+     "repro": "importDeckHtml({html: fixture, htmlDir, outDir: tmp, name:'d', brief}) with no store; buildApp({deckDir: tmp, thumbs}); app.inject GET /api/versions -> 500 ENOENT on <tmp>/versions."
+    }
+   ]
+  },
+  {
+   "findings": [
+    {
+     "file": "src/render/thumbs.ts",
+     "line": 155,
+     "severity": "medium",
+     "claim": "The importer and the renderer disagree on what `Slide.assets` contains. The importer (src/import/fromDeckHtml.ts:86) stores `assets/<name>`, but ThumbService.hashFor/assetPath resolves each entry against assetsDir, which gives `<deck>/assets/assets/<name>`. That file never exists, so the hash always folds in 'missing' and the asset bytes are never hashed. For every imported slide, replacing an asset file under the same name (the spec's generate_image and screenshot flow) keeps serving the stale cached thumbnail, even though the code comment says a replaced asset invalidates the cache. tests/render/thumbs.test.ts:21 uses the other convention (`assets: ['s02.png']`), so the suite hides the drift. The real deck decks/dss-sf-2026/slides/*.json has `\"assets/s02.png\"` entries.",
+     "repro": "npx tsx /tmp/dsrev/a.mts (script: ThumbService with assetsDir=<d>/assets, slide.assets=['assets/x.png'], rewrite <d>/assets/x.png, call thumbHash again). Output: 'importer-style assets: hash changes after asset edit? false' vs 'basename assets: hash changes? true'."
+    },
+    {
+     "file": "src/import/fromDeckHtml.ts",
+     "line": 139,
+     "severity": "medium",
+     "claim": "importDeckHtml keeps a second, hand-rolled deck writer for when `store` is omitted, and the plan's interface for importDeckHtml has no `store` option at all. This writer's layout has drifted from DeckStore: it writes deck.json with version 1 but no versions/v1.json, no objects/, lanes/, threads/, cache/ and no remarks.json. It also duplicates DEFAULT_MODEL (line 24, copied from deckStore.ts:18). DeckStore.open() accepts the folder, but versions(), snapshotAt(1), lanes() and commit() all fail afterwards. So GET /api/versions returns 500 and a PATCH /api/slides/:id cannot commit.",
+     "repro": "importDeckHtml({html: tests/fixtures/deck-3.html, htmlDir: tests/fixtures, outDir, name, brief}) without `store`, then DeckStore.open(outDir): snapshot OK (3 slides); versions() -> ENOENT scandir .../versions; snapshotAt(1) -> 'version 1 does not exist'; lanes() -> ENOENT; commit() -> ENOENT on objects/<hash>.json.tmp."
+    },
+    {
+     "file": "src/server/routes/thumbs.ts",
+     "line": 28,
+     "severity": "low",
+     "claim": "A thumbnail render failure is emitted as `{type:'agent.error', thread:'global'}`, an event meant for the agent-session and thread contract. When M2 wires the global thread, render failures will show up as assistant errors in the chat. Meanwhile Main.tsx handles only deck.changed and thumb.ready, so today the failure is invisible and the placeholder stays forever with no retry. Retries only happen through a later GET /api/thumbs/for, which Main makes only on reload.",
+     "repro": "buildApp with a ThumbService that was never start()ed, then GET /api/thumbs/for/<id>: thumbs.thumb rejects ('ThumbService not started'), the bus emits agent.error on thread 'global', and the web filmstrip keeps showing the grey placeholder."
+    },
+    {
+     "file": "src/server/routes/present.ts",
+     "line": 10,
+     "severity": "low",
+     "claim": "The present route rebuilds each slide section by string-slicing the output of assembleSlideHtml with the literal SECTION_OPEN = '<section class=\"slide active\"'. That ties it to the exact attribute order and spacing in src/render/theme.ts:61. Any change to assembleSlideHtml's section tag (a new attribute placed first, or a swapped quote style) makes slideSection throw, and GET /api/present returns 500 for the whole deck.",
+     "repro": "In src/render/theme.ts:61 change the tag to `<section data-kind=\"...\" class=\"slide active\">`, then GET /api/present -> 500 'assembleSlideHtml produced no slide section for s_...'. All tests in tests/render still pass."
+    },
+    {
+     "file": "web/src/components/VersionLine.tsx",
+     "line": 13,
+     "severity": "low",
+     "claim": "The pseudo-lane id 'manual' for direct edits is a private constant in src/server/routes/slides.ts:7 (MANUAL) and a separate string literal in VersionLine. Nothing is shared through src/model. Renaming it on the server silently changes the version line label from 'manual edit' to 'accept manual (manual)'. The same id also collides with any real lane whose id is 'manual'.",
+     "repro": "Change `const MANUAL = 'manual'` to 'direct' in slides.ts, PATCH /api/slides/:id {title:'x'}: typecheck passes, and the VersionLine for the new version renders 'accept direct (direct)'."
+    },
+    {
+     "file": "src/server/bus.ts",
+     "line": 19,
+     "severity": "low",
+     "claim": "This drifts from the plan interface, which says `ws.ts: export class Bus { on(type, fn); emit(evt); attach(fastify) }`. The code puts Bus in bus.ts without an attach method, uses a free function attachBus in ws.ts, renames the plan's `error` event to `agent.error` with an extra `thread`, and adds `slideId` to thumb.ready. M2 tasks written against the plan (makeDeckTools ctx.bus, AgentSession AgentEvent 'error') will not compile or will emit an unknown event type.",
+     "repro": "Add `import { Bus } from '../server/ws.js'` (as the plan's Task 8 interface implies) in any src file, then pnpm typecheck: error TS2305, module has no exported member 'Bus'. `bus.emit({type:'error', message:'x'})` per the Task 10 AgentEvent is also a type error."
+    },
+    {
+     "file": "src/render/thumbs.ts",
+     "line": 128,
+     "severity": "low",
+     "claim": "Dead code: the static getter ThumbService.assetsBaseUrl has no callers. present.ts uses its own ASSETS_BASE_URL '/assets', and thumbs.ts uses the module constant directly. It exposes a third asset base URL ('http://deckstudio.assets/assets') that callers could mistakenly embed in HTML meant for the browser.",
+     "repro": "command rg -n 'ThumbService.assetsBaseUrl|\\.assetsBaseUrl\\b' src web tests: only the definition at src/render/thumbs.ts:128 matches."
+    }
+   ]
+  },
+  {
+   "findings": [
+    {
+     "file": "tests/render/thumbs.test.ts",
+     "line": 46,
+     "severity": "medium",
+     "claim": "The Review Focus 3 test cannot fail. `pngSize(png)` checks the PNG header, but `screenshot()` always uses a fixed clip `{0,0,1280,720}` (src/render/thumbs.ts:157), so every render comes out 1280x720 whether or not the stage broke or the script ran. The injected script (`document.body.innerHTML=\"\"`) would blank the page and the assertion would still pass. The next test (line 51) compares against a render with no body, not against a render where the script did run, so it only covers `javaScriptEnabled:false` and never the unbalanced-tag case.",
+     "repro": "Set `javaScriptEnabled: true` in src/render/thumbs.ts:84 and make `sanitizeBody` return `body` unchanged, then run `pnpm vitest run tests/render/thumbs.test.ts -t 'Review Focus 3'`. It still passes. A real check would compare against a reference render, or assert that `.slide` exists and its bounding box is 1280x720 in the page."
+    },
+    {
+     "file": "tests/render/theme.test.ts",
+     "line": 8,
+     "severity": "medium",
+     "claim": "The sanitizer test only covers event handlers preceded by whitespace. `sanitizeBody` misses slash-separated attributes, so `<img/onerror=alert(1) src=x>` passes through unchanged. It also keeps `javascript:` hrefs and `<iframe srcdoc>`. `/api/present` inlines sanitized bodies into a page that runs JS (the player script, no CSP) on the same origin as the mutating API. Review Focus 3 ('renderer must not execute scripts') therefore does not hold in present mode, and no test covers these cases.",
+     "repro": "`sanitizeBody('<img/onerror=alert(1) src=x>')` returns `<img/onerror=alert(1) src=x>` (checked with a throwaway vitest). Set a slide body to that value with PATCH /api/slides/s1, open /api/present, and the handler fires."
+    },
+    {
+     "file": "tests/render/thumbs.test.ts",
+     "line": 22,
+     "severity": "medium",
+     "claim": "The thumb and server tests build slides with `assets: ['s02.png']`, but the importer (src/import/fromDeckHtml.ts:86) produces `assets: ['assets/s02.png']`. `ThumbService.assetPath` resolves names against `assetsDir`, so for every imported slide it hashes `<deck>/assets/assets/s02.png`, which does not exist ('missing'). The asset-bytes part of the thumb hash is therefore always the same, and replacing an asset file never invalidates the cached thumbnail. Because the tests use a different asset format from real data, they cannot catch this.",
+     "repro": "`new ThumbService({assetsDir: 'tests/fixtures/assets', ...}).assetPath('assets/s02.png')` returns `.../tests/fixtures/assets/assets/s02.png` (checked). Import deck-3.html, call `thumbHash(slide)`, overwrite assets/s02.png with other bytes, and `thumbHash` returns the same hash, so a stale PNG is served."
+    },
+    {
+     "file": "tests/import/fromDeckHtml.test.ts",
+     "line": 16,
+     "severity": "low",
+     "claim": "The default (no `store`) import path is asserted as valid, but it writes a layout that DeckStore cannot serve: no versions/, objects/, lanes/, threads/ or remarks.json, while deck.json says version 1. No test runs the importer against a real DeckStore (the only store test at line 107 uses a fake DeckWriter), so neither the incomplete default layout nor the real integration is covered.",
+     "repro": "Run `importDeckHtml({html, htmlDir: 'tests/fixtures', outDir: d, name: 'x', brief})` without `store`, then `DeckStore.open(d)`. `versions()` throws ENOENT on versions/ and `snapshotAt(1)` throws 'version 1 does not exist', so GET /api/versions returns 500."
+    },
+    {
+     "file": "tests/server/deck.test.ts",
+     "line": 154,
+     "severity": "low",
+     "claim": "The 'ready:false then PNG 404' assertion races the render the route has just started in the background: the 404 check passes only if Chromium has not finished yet. The thumb and render tests also depend on the network. `assembleSlideHtml` always injects the Google Fonts `<link>` and `setContent` waits for `load` (15s timeout), so with a slow or blackholed network renders time out. With partial font loads, the byte-equality assertion in thumbs.test.ts:55 (`b.equals(a)`) can also flake.",
+     "repro": "Run `pnpm vitest run tests/render tests/server` with outbound traffic to fonts.googleapis.com dropped (e.g. a pf rule that drops rather than rejects). setContent waits for the stylesheet until the 15s RENDER_TIMEOUT and the renders fail. Passing an injectable fonts link, or routing fonts.googleapis.com to an empty 200 in the test context, makes the tests hermetic."
+    },
+    {
+     "file": "tests/model/ops.test.ts",
+     "line": 129,
+     "severity": "low",
+     "claim": "The rebaseLane tests never cover a lane that removes a slide and then references it in a later change. rebaseLane adds slides to `known` for earlier inserts but never drops them for earlier removes, so `[remove s1, modify s1]` stays `[pending, pending]` even though applying the lane in order must fail. The M2 lane preview (apply all pending changes) will then fail on a lane that rebase marked healthy.",
+     "repro": "`rebaseLane({..., changes: [{kind:'remove',slide:'s1',status:'pending'}, {kind:'modify',slide:'s1',patch:{title:'x'},status:'pending'}]}, {order:['s1'], slides:{s1}})` returns statuses `['pending','pending']` (checked)."
+    }
+   ]
+  },
+  {
+   "findings": [
+    {
+     "file": "src/render/theme.ts",
+     "line": 31,
+     "severity": "high",
+     "claim": "sanitizeBody strips closing `</script>` in a separate pass that runs after the pair-removal passes, so it can put back a working script element. `<scr</script>ipt>alert(1)</scr</script>ipt>` comes out as `<script>alert(1)</script>`. GET /api/present serves bodies with JS enabled on the app origin (127.0.0.1:4177), so the injected script can call PATCH /api/slides and PUT /api/brief. Slide bodies come from imported HTML, from PATCH /api/slides/:id (which has no validateBody), and from AI lanes in M2. Plan Review Focus 3 requires that scripts never execute.",
+     "repro": "Call sanitizeBody('<scr</script>ipt>alert(1)</scr</script>ipt>'); it returns \"<script>alert(1)</script>\" (confirmed with tsx). End to end: curl -X PATCH localhost:4177/api/slides/<id> -H 'content-type: application/json' -d '{\"body\":\"<scr</script>ipt>alert(document.domain)</scr</script>ipt>\"}', then open /present."
+    },
+    {
+     "file": "src/render/theme.ts",
+     "line": 32,
+     "severity": "high",
+     "claim": "The on* attribute stripper only rewrites a tag when the whole attribute list matches its whitespace-separated grammar. If the tag deviates from that grammar, the regex fails and every attribute is kept, including on* handlers. Browsers accept `/` as an attribute separator and accept a quoted value followed directly by the next attribute, so these handlers fire in /api/present.",
+     "repro": "sanitizeBody('<img/onerror=alert(1) src=x>') and sanitizeBody('<img src=\"x\"onerror=alert(1)>') both return their input unchanged (confirmed with tsx). PATCH either one into a slide body and open /present: onerror runs on the app origin."
+    },
+    {
+     "file": "src/render/theme.ts",
+     "line": 27,
+     "severity": "high",
+     "claim": "The sanitizer is a denylist of <script> tags and on* attributes. It lets through other script vectors that run with the app origin's privileges in present mode: `<iframe srcdoc>` with an entity-encoded script (a srcdoc frame is same-origin with its parent), `<iframe src=\"javascript:...\">`, `<object data=javascript:...>`, and `<a href=javascript:...>`.",
+     "repro": "sanitizeBody('<iframe srcdoc=\"&lt;script&gt;parent.fetch(\\'/api/brief\\',{method:\\'PUT\\',headers:{\\'content-type\\':\\'application/json\\'},body:\\'{}\\'})&lt;/script&gt;\"></iframe>') returns the input unchanged (confirmed for srcdoc and src=javascript:). Loading /present then runs the payload."
+    },
+    {
+     "file": "src/server/routes/present.ts",
+     "line": 27,
+     "severity": "medium",
+     "claim": "slideSection concatenates raw sanitized bodies into a single #viewport. One stray closing tag in any body, such as an unmatched `</div>`, closes #viewport early. Every later slide then falls outside `#viewport>.slide`, and the player skips them without any error. Plan Review Focus 3 requires that an unbalanced tag must not break the stage. Present mode is the one place where a single slide can break the others.",
+     "repro": "Assemble three slides whose bodies are '<p>one</p></div>', '<p>two</p>', '<p>three</p>' as presentRoutes does, then load the page in Chromium: document.querySelectorAll('#viewport>.slide').length is 1, not 3 (confirmed with a Playwright probe)."
+    },
+    {
+     "file": "src/server/routes/slides.ts",
+     "line": 18,
+     "severity": "medium",
+     "claim": "The direct-edit PATCH writes `body` without calling validateBody. The plan requires that check to reject <script>, <ul>/<ol> and empty bodies, and it is the only barrier in front of the flawed sanitizer. The `assets` entries are also taken as arbitrary strings, for example '../../x' or '/etc/passwd', and stored in the content-addressed objects.",
+     "repro": "curl -X PATCH localhost:4177/api/slides/<id> -H 'content-type: application/json' -d '{\"body\":\"<script>x</script><ul><li>a</li></ul>\",\"assets\":[\"../../../etc/passwd\"]}' returns 200 and commits a new version."
+    },
+    {
+     "file": "src/import/fromDeckHtml.ts",
+     "line": 71,
+     "severity": "low",
+     "claim": "The importer resolves any relative `src` against htmlDir without confining it. A deck.html that contains `<img src=\"../../../.ssh/id_rsa\">` makes the import copy that file into <deck>/assets/id_rsa. @fastify/static then serves it at /assets/id_rsa. An untrusted deck file can pull arbitrary local files into the served folder.",
+     "repro": "Write /tmp/d/deck.html containing `<section class=\"slide\"><h2>x</h2><img src=\"../../etc/hosts\"></section>` and run importDeckHtmlFile('/tmp/d/deck.html', {outDir:'/tmp/out',...}). /tmp/out/assets/hosts now exists, and GET /assets/hosts returns it."
+    },
+    {
+     "file": "src/server/ws.ts",
+     "line": 14,
+     "severity": "low",
+     "claim": "Neither /ws nor the REST routes check the Origin or Host header. Any web page the user visits can open ws://127.0.0.1:4177/ws, since browsers do not apply CORS to WebSockets, and read every bus event, including agent.error messages. A DNS-rebinding page can also reach /api/* and pass PATCH/PUT preflights, because the Host header is not validated.",
+     "repro": "From any origin, in the devtools console: new WebSocket('ws://127.0.0.1:4177/ws').onmessage=e=>console.log(e.data). Then edit a slide in the app; the deck.changed event arrives at the foreign page."
+    }
+   ]
+  },
+  {
+   "findings": [
+    {
+     "file": "scripts/import-sf.ts",
+     "line": 24,
+     "severity": "high",
+     "claim": "`pnpm import:sf` runs `rm(outDir, { recursive: true, force: true })` on decks/dss-sf-2026 without asking or backing anything up. This deletes every version, object, lane, thread and remark the creator has built up. It also bypasses the importer's own 'already holds a deck' guard (fromDeckHtml.ts:103). decks/* is gitignored, so the history cannot be recovered. The CLI error in src/cli/main.ts:20 even tells users to run this command.",
+     "repro": "pnpm import:sf; pnpm dev decks/dss-sf-2026; curl -X PATCH localhost:4177/api/slides/<id> -H 'content-type: application/json' -d '{\"title\":\"x\"}' (now v2); pnpm import:sf again. Result: ls decks/dss-sf-2026/versions shows only v0/v1, v2 and the edit are gone, and nothing is printed except 'imported N slides'."
+    },
+    {
+     "file": "src/store/deckStore.ts",
+     "line": 194,
+     "severity": "medium",
+     "claim": "commit() is not crash-consistent. slides/<id>.json is overwritten first (line 191), then versions/v{n}.json is written (194), and only after that is deck.json bumped (195). A crash, kill -9 or ENOSPC between 194 and 195 leaves v{n}.json on disk while deck.json still says n-1. From then on every commit throws 'version n already exists' (line 181), so the deck is stuck and every edit returns 500 until someone deletes the file by hand. A crash before 194 is also bad: main silently shows slide contents from a version that was never recorded.",
+     "repro": "Simulate the crash window. With deck.json at version 1, create decks/X/versions/v2.json (copy v1.json and set n=2). Then PATCH /api/slides/<id> {\"title\":\"x\"}. It returns 500 'version 2 already exists', and every later edit fails the same way."
+    },
+    {
+     "file": "src/render/thumbs.ts",
+     "line": 139,
+     "severity": "medium",
+     "claim": "ThumbService never notices that Chromium has died and never relaunches it. If the browser crashes or is killed (OOM, sleep/wake, a user killing stray Chromium processes), this.page stays set, so every later setContent rejects with 'Target page, context or browser has been closed'. The server keeps running and serving the UI, but no thumbnail ever renders again until the whole process is restarted. The only trace is one error log line per request.",
+     "repro": "Start deckstudio on a deck. Run pkill -f 'chrome-headless-shell|Chromium' (the Playwright child). Edit a slide via PATCH /api/slides/<id>. GET /api/thumbs/for/<id> returns ready:false forever, and the server log shows 'thumbnail render failed' with 'Target ... closed' on every retry."
+    },
+    {
+     "file": "src/server/routes/thumbs.ts",
+     "line": 28,
+     "severity": "medium",
+     "claim": "The server reports a failed thumbnail render to clients as `agent.error` on thread 'global'. The log is mislabelled: it says the agent failed when it was the renderer. The web client (web/src/screens/Main.tsx:51-58) ignores agent.error and gets no thumb.ready, so the slide shows the grey title placeholder forever with nothing in the UI saying the render failed. Once the chat thread UI exists in M2, the render failure will show up as an AI error in the global chat.",
+     "repro": "Put a slide whose body references an asset served slowly, or break rendering (e.g. stop the browser as above). Open the UI: the thumb stays a placeholder with no error indicator. Watching /ws shows {\"type\":\"agent.error\",\"thread\":\"global\",\"message\":\"thumbnail render failed for s_...\"}."
+    },
+    {
+     "file": "src/render/thumbs.ts",
+     "line": 151,
+     "severity": "medium",
+     "claim": "Every rendered page loads the Google Fonts stylesheet (theme.ts:56, FONTS_LINK), but font availability is not part of the render hash. A thumbnail rendered offline (or when fonts.googleapis.com is slow or blocked) is drawn with fallback system fonts and then cached under the same hash forever. Coming back online never refreshes it. On a slow network, setContent with waitUntil 'load' can also hit the 15s RENDER_TIMEOUT_MS and fail the render entirely.",
+     "repro": "Disconnect from the network, start deckstudio on a fresh deck and let the thumbs render. Reconnect and reload the UI: the thumbs keep the fallback fonts (same hash, served from cache/thumbs) while /api/present shows Archivo. Only rm -r cache/thumbs fixes it."
+    },
+    {
+     "file": "src/import/fromDeckHtml.ts",
+     "line": 131,
+     "severity": "low",
+     "claim": "When a store is passed, the importer calls store.init(), which writes deck.json at v0, before it copies the assets or commits the slides. If copyFile fails partway (permissions, a file vanishing between the exists check and the copy, ENOSPC), the folder is left marked as a deck but has no slides or only some assets. Re-running the import without the destructive rm then refuses with 'already holds a deck', and the CLI opens a deck with 0 slides and no error.",
+     "repro": "Make one referenced asset unreadable after the existence check, e.g. chmod 000 on the asset file, then call importDeckHtmlFile(path, {outDir, name, brief, store: DeckStore}). It throws EACCES. Now run deckstudio <outDir>: it starts with 'v0 \u00b7 0 slides', and a second import throws 'already holds a deck'."
+    },
+    {
+     "file": "src/cli/main.ts",
+     "line": 39,
+     "severity": "low",
+     "claim": "The shutdown handler takes over the default SIGINT behaviour but has no re-entry guard and no forced-exit path. Pressing Ctrl-C while a render is in progress waits for app.close and thumbs.stop, which awaits the render queue for up to 2x15s. A second Ctrl-C just calls shutdown() again (app.close is called twice) instead of force-quitting. Any rejection inside shutdown becomes an unhandled rejection because of `void`.",
+     "repro": "Start deckstudio on a deck whose slide references a slow remote resource so a render sits near the 15s timeout. Press Ctrl-C twice. The process stays alive until the render times out, with no output."
+    },
+    {
+     "file": "web/src/api.ts",
+     "line": 73,
+     "severity": "low",
+     "claim": "When the WebSocket reconnects (e.g. after the server restarts under `pnpm dev`, which is tsx watch), the client never calls reload(). Thumb renders that were in flight when the server died never produce a thumb.ready event, and edits made during the gap are missed. The filmstrip keeps showing placeholders or a stale deck until the page is refreshed manually.",
+     "repro": "Run pnpm dev <deck> with the UI open on a fresh cache. Touch a src file while the thumbs are still rendering so tsx restarts the server. The socket reconnects, but the remaining thumbs stay grey placeholders until the browser is refreshed."
+    }
+   ]
+  },
+  {
+   "findings": [
+    {
+     "file": "src/store/deckStore.ts",
+     "line": 159,
+     "severity": "medium",
+     "claim": "snapshotAt() returns the content-addressed object as stored, and that object's id belongs to whichever slide wrote it first. The id is left out of hashSlide, so two slides with identical content share one object. Their positions in a historical snapshot then come back carrying the wrong id: slides[id].id != id. GET /api/versions/:n returns that corrupted payload. Re-committing the snapshot throws, and restore / open-as-lane in the plan (Task 16) are built on exactly that re-commit. Fix: set slides[id] = { ...obj, id } when reading.",
+     "repro": "pnpm exec tsx on a script: DeckStore.init(tmp); commit two slides s_a and s_b with the same title/story/notes/body/assets/kind; snapshotAt(1) gives 's_b -> s_a'; store.commit(snapshotAt(1), {kind:'restore',...}) throws 'slide keyed \"s_b\" carries id \"s_a\"' (verified)."
+    },
+    {
+     "file": "src/render/thumbs.ts",
+     "line": 178,
+     "severity": "medium",
+     "claim": "ThumbService resolves each Slide.assets entry relative to assetsDir. The importer, following decisions.md ('Slide.assets stores ... \"assets/<basename>\"'), stores 'assets/s02.png', so the path resolves to <deck>/assets/assets/s02.png. That file never exists, and the thumb hash takes the 'missing' branch for every imported asset. Replacing an asset's bytes therefore never invalidates the cached thumbnail, which contradicts the stated cache contract. Tests pass only because the thumbs test uses a bare name ('s02.png') that the importer never produces.",
+     "repro": "Import tests/fixtures/deck-3.html with store: DeckStore. Compute ThumbService.thumbHash(slide0), overwrite <deck>/assets/s02.png with different bytes, and compute thumbHash again. The two hashes are identical (verified: 'SAME hash after asset bytes changed')."
+    },
+    {
+     "file": "src/render/theme.ts",
+     "line": 27,
+     "severity": "medium",
+     "claim": "The plan's Review Focus 3 says the renderer must not execute scripts. sanitizeBody strips only literal <script> tags and on* attributes. The present player (/api/present) runs with JavaScript on and uses this same sanitization, so these bodies still execute there: <iframe srcdoc=\"&lt;script&gt;...\"> (entity-encoded script, runs same-origin), javascript: hrefs, and <object data=...>. validateBody, the gate for AI-proposed bodies, also accepts them.",
+     "repro": "sanitizeBody('<iframe srcdoc=\"&lt;script&gt;parent.alert(1)&lt;/script&gt;\"></iframe><a href=\"javascript:alert(2)\">x</a>') returns the input unchanged, and validateBody on it returns {ok:true} (verified). To reproduce end to end: PATCH /api/slides/<id> with that body, then open /api/present; the alert fires in the parent page."
+    },
+    {
+     "file": "src/import/fromDeckHtml.ts",
+     "line": 139,
+     "severity": "medium",
+     "claim": "The plan's exact interface is importDeckHtml({html, htmlDir, outDir, name, brief}), with no store. Called that way, the importer writes deck.json with version 1 but creates no versions/v1.json, objects/, lanes/, threads/, cache/thumbs/ or remarks.json, which breaks the spec's storage layout. DeckStore.open accepts the folder, but versions() fails with ENOENT, so GET /api/versions returns 500, and snapshotAt(1) and lanes() fail as well.",
+     "repro": "Call importDeckHtml({html: deck-3.html, htmlDir: tests/fixtures, outDir: tmp, name, brief}) without store, then (await DeckStore.open(tmp)).versions(). It throws 'ENOENT: scandir .../versions' (verified)."
+    },
+    {
+     "file": "src/store/deckStore.ts",
+     "line": 101,
+     "severity": "low",
+     "claim": "init() writes an empty v0 with cause 'import', and the importer then commits v1, also with cause 'import'. Every imported deck therefore has two 'import' versions, the first with zero slides. The version line shows v0 as an empty import, and VersionLine's empty-state copy ('Importing a deck creates v0') is wrong. Under the spec, a version should be a state of main created by an acceptance or the import, not a phantom empty deck.",
+     "repro": "pnpm import:sf, or import deck-3.html with store: DeckStore, then store.versions() returns ['0:import:0 slides', '1:import:3 slides'] (verified). GET /api/versions shows both."
+    }
+   ]
+  }
+ ]
+}
