@@ -6,7 +6,7 @@ import { buildApp } from '../../src/server/app.js';
 import type { BusEvent } from '../../src/server/bus.js';
 import { DeckStore } from '../../src/store/deckStore.js';
 import { ThumbService, type ThumbResult } from '../../src/render/thumbs.js';
-import type { Brief, Change, Lane, Slide, Snapshot, Version } from '../../src/model/types.js';
+import type { Brief, Change, Lane, Remark, Slide, Snapshot, Version } from '../../src/model/types.js';
 import { tmpDir } from '../helpers/tmp.js';
 import { waitFor } from '../helpers/waitFor.js';
 import { themeCss } from '../render/themeCss.js';
@@ -209,6 +209,35 @@ describe('lanes API', () => {
     expect((await app.inject({ method: 'GET', url: '/api/lanes' })).json()).toEqual([]);
     expect((await accept('l_a', 'c_1')).statusCode).toBe(409);
     expect((await app.inject({ method: 'DELETE', url: '/api/lanes/l_nope' })).statusCode).toBe(404);
+  });
+
+  it('closing a lane (DELETE, last accept, last refuse) resolves the open remarks found on its preview', async () => {
+    const rem = (id: string, sourceLaneId: string | null, status: Remark['status'] = 'open'): Remark => ({
+      id,
+      anchor: { kind: 'slide', slide: 's1' },
+      text: `remark ${id}`,
+      origin: 'check:render',
+      severity: 'warn',
+      status,
+      laneId: null,
+      ...(sourceLaneId ? { sourceLaneId } : {}),
+      createdAt: '2026-09-30T00:00:00.000Z',
+    });
+    await store.putLane(lane('l_a', [modify('c_1', 's1', 'x')]));
+    await store.putLane(lane('l_b', [modify('c_2', 's2', 'y')]));
+    await store.putLane(lane('l_c', [modify('c_3', 's3', 'z')]));
+    await store.putRemarks([rem('r_a', 'l_a'), rem('r_b', 'l_b'), rem('r_c', 'l_c'), rem('r_deck', null)]);
+    const statuses = async () => Object.fromEntries((await store.remarks()).map((r) => [r.id, r.status]));
+
+    expect((await app.inject({ method: 'DELETE', url: '/api/lanes/l_a' })).statusCode).toBe(204);
+    expect(await statuses()).toEqual({ r_a: 'resolved', r_b: 'open', r_c: 'open', r_deck: 'open' });
+    expect(events).toContainEqual({ type: 'remarks.changed' });
+
+    expect((await accept('l_b', 'c_2')).statusCode).toBe(200);
+    expect(await statuses()).toEqual({ r_a: 'resolved', r_b: 'resolved', r_c: 'open', r_deck: 'open' });
+
+    expect((await refuse('l_c', 'c_3')).statusCode).toBe(200);
+    expect(await statuses()).toEqual({ r_a: 'resolved', r_b: 'resolved', r_c: 'resolved', r_deck: 'open' });
   });
 
   it('preview skips pending changes that fail to apply and reports them', async () => {

@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { CHECK_NAMES, isCheckName } from '../agent/checks/index.js';
 import { CheckRunner } from '../agent/checks/runner.js';
 import { makeImageGen } from '../agent/imageGen.js';
 import { AgentSession } from '../agent/session.js';
@@ -77,8 +78,8 @@ function defaultAgent(store: DeckStore, thumbs: ThumbService, bus: Bus, model: s
     imageGen: makeImageGen(join(store.dir, 'assets')),
     runCheck: async (name) => {
       if (!checks) throw new Error('checks are not available in this build');
-      if (checks instanceof CheckRunner) checks.trigger(name);
-      else void checks.run(name as Parameters<typeof checks.run>[0]);
+      if (!isCheckName(name)) throw new Error(`unknown check "${name}"; available: ${CHECK_NAMES.join(', ')}`);
+      checks.start([name]);
     },
   });
   return new AgentSession({ store, tools, bus, model, deckDir: store.dir });
@@ -122,6 +123,6 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   const agent = opts.agent ?? defaultAgent(store, opts.thumbs, bus, model, checks);
   threadRoutes(app, store, agent);
   remarkRoutes(app, store, agent, bus);
-  checkRoutes(app, bus);
+  checkRoutes(app);
   return app;
 }

@@ -254,11 +254,11 @@ describe('AgentSession', () => {
     const errors = events.filter((e) => e.type === 'agent.error');
     expect(errors).toEqual([{ type: 'agent.error', thread: 'global', message: 'error_max_turns: too many turns' }]);
     expect(events.some((e) => e.type === 'assistant.done')).toBe(false);
-    // Only a success result persists the session id.
-    expect((await store.state()).sessionId).toBeNull();
+    // A turn that ran out of turns still has a transcript worth resuming.
+    expect((await store.state()).sessionId).toBe('sess-err');
 
     await s.send('global', 'again', null);
-    expect(fake.calls[1]!.options.resume).toBeUndefined();
+    expect(fake.calls[1]!.options.resume).toBe('sess-err');
     expect(events.at(-1)).toMatchObject({ type: 'assistant.done', thread: 'global' });
     expect((await store.state()).sessionId).toBe('sess-ok');
   });

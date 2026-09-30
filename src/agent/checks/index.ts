@@ -6,6 +6,13 @@ export const CHECK_NAMES = ['arc', 'order', 'gaps', 'render'] as const;
 export type CheckName = (typeof CHECK_NAMES)[number];
 export const isCheckName = (s: string): s is CheckName => (CHECK_NAMES as readonly string[]).includes(s);
 
+export interface ChecksStatus {
+  /** Checks queued or running, in CHECK_NAMES order. */
+  running: CheckName[];
+  /** When each check's last run ended (ISO), null if it has not run since the server started. */
+  lastRun: Record<CheckName, string | null>;
+}
+
 export const CheckResultSchema = z.object({
   remarks: z.array(
     z.object({
