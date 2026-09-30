@@ -273,11 +273,20 @@ describe('Main remarks', () => {
       remark('r_done', { anchor: { kind: 'slide', slide: 's1' }, status: 'resolved' }),
     ]);
     await mounted();
-    await waitFor(() => screen.queryAllByTestId('post-it').length === 2);
-    const slot = (id: string) => screen.getAllByTestId('post-it-slot').find((s) => within(s).getByTestId('post-it').getAttribute('data-remark') === id)!;
-    expect(slot('r_slide').style.gridColumn).toBe('2');
-    expect(slot('r_range').style.gridColumn).toBe('3 / span 3');
-    expect(warnBadge()).toBe(' · 1');
+    // One row of cards: the two overlap (a card is at least three columns wide), so the second waits behind a count.
+    await waitFor(() => screen.queryAllByTestId('post-it').length === 1);
+    const slot = (id: string) => screen.getAllByTestId('post-it-slot').find((s) => within(s).getByTestId('post-it').getAttribute('data-remark') === id);
+    const cols = (id: string) => `${slot(id)!.getAttribute('data-col')}+${slot(id)!.getAttribute('data-span')}`;
+    expect(cols('r_slide')).toBe('1+1');
+    expect(slot('r_range')).toBeUndefined();
+    expect(screen.getByTestId('remarks-more').textContent).toContain('1 more remark');
+    expect(warnBadge()).toBe('1');
+    // Selecting a slide of the range puts its remark first.
+    fireEvent.click(screen.getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's4')!);
+    await waitFor(() => slot('r_range') !== undefined);
+    expect(cols('r_range')).toBe('2+3');
+    expect(within(slot('r_range')!).getByTestId('post-it').getAttribute('data-selected')).toBe('true');
+    expect(slot('r_slide')).toBeUndefined();
 
     m.getRemarks.mockResolvedValue([remark('r_slide', { anchor: { kind: 'slide', slide: 's2' }, status: 'resolved' })]);
     emit({ type: 'remarks.changed' });
@@ -288,14 +297,20 @@ describe('Main remarks', () => {
   it('a lane-scoped remark shows under that lane cell, not under main, and does not count in the warn badge', async () => {
     m.getRemarks.mockResolvedValue([remark('r_lane', { anchor: { kind: 'slide', slide: 's3' }, sourceLaneId: 'l1' })]);
     await mounted();
-    await waitFor(() => within(laneCell('l1', 's3')).queryAllByTestId('post-it').length === 1);
-    expect(within(laneCell('l1', 's3')).getByTestId('post-it').getAttribute('data-remark')).toBe('r_lane');
+    const laneRemarks = (laneId: string) => {
+      const row = screen.getAllByTestId('lane-row').find((r) => r.getAttribute('data-lane') === laneId)!;
+      return within(row).queryAllByTestId('post-it-slot');
+    };
+    await waitFor(() => laneRemarks('l1').length === 1);
+    const [slot] = laneRemarks('l1');
+    expect(within(slot!).getByTestId('post-it').getAttribute('data-remark')).toBe('r_lane');
+    expect(slot!.getAttribute('data-slide')).toBe('s3');
     expect(screen.queryByTestId('post-its')).toBeNull();
     expect(screen.getAllByTestId('post-it')).toHaveLength(1);
-    expect(within(laneCell('l2', 's5')).queryAllByTestId('post-it')).toHaveLength(0);
+    expect(laneRemarks('l2')).toHaveLength(0);
     expect(warnBadge()).toBeNull();
 
-    fireEvent.click(within(laneCell('l1', 's3')).getByRole('button', { name: 'resolve' }));
+    fireEvent.click(within(slot!).getByRole('button', { name: 'resolve' }));
     expect(m.resolveRemark).toHaveBeenCalledWith('r_lane');
   });
 });

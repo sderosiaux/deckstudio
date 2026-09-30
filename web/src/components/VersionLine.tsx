@@ -1,4 +1,4 @@
-import type { MouseEvent } from 'react';
+import type { CSSProperties, MouseEvent } from 'react';
 import type { Version, VersionCause } from '../../../src/model/types.js';
 import { HISTORY_PATH, historyPath, navigate as defaultNavigate } from '../api.js';
 
@@ -31,9 +31,29 @@ function describeCause(c: VersionCause): string {
   }
 }
 
-const ring = '0 0 0 2px var(--paper), 0 0 0 4px var(--accent)';
+/** Short content fingerprint of a version (FNV-1a over its order and slide hashes), shown like a commit id. */
+export function versionHash(v: Pick<Version, 'order' | 'slides'>): string {
+  const text = v.order.map((id) => `${id}:${v.slides[id] ?? ''}`).join('|');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0').slice(0, 7);
+}
 
-/** The versions of main on one line, oldest to newest, the current one marked. */
+const NODE = 11;
+const node = (marked: boolean, current: boolean): CSSProperties => ({
+  width: NODE,
+  height: NODE,
+  borderRadius: 999,
+  boxSizing: 'border-box',
+  border: `1px solid ${marked ? 'var(--accent)' : 'var(--grey-2)'}`,
+  background: marked ? 'radial-gradient(circle, var(--accent) 0 3px, var(--paper) 3.5px)' : current ? 'var(--ink)' : 'var(--paper)',
+  transition: 'border-color .15s ease, background .15s ease',
+});
+
+/** The versions of main as a thin rail, oldest to newest: a node per version, its name and fingerprint under it. */
 export function VersionLine({ versions, current, selection, onSelect, navigate = defaultNavigate }: VersionLineProps) {
   const sorted = [...versions].sort((a, b) => a.n - b.n);
   const selectable = onSelect !== undefined;
@@ -43,39 +63,34 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
     navigate(path);
   };
   return (
-    <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, gap: 12 }}>
-      <div style={{ width: 120, flex: '0 0 120px', fontWeight: 700, fontSize: 13 }}>versions</div>
+    <div style={{ display: 'flex', alignItems: 'flex-start', minWidth: 0 }}>
+      <div className="gutter row-label" style={{ position: 'static', paddingTop: 0, lineHeight: `${NODE}px` }}>versions</div>
       {sorted.length === 0 ? (
         <span className="muted">No versions yet. Importing a deck creates v0.</span>
       ) : (
-        <ol style={{ listStyle: 'none', margin: 0, padding: '6px 4px', display: 'flex', gap: 8, overflowX: 'auto', minWidth: 0, flex: 1 }}>
-          {sorted.map((v) => {
+        <ol style={{ position: 'relative', listStyle: 'none', margin: 0, padding: '0 6px', display: 'flex', overflowX: 'auto', minWidth: 0, flex: 1 }}>
+          {sorted.map((v, i) => {
             const isCurrent = v.n === current;
             const cause = (v as Version & { label?: string }).label ?? describeCause(v.cause);
             const picked: keyof VersionPair | undefined = selection?.a === v.n ? 'a' : selection?.b === v.n ? 'b' : undefined;
             const marked = picked !== undefined || (!selectable && isCurrent);
+            const hash = versionHash(v);
             const content = (
               <>
-                <span className="mono" style={{ fontWeight: 700, color: marked ? 'var(--accent)' : 'var(--ink)' }}>v{v.n}</span>
-                <span className="muted" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {cause}
-                  {selectable && isCurrent ? ' · now' : ''}
+                <span style={{ position: 'relative', display: 'block', height: NODE }}>
+                  {/* the rail: a hairline from this node to the next one */}
+                  {i < sorted.length - 1 ? <span aria-hidden style={{ position: 'absolute', left: NODE, top: Math.floor(NODE / 2), width: 'calc(100% - 11px + 16px)', borderTop: '1px solid var(--line)' }} /> : null}
+                  <span aria-hidden style={{ position: 'absolute', left: 0, top: 0, ...node(marked, isCurrent && selectable) }} />
                 </span>
+                <span style={{ display: 'flex', gap: 6, alignItems: 'baseline', marginTop: 6, fontSize: 13, whiteSpace: 'nowrap' }}>
+                  <span style={{ fontWeight: 700, color: marked ? 'var(--accent)' : 'var(--ink)' }}>v{v.n}</span>
+                  {isCurrent ? <span className="meta">now</span> : null}
+                </span>
+                <span className="meta" style={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cause}</span>
+                <span className="mono meta" style={{ display: 'block' }}>{hash}</span>
               </>
             );
-            const pill = {
-              display: 'flex',
-              gap: 6,
-              alignItems: 'baseline',
-              padding: '4px 10px',
-              borderRadius: 999,
-              border: `1px solid ${marked ? 'var(--accent)' : 'var(--line)'}`,
-              background: 'var(--card)',
-              fontSize: 12,
-              maxWidth: 260,
-              boxShadow: picked ? ring : 'none',
-              transition: 'box-shadow .15s ease, border-color .15s ease',
-            } as const;
+            const box: CSSProperties = { all: 'unset', boxSizing: 'border-box', display: 'block', width: '100%', cursor: 'pointer', color: 'inherit' };
             return (
               <li
                 key={v.n}
@@ -83,17 +98,11 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
                 data-version={v.n}
                 data-selected={picked}
                 aria-current={isCurrent ? 'true' : undefined}
-                title={`v${v.n} · ${cause} · ${new Date(v.createdAt).toLocaleString()}`}
-                style={{ flex: '0 0 auto', display: 'flex' }}
+                title={`v${v.n}, ${cause}, ${new Date(v.createdAt).toLocaleString()}`}
+                style={{ flex: '0 0 128px', width: 128, paddingRight: 16 }}
               >
                 {selectable ? (
-                  <button
-                    type="button"
-                    aria-pressed={picked !== undefined}
-                    aria-label={`v${v.n}: click to compare from, shift-click to compare to`}
-                    onClick={(e) => onSelect(v.n, e.shiftKey ? 'b' : 'a')}
-                    style={{ ...pill, cursor: 'pointer', font: 'inherit', fontSize: 12, color: 'inherit' }}
-                  >
+                  <button type="button" aria-pressed={picked !== undefined} aria-label={`v${v.n}: click to compare from, shift-click to compare to`} onClick={(e) => onSelect(v.n, e.shiftKey ? 'b' : 'a')} style={box}>
                     {content}
                   </button>
                 ) : (
@@ -101,7 +110,7 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
                     href={isCurrent ? HISTORY_PATH : historyPath(v.n, current)}
                     onClick={openHistory(isCurrent ? HISTORY_PATH : historyPath(v.n, current))}
                     aria-label={isCurrent ? `v${v.n}, current: open the history` : `compare v${v.n} with v${current}`}
-                    style={{ ...pill, color: 'inherit', textDecoration: 'none', cursor: 'pointer' }}
+                    style={{ ...box, textDecoration: 'none' }}
                   >
                     {content}
                   </a>
@@ -112,8 +121,8 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
         </ol>
       )}
       {!selectable && sorted.length > 1 ? (
-        <a href={HISTORY_PATH} onClick={openHistory(HISTORY_PATH)} data-testid="history-link" style={{ flex: '0 0 auto', fontSize: 12, fontWeight: 600, color: 'var(--accent)', textDecoration: 'none' }}>
-          compare versions →
+        <a href={HISTORY_PATH} onClick={openHistory(HISTORY_PATH)} data-testid="history-link" className="link" style={{ flex: '0 0 auto', fontSize: 12, lineHeight: `${NODE}px`, marginLeft: 12 }}>
+          compare versions
         </a>
       ) : null}
     </div>

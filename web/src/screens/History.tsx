@@ -41,7 +41,7 @@ function defaultPair(versions: Version[]): VersionPair | null {
   return { a: ns[ns.length - 2] ?? last, b: last };
 }
 
-/** What restoring an entry does to main, as the button says it. */
+/** What restoring an entry does to main: the button always says "restore", its label and tooltip say this. */
 export const RESTORE_VERB: Record<DiffEntry['kind'], string> = {
   added: 'remove from main',
   removed: 'bring back',
@@ -76,10 +76,7 @@ export function describeEntry(e: DiffEntry, c: Compared): { where: string; what:
   }
 }
 
-const card: CSSProperties = { background: 'var(--card)', borderRadius: 'var(--radius)', boxShadow: 'var(--shadow)', padding: 20, minWidth: 0 };
-const primary: CSSProperties = { padding: '11px 22px', borderRadius: 10, border: 'none', background: 'var(--accent)', color: '#fff', fontWeight: 700, fontSize: 15, cursor: 'pointer', transition: 'opacity .15s ease' };
-const secondary: CSSProperties = { padding: '6px 14px', borderRadius: 8, border: '1px solid var(--line)', background: 'var(--card)', color: 'var(--ink)', fontWeight: 600, fontSize: 13, cursor: 'pointer', transition: 'border-color .15s ease' };
-const chip: CSSProperties = { flex: '0 0 auto', padding: '3px 8px', borderRadius: 6, background: 'var(--paper)', border: '1px solid var(--line)', fontSize: 12, whiteSpace: 'nowrap' };
+const chip: CSSProperties = { flex: '0 0 auto', padding: '2px 6px', borderRadius: 4, border: '1px solid var(--line)', fontSize: 12, whiteSpace: 'nowrap' };
 
 /** Compare two versions of main: version line on top, the two filmstrips with diff marks, and what changed with restore. */
 export function History({ api = historyApi, subscribe = defaultSubscribe, navigate = defaultNavigate, initialPair = pairFromSearch(location.search) }: HistoryProps) {
@@ -260,7 +257,7 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
       <div style={{ padding: 32 }}>
         <p style={{ color: 'var(--warn)', fontWeight: 700 }}>Could not load the history.</p>
         <p className="muted mono">{loadError}</p>
-        <button type="button" onClick={() => void refresh()}>Retry</button>
+        <button type="button" className="btn" onClick={() => void refresh()}>Retry</button>
       </div>
     );
   }
@@ -282,31 +279,34 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
   const openDisabled = busy !== null || aIsMain;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <header style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '16px 24px' }}>
-        <a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }} style={{ color: 'var(--grey)', textDecoration: 'none', fontWeight: 600 }}>
-          ← main
-        </a>
-        <span className="muted mono">{deck.state.name} · v{deck.state.version}</span>
-        {actionError ? <span role="alert" style={{ color: 'var(--warn)', fontSize: 13 }}>{actionError}</span> : null}
-        {pair ? (
-          <button
-            type="button"
-            onClick={openAsLane}
-            disabled={openDisabled}
-            title={aIsMain ? `main already has v${pair.a}'s slides` : `Propose the changes that bring main back to v${pair.a}`}
-            style={{ ...primary, marginLeft: 'auto', opacity: openDisabled ? 0.6 : 1 }}
-          >
-            open v{pair.a} as a lane
-          </button>
-        ) : null}
-      </header>
-      <div style={{ padding: '0 24px 12px' }}>
-        <VersionLine versions={versions} current={deck.state.version} selection={pair ?? undefined} onSelect={select} />
-        <p className="muted" style={{ margin: '6px 0 0 132px', fontSize: 12 }}>click a version to compare from it, shift-click to compare to it</p>
-      </div>
-      <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 360px', gap: 16, padding: '0 20px 20px' }}>
-        <section style={card} aria-label="compared versions">
+    <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        <header style={{ display: 'flex', alignItems: 'baseline', gap: 12, padding: '18px 24px 14px' }}>
+          <a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }} className="link" style={{ marginRight: 4 }}>
+            main
+          </a>
+          <h1 className="screen-title">Versions</h1>
+          <span className="meta" data-testid="history-deck">{deck.state.name}</span>
+          <span className="meta" data-testid="history-version">v{deck.state.version}</span>
+          {actionError ? <span role="alert" style={{ color: 'var(--warn)', fontSize: 13 }}>{actionError}</span> : null}
+          {pair ? (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={openAsLane}
+              disabled={openDisabled}
+              title={aIsMain ? `main already has v${pair.a}'s slides` : `Propose the changes that bring main back to v${pair.a}`}
+              style={{ marginLeft: 'auto', alignSelf: 'center' }}
+            >
+              Open v{pair.a} as a lane
+            </button>
+          ) : null}
+        </header>
+        <div style={{ padding: '6px 24px 0' }}>
+          <VersionLine versions={versions} current={deck.state.version} selection={pair ?? undefined} onSelect={select} />
+          <p className="meta" style={{ margin: '10px 0 0 calc(var(--gutter) + 6px)' }}>click a version to compare from it, shift-click to compare to it</p>
+        </div>
+        <section aria-label="compared versions" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '28px 24px 24px' }}>
           {diffError ? (
             <p style={{ color: 'var(--warn)' }}>Could not compare: {diffError}</p>
           ) : !pair ? (
@@ -323,52 +323,53 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
             />
           )}
         </section>
-        <aside style={{ ...card, overflowY: 'auto' }} aria-label="what changed">
-          <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>what changed</h2>
-          {!shown ? null : shown.pair.a === shown.pair.b ? (
-            <p className="muted" style={{ fontSize: 13 }}>Both sides are v{shown.pair.a}. Click another version to compare from it, or shift-click to compare to it.</p>
-          ) : shown.entries.length === 0 ? (
-            <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} and v{shown.pair.b} have the same slides in the same order.</p>
-          ) : shown.a.order.length === 0 ? (
-            // Every row would be a "remove from main": no per-row buttons for a restore that empties the deck.
-            <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} is empty: restoring would remove every slide</p>
-          ) : (
-            <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-              {shown.entries.map((e) => {
-                const key = `${e.kind}:${e.slide}`;
-                const d = describeEntry(e, shown);
-                const verb = RESTORE_VERB[e.kind];
-                return (
-                  <li
-                    key={key}
-                    data-testid="diff-entry"
-                    data-kind={e.kind}
-                    data-slide={e.slide}
-                    onMouseEnter={() => setFocused(e.slide)}
-                    style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 4px', borderBottom: '1px solid var(--line)', background: focused === e.slide ? 'var(--paper)' : 'transparent', transition: 'background .15s ease' }}
-                  >
-                    <span className="mono" style={chip}>{d.where}</span>
-                    <span style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.35 }}>
-                      <span style={{ display: 'block' }}>{d.what}</span>
-                      <span className="muted" style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.title}>{d.title}</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => restore(e, key)}
-                      disabled={busy !== null}
-                      aria-label={`${verb}: ${d.where}, as in v${shown.pair.a}`}
-                      title={`Undo this on main, back to v${shown.pair.a}`}
-                      style={{ ...secondary, opacity: busy !== null ? 0.6 : 1, whiteSpace: 'nowrap' }}
-                    >
-                      {busy === key ? 'restoring…' : verb}
-                    </button>
-                  </li>
-                );
-              })}
-            </ol>
-          )}
-        </aside>
       </div>
+      <aside aria-label="what changed" style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', padding: '18px 20px', overflowY: 'auto' }}>
+        <h2 className="screen-title" style={{ marginBottom: 14 }}>What changed</h2>
+        {!shown ? null : shown.pair.a === shown.pair.b ? (
+          <p className="muted" style={{ fontSize: 13 }}>Both sides are v{shown.pair.a}. Click another version to compare from it, or shift-click to compare to it.</p>
+        ) : shown.entries.length === 0 ? (
+          <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} and v{shown.pair.b} have the same slides in the same order.</p>
+        ) : shown.a.order.length === 0 ? (
+          // Every row would remove a slide from main: no per-row buttons for a restore that empties the deck.
+          <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} is empty: restoring would remove every slide</p>
+        ) : (
+          <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+            {shown.entries.map((e) => {
+              const key = `${e.kind}:${e.slide}`;
+              const d = describeEntry(e, shown);
+              const does = RESTORE_VERB[e.kind];
+              return (
+                <li
+                  key={key}
+                  data-testid="diff-entry"
+                  data-kind={e.kind}
+                  data-slide={e.slide}
+                  onMouseEnter={() => setFocused(e.slide)}
+                  style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 0', borderBottom: '1px solid var(--line)' }}
+                >
+                  <span className="mono" style={{ ...chip, borderColor: focused === e.slide ? 'var(--ink)' : 'var(--line)' }}>{d.where}</span>
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.35 }}>
+                    <span style={{ display: 'block' }}>{d.what}</span>
+                    <span className="muted" style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.title}>{d.title}</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => restore(e, key)}
+                    disabled={busy !== null}
+                    aria-label={`restore (${does}): ${d.where}, as in v${shown.pair.a}`}
+                    title={`${does[0]!.toUpperCase()}${does.slice(1)}, as in v${shown.pair.a}`}
+                    style={{ padding: '4px 10px', fontSize: 12, whiteSpace: 'nowrap' }}
+                  >
+                    {busy === key ? 'restoring…' : 'restore'}
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </aside>
     </div>
   );
 }

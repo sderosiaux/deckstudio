@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { LaneRow } from '../../web/src/components/LaneRow.js';
+import { placeCards } from '../../web/src/components/RemarkRow.js';
 import { ContextChip } from '../../web/src/components/ContextChip.js';
 import { Thread } from '../../web/src/components/Thread.js';
 import type { BusEvent, LaneApi, LanePreviewPayload, ThreadApi } from '../../web/src/api.js';
@@ -92,11 +93,21 @@ describe('LaneRow', () => {
     expect(screen.getByRole('alert').textContent).toContain('orphan');
   });
 
-  it('tags a lane from a check as unsolicited and spans full width for an arc anchor', () => {
+  it('tags a lane from a check as unsolicited; an arc lane starts at the first slide it touches', () => {
     render(<LaneRow lane={lane({ origin: 'check:order', anchor: { kind: 'arc' } })} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
-    expect(screen.getByText('unsolicited · from check: order')).toBeTruthy();
+    expect(screen.getByText('unsolicited, from check: order')).toBeTruthy();
+    // n1 is inserted after s2 (column 1), s3 modified (column 2), s4 removed (column 3): untouched s1 and s5 stay on main.
     const region = screen.getByTestId('lane-region');
-    expect(region.style.gridColumn).toBe('1 / span 5');
+    expect(region.style.gridColumn).toBe('2 / span 3');
+    expect(screen.getAllByTestId('lane-cell').map((c) => c.getAttribute('data-slide'))).toEqual(['n1', 's3', 's4']);
+  });
+
+  it('names the lane in the gutter with its letter and a short label, the full name as tooltip', () => {
+    const long = 'Pull the decision-layer detour out of the opening run';
+    render(<LaneRow lane={lane({ label: long })} letter="B" preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    const name = screen.getByTestId('lane-name');
+    expect(name.textContent).toBe('BPull the decision-layer');
+    expect(name.getAttribute('title')).toBe(long);
   });
 
   it('a single-slide anchor is one column', () => {
@@ -163,7 +174,7 @@ describe('LaneRow', () => {
     expect(onRetry).toHaveBeenCalledWith('l1');
   });
 
-  it('pins lane-scoped remarks under the cell they anchor to; an arc or off-row remark goes below the cells', () => {
+  it('pins lane-scoped remarks on the grid under the cell they anchor to; an arc or off-row remark under the first cell', () => {
     const r = (id: string, anchor: Remark['anchor']): Remark => ({
       id, anchor, text: `text ${id}`, origin: 'check:render', severity: 'warn', status: 'open', laneId: null, sourceLaneId: 'l1', createdAt: '2026-09-30T00:00:00.000Z',
     });
@@ -179,14 +190,16 @@ describe('LaneRow', () => {
         remarkApi={remarkApi}
       />,
     );
-    const cell = (id: string) => screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === id)!;
-    const ids = (el: HTMLElement) => within(el).queryAllByTestId('post-it').map((p) => p.getAttribute('data-remark'));
-    expect(ids(cell('n1'))).toEqual(['r_n1']);
+    const slots = within(screen.getByTestId('lane-remarks')).getAllByTestId('post-it-slot');
+    const at = (id: string) => slots.find((s) => within(s).getByTestId('post-it').getAttribute('data-remark') === id)!;
+    // n1 sits under column 1 (inserted after s2), stacked under s2's own cell
+    expect(at('r_n1').getAttribute('data-slide')).toBe('n1');
+    expect(at('r_n1').getAttribute('data-col')).toBe('1');
     // a range goes under whichever end comes first in the lane: s2 before s3
-    expect(ids(cell('s2'))).toEqual(['r_range']);
-    expect(ids(cell('s3'))).toEqual([]);
-    expect(ids(screen.getByTestId('lane-remarks'))).toEqual(['r_arc']);
-    fireEvent.click(within(cell('n1')).getByRole('button', { name: 'propose' }));
+    expect(at('r_range').getAttribute('data-slide')).toBe('s2');
+    expect(at('r_arc').getAttribute('data-slide')).toBeNull();
+    expect(at('r_arc').getAttribute('data-col')).toBe('1');
+    fireEvent.click(within(at('r_n1')).getByRole('button', { name: 'propose' }));
     expect(remarkApi.proposeRemark).toHaveBeenCalledWith('r_n1');
   });
 });
@@ -269,5 +282,23 @@ d2('thread helpers', () => {
   i2('renders bold, code and italic inline', () => {
     const nodes = renderInline('a **b** `c` *d*');
     e2(nodes.length).toBe(6);
+  });
+});
+
+describe('placeCards', () => {
+  it('gives each card three columns at least, pulls it left at the deck end, stacks overlaps, and drops rows past the limit', () => {
+    const items = [
+      { id: 'a', col: 0, span: 1 },
+      { id: 'b', col: 1, span: 1 },
+      { id: 'c', col: 9, span: 1 },
+      { id: 'd', col: 5, span: 1, selected: true },
+    ];
+    expect(placeCards(items, 10)).toEqual([
+      { id: 'd', start: 5, width: 3, row: 0 },
+      { id: 'a', start: 0, width: 3, row: 0 },
+      { id: 'b', start: 1, width: 3, row: 1 },
+      { id: 'c', start: 7, width: 3, row: 1 },
+    ]);
+    expect(placeCards(items, 10, 1).map((p) => p.id)).toEqual(['d', 'a']);
   });
 });

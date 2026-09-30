@@ -136,20 +136,47 @@ function fold(ops: DiffOp[]): Row[] {
   return rows;
 }
 
-const lineStyle = (op: DiffOp['op']): CSSProperties => ({
-  display: 'flex',
-  gap: 10,
-  padding: '1px 10px',
-  whiteSpace: 'pre-wrap',
-  wordBreak: 'break-word',
-  // --warn and --accent may share a hue: the sign and the strike keep removed and added lines apart.
-  ...(op === 'del'
-    ? { color: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 9%, transparent)', textDecoration: 'line-through' }
-    : op === 'add'
-      ? { color: 'var(--accent)', background: 'color-mix(in srgb, var(--accent) 6%, transparent)', fontWeight: 600, boxShadow: 'inset 3px 0 0 var(--accent)' }
-      : { color: 'var(--grey)' }),
-});
-const SIGN: Record<DiffOp['op'], string> = { same: ' ', del: '−', add: '+' };
+/** Word-level diff of two lines: runs of words and the spaces between them, each kept, removed or added. */
+export function diffWords(before: string, after: string): DiffOp[] {
+  const tok = (t: string): string[] => t.split(/(\s+)/).filter((x) => x !== '');
+  return diffLines(tok(before), tok(after));
+}
+
+/** For each removed or added line, its counterpart in the same edit (i-th removed ↔ i-th added), when there is one. */
+function pairs(rows: Row[]): Map<number, number> {
+  const out = new Map<number, number>();
+  let k = 0;
+  while (k < rows.length) {
+    const dels: number[] = [];
+    const adds: number[] = [];
+    while (k < rows.length && rows[k]!.kind === 'line' && (rows[k] as { op: string }).op === 'del') dels.push(k++);
+    while (k < rows.length && rows[k]!.kind === 'line' && (rows[k] as { op: string }).op === 'add') adds.push(k++);
+    for (let i = 0; i < Math.min(dels.length, adds.length); i++) {
+      out.set(dels[i]!, adds[i]!);
+      out.set(adds[i]!, dels[i]!);
+    }
+    if (dels.length === 0 && adds.length === 0) k++;
+  }
+  return out;
+}
+
+const changed = (op: 'del' | 'add'): CSSProperties =>
+  op === 'del' ? { color: 'var(--grey)', textDecoration: 'line-through' } : { color: 'var(--accent)' };
+
+/** A removed or added line: the words it shares with its counterpart plain, only the changed words struck or in the accent. */
+function Words({ op, text, other }: { op: 'del' | 'add'; text: string; other: string | undefined }) {
+  if (other === undefined) return <span style={changed(op)}>{text}</span>;
+  const ops = op === 'del' ? diffWords(text, other) : diffWords(other, text);
+  return (
+    <>
+      {ops.map((w, i) =>
+        w.op === 'same' ? <span key={i}>{w.text}</span> : w.op === op ? <span key={i} style={/^\s+$/.test(w.text) ? undefined : changed(op)}>{w.text}</span> : null,
+      )}
+    </>
+  );
+}
+
+const SIGN: Record<DiffOp['op'], string> = { same: '', del: '−', add: '+' };
 
 export interface TextDiffProps {
   /** Which field this is, eg "body" or "title". */
@@ -158,30 +185,37 @@ export interface TextDiffProps {
   after: readonly string[];
 }
 
-/** Line diff of one text field: removed lines struck in --warn, added ones in the accent, long unchanged runs folded. */
+/** Line diff of one text field in running text: within an edited line, removed words struck, added words in the accent; long unchanged runs folded. */
 export function TextDiff({ label, before, after }: TextDiffProps) {
   const ops = diffLines(before, after);
-  const changed = ops.some((o) => o.op !== 'same');
+  const anyChange = ops.some((o) => o.op !== 'same');
   let body: ReactNode;
-  if (!changed) body = <p className="muted" style={{ margin: 0, padding: '4px 10px', fontSize: 12 }}>no text change</p>;
+  if (!anyChange) body = <p className="meta" style={{ margin: 0 }}>no text change</p>;
   else {
-    body = fold(ops).map((r, i) =>
-      r.kind === 'fold' ? (
-        <div key={i} data-testid="diff-fold" className="muted" style={{ padding: '2px 10px', fontSize: 11, fontStyle: 'italic' }}>
-          {r.count} unchanged lines
+    const rows = fold(ops);
+    const other = pairs(rows);
+    body = rows.map((r, i) => {
+      if (r.kind === 'fold') {
+        return (
+          <div key={i} data-testid="diff-fold" className="meta">
+            {r.count} unchanged lines
+          </div>
+        );
+      }
+      const counterpart = other.get(i);
+      const otherText = counterpart !== undefined ? (rows[counterpart] as { text: string }).text : undefined;
+      return (
+        <div key={i} data-testid="diff-line" data-op={r.op} data-text={r.text} style={{ display: 'flex', gap: 10, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: r.op === 'same' ? 'var(--grey)' : 'var(--ink)' }}>
+          <span aria-hidden style={{ flex: '0 0 10px', color: 'var(--grey)' }}>{SIGN[r.op]}</span>
+          <span>{r.op === 'same' ? r.text || ' ' : <Words op={r.op} text={r.text} other={otherText} />}</span>
         </div>
-      ) : (
-        <div key={i} data-testid="diff-line" data-op={r.op} data-text={r.text} style={lineStyle(r.op)}>
-          <span aria-hidden style={{ flex: '0 0 auto', width: 10, textDecoration: 'none', display: 'inline-block' }}>{SIGN[r.op]}</span>
-          <span>{r.text === '' ? ' ' : r.text}</span>
-        </div>
-      ),
-    );
+      );
+    });
   }
   return (
-    <section data-testid="text-diff" data-field={label} aria-label={`${label} changes`} style={{ border: '1px solid var(--line)', borderRadius: 8, background: 'var(--card)', overflow: 'hidden' }}>
-      <header style={{ padding: '6px 10px', fontSize: 12, fontWeight: 700, color: 'var(--grey)', borderBottom: '1px solid var(--line)' }}>{label}</header>
-      <div className="mono" style={{ fontSize: 12, lineHeight: 1.55, padding: '4px 0' }}>{body}</div>
+    <section data-testid="text-diff" data-field={label} aria-label={`${label} changes`} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <header className="meta" style={{ fontWeight: 500 }}>{label}</header>
+      <div style={{ fontSize: 13, lineHeight: 1.55, display: 'flex', flexDirection: 'column', gap: 2 }}>{body}</div>
     </section>
   );
 }

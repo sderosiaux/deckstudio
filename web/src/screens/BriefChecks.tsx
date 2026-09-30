@@ -93,10 +93,11 @@ export function applyRunning(prev: ChecksStatus | null, running: readonly string
   return { running: next, lastRun };
 }
 
-const card: CSSProperties = { background: 'var(--card)', borderRadius: 14, boxShadow: '0 1px 2px rgba(23,23,26,.04), 0 0 0 1px var(--line)', padding: 24, minHeight: 0, overflow: 'auto' };
-const h2: CSSProperties = { margin: '0 0 18px', fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' };
-const fieldLabel: CSSProperties = { display: 'block', fontSize: 14, fontWeight: 600, margin: 0, padding: '10px 0 0' };
-const input: CSSProperties = { display: 'block', width: '100%', margin: 0, padding: '10px 14px', borderRadius: 8, border: '1px solid var(--line)', background: 'var(--card)', font: 'inherit', fontSize: 14, lineHeight: 1.45, color: 'var(--ink)' };
+// Columns, not cards: a hairline between them, the text sits on the page.
+const card: CSSProperties = { padding: '0 20px', minHeight: 0, overflow: 'auto', borderLeft: '1px solid var(--line)' };
+const h2: CSSProperties = { margin: '0 0 14px', fontSize: 20, fontWeight: 700 };
+const fieldLabel: CSSProperties = { display: 'block', fontSize: 13, fontWeight: 500, margin: 0, padding: '10px 0 0' };
+const input: CSSProperties = { display: 'block', width: '100%', margin: 0, padding: '8px 12px', borderRadius: 'var(--radius)', border: '1px solid var(--line)', background: 'var(--card)', font: 'inherit', fontSize: 13, lineHeight: 1.45, color: 'var(--ink)' };
 
 function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
   const [draft, setDraft] = useState<Brief>(initial);
@@ -143,9 +144,9 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
   };
 
   return (
-    <section style={card} aria-label="brief">
+    <section style={{ ...card, borderLeft: 'none', paddingLeft: 0 }} aria-label="brief">
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-        <h2 style={h2}>brief</h2>
+        <h2 style={h2}>Brief</h2>
         <span data-testid="brief-save" style={{ fontSize: 12, color: save.kind === 'error' ? 'var(--warn)' : 'var(--grey)' }}>
           {save.kind === 'saving' ? 'saving…' : save.kind === 'saved' ? 'saved' : save.kind === 'error' ? `not saved: ${save.message}` : ''}
         </span>
@@ -300,7 +301,7 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
       <div style={{ padding: 32 }}>
         <p style={{ color: 'var(--warn)', fontWeight: 700 }}>Could not load the deck.</p>
         <p className="muted mono">{load.message}</p>
-        <button type="button" onClick={() => void loadDeck()}>Retry</button>
+        <button type="button" className="btn" onClick={() => void loadDeck()}>Retry</button>
       </div>
     );
   }
@@ -327,27 +328,24 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <header style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '16px 24px' }}>
-        <a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }} style={{ color: 'var(--grey)', textDecoration: 'none', fontWeight: 600 }}>
-          ← main
+      <header style={{ display: 'flex', alignItems: 'baseline', gap: 12, padding: '18px 24px 14px' }}>
+        <a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }} className="link" style={{ marginRight: 4 }}>
+          main
         </a>
-        <span className="muted mono">{deck.state.name} · v{deck.state.version}</span>
+        <h1 className="screen-title">Brief and checks</h1>
+        <span className="meta">{deck.state.name}</span>
+        <span className="meta">v{deck.state.version}</span>
         {runError ? <span style={{ color: 'var(--warn)', fontSize: 13 }}>{runError}</span> : null}
-        <button
-          type="button"
-          onClick={run}
-          disabled={running.size === CHECK_ROWS.length}
-          style={{ marginLeft: 'auto', padding: '11px 22px', borderRadius: 10, border: 'none', background: 'var(--accent)', color: '#fff', fontWeight: 700, fontSize: 15, cursor: 'pointer', opacity: running.size === CHECK_ROWS.length ? 0.6 : 1 }}
-        >
-          {running.size > 0 ? 'checks running…' : 'run checks'}
+        <button type="button" className="btn-primary" onClick={run} disabled={running.size === CHECK_ROWS.length} style={{ marginLeft: 'auto', alignSelf: 'center' }}>
+          {running.size > 0 ? 'Checks running…' : 'Run checks'}
         </button>
       </header>
-      <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(300px, 1fr) minmax(380px, 1.2fr) minmax(300px, 1fr)', gap: 16, padding: '0 20px 20px' }}>
+      <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(300px, 1fr) minmax(380px, 1.2fr) minmax(300px, 1fr)', gap: 0, padding: '8px 24px 20px' }}>
         <BriefCard initial={brief} api={api} />
 
         <section style={card} aria-label="checks">
           <style>{DOT_CSS}</style>
-          <h2 style={h2}>checks</h2>
+          <h2 style={h2}>Checks</h2>
           {liveError ? <p style={{ color: 'var(--warn)', fontSize: 12 }}>Remarks: {liveError}</p> : null}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {CHECK_ROWS.map(({ name, label }) => {
@@ -356,32 +354,30 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
               const dot = dotState({ running: running.has(name), warn, ran: Boolean(status?.lastRun[name]) });
               const isOpen = expanded.has(name);
               return (
-                <div key={name} data-testid="check-row" data-check={name} style={{ border: '1px solid var(--line)', borderRadius: 10 }}>
+                <div key={name} data-testid="check-row" data-check={name} style={{ borderBottom: '1px solid var(--line)' }}>
                   <button
                     type="button"
                     aria-expanded={isOpen}
                     onClick={() => toggle(name)}
-                    style={{ all: 'unset', boxSizing: 'border-box', width: '100%', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px' }}
+                    style={{ all: 'unset', boxSizing: 'border-box', width: '100%', cursor: 'pointer', display: 'flex', alignItems: 'baseline', gap: 12, padding: '12px 0' }}
                   >
                     <span
                       data-testid="check-dot"
                       data-status={dot}
                       role="img"
                       aria-label={DOT[dot].label}
-                      style={{ width: 16, height: 16, borderRadius: '50%', flex: '0 0 auto', transition: 'background .2s ease', ...DOT[dot].style }}
+                      style={{ width: 10, height: 10, borderRadius: '50%', flex: '0 0 auto', alignSelf: 'center', transition: 'background .2s ease', ...DOT[dot].style }}
                     />
-                    <span style={{ fontWeight: 700, fontSize: 16 }}>{label}</span>
-                    <span className="muted" style={{ fontSize: 12 }}>
-                      {open.length ? `${open.length} remark${open.length > 1 ? 's' : ''} · ` : ''}
-                      {lastRunLabel(name)}
-                    </span>
+                    <span className="row-label">{label}</span>
+                    {open.length ? <span className="meta">{`${open.length} remark${open.length > 1 ? 's' : ''}`}</span> : null}
+                    <span className="meta">{lastRunLabel(name)}</span>
                     <span aria-hidden style={{ marginLeft: 'auto', color: 'var(--grey)', transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s ease' }}>⌄</span>
                   </button>
                   {isOpen ? (
-                    <div data-testid="check-remarks" style={{ padding: '0 12px 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div data-testid="check-remarks" style={{ padding: '0 0 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
                       {open.length === 0 ? (
-                        <p className="muted" style={{ margin: '0 6px', fontSize: 13 }}>
-                          {status?.lastRun[name] ? 'Nothing to flag.' : 'Not run yet. Use "run checks" to get remarks here.'}
+                        <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                          {status?.lastRun[name] ? 'Nothing to flag.' : 'Not run yet. Use "Run checks" to get remarks here.'}
                         </p>
                       ) : (
                         open.map((r) => (
@@ -408,11 +404,11 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
         </section>
 
         <section style={card} aria-label="slides">
-          <h2 style={{ ...h2, fontSize: 18 }}>slides</h2>
+          <h2 style={h2}>Slides</h2>
           {deck.order.length === 0 ? (
             <p className="muted">No slides yet. Import a deck.html into the folder, then run checks.</p>
           ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, var(--thumb-w))', gap: 'var(--col-gap)', justifyContent: 'center' }}>
+            <div style={{ '--thumb-w': '96px', '--thumb-h': '96px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, var(--thumb-w))', gap: 10, justifyContent: 'start' } as CSSProperties}>
               {deck.order.map((id, i) => (
                 <div key={id} data-testid="brief-thumb" data-slide={id} data-lit={lit.has(id)} style={{ opacity: lit.has(id) ? 1 : 0.45, transition: 'opacity .15s ease' }}>
                   <Thumb slideId={id} n={i + 1} title={deck.slides[id]?.title ?? id} url={thumbs[id]} selected={lit.has(id)} onClick={() => show({ kind: 'slide', slide: id })} />

@@ -134,7 +134,7 @@ describe('BriefChecks', () => {
     fireEvent.click(header('gaps'));
     expect(lit()).toEqual(['s3', 's4', 's5', 's6']);
 
-    fireEvent.click(screen.getByRole('button', { name: 'run checks' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Run checks' }));
     expect(api.runChecks).toHaveBeenCalledWith();
   });
 
@@ -173,16 +173,16 @@ describe('BriefChecks live status', () => {
     // the initial status (arc ran, render never) has landed
     await waitFor(() => row('arc').textContent?.includes('last run'));
     expect(row('render').textContent).toContain('not run yet');
-    const runBtn = () => screen.getByRole('button', { name: /checks/ });
+    const runBtn = () => screen.getByRole('button', { name: /checks/i });
 
     act(() => push({ type: 'checks.status', running: ['arc', 'render'] }));
     expect(row('render').textContent).toContain('running…');
-    expect(runBtn().textContent).toBe('checks running…');
+    expect(runBtn().textContent).toBe('Checks running…');
     act(() => push({ type: 'checks.status', running: ['render'] }));
     expect(row('arc').textContent).not.toContain('running…');
     act(() => push({ type: 'checks.status', running: [] }));
     expect(row('render').textContent).toContain('last run');
-    expect(runBtn().textContent).toBe('run checks');
+    expect(runBtn().textContent).toBe('Run checks');
     expect(api.getChecksStatus).toHaveBeenCalledTimes(1);
 
     // First open of the socket: the mount already loaded. A reopen means lost events: resync.
@@ -262,7 +262,7 @@ describe('BriefChecks status dots', () => {
 describe('BriefChecks draft lanes', () => {
   const draft: Lane = { ...lane, id: 'l2', label: 'draft fix', status: 'draft', changes: [{ id: 'd1', kind: 'modify', slide: 's2', patch: { title: 'b' }, reason: 'r', status: 'pending' }] };
 
-  it('a remark linked to a draft lane offers "draft ready · open" instead of propose; opening it turns into "lane ready"', async () => {
+  it('a remark linked to a draft lane offers "open draft lane" instead of propose; opening it turns into "lane ready"', async () => {
     const api = stubApi();
     api.getRemarks.mockResolvedValue([remark('r_d', { origin: 'check:order', anchor: { kind: 'slide', slide: 's2' }, laneId: 'l2' })]);
     api.getLanes.mockResolvedValue([lane, draft]);
@@ -271,7 +271,7 @@ describe('BriefChecks draft lanes', () => {
     await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
     const card = await waitFor(() => within(row('order')).queryByTestId('remark'));
     expect(api.getLanes).toHaveBeenCalledWith('all');
-    const open = await waitFor(() => within(card).queryByRole('button', { name: 'draft ready · open' }));
+    const open = await waitFor(() => within(card).queryByRole('button', { name: 'open draft lane' }));
     expect(within(card).queryByRole('button', { name: 'propose' })).toBeNull();
     expect(within(card).queryByTestId('lane-ready')).toBeNull();
 
@@ -281,7 +281,7 @@ describe('BriefChecks draft lanes', () => {
     act(() => push({ type: 'lane.updated', laneId: 'l2' }));
     await waitFor(() => within(card).queryByTestId('lane-ready'));
     expect(within(card).getByTestId('lane-ready').getAttribute('href')).toBe('/lane/l2/change/d1');
-    expect(within(card).queryByRole('button', { name: 'draft ready · open' })).toBeNull();
+    expect(within(card).queryByRole('button', { name: 'open draft lane' })).toBeNull();
   });
 });
 

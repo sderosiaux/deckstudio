@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react';
+import type React from 'react';
 import type { Anchor, Lane, Remark, SlideId, Version } from '../../../src/model/types.js';
 import {
   BRIEF_PATH,
@@ -24,8 +25,9 @@ import {
   type LanePreviewPayload,
 } from '../api.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { FAILED_THUMB, LaneRow, anchorColumns } from '../components/LaneRow.js';
+import { FAILED_THUMB, LaneRow, anchorColumns, laneLetter } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
+import { RemarkRow, placeCards, type Pinned } from '../components/RemarkRow.js';
 import { Thread } from '../components/Thread.js';
 import { VersionLine } from '../components/VersionLine.js';
 
@@ -55,6 +57,8 @@ interface ProposeNote {
   touched: ReadonlySet<string>;
 }
 const MAX_NOTES = 5;
+/** Rows of remark cards under the filmstrip. */
+const REMARK_ROWS = 1;
 
 /** Focus route of the lane now linked to the note's remark, once the co-author's lane is there with something to review. */
 export function noteHref(note: ProposeNote, remarks: readonly Remark[], lanes: readonly Lane[]): string | undefined {
@@ -377,18 +381,23 @@ export function Main() {
     };
   }, [reloadAll, reloadRemarks, refreshThumb, schedule]);
 
-  useEffect(() => {
-    if (load.status !== 'ready' || !scrollTo.current) return;
-    const el = document.querySelector(`[data-testid="thumb"][data-slide="${CSS.escape(scrollTo.current)}"]`);
+  const canvas = useRef<HTMLElement>(null);
+  // The canvas opens at its origin (main's first slide, top left); only a `?select=` or `#lane=` moves it, and only
+  // by the least that brings its target into view.
+  useLayoutEffect(() => {
+    if (load.status !== 'ready') return;
+    const el = canvas.current;
+    const id = scrollTo.current;
     scrollTo.current = null;
-    el?.scrollIntoView?.({ block: 'nearest', inline: 'center' });
+    if (!id && !scrollLane.current) el?.scrollTo?.(0, 0);
+    if (id) document.querySelector(`[data-testid="thumb"][data-slide="${CSS.escape(id)}"]`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }, [load.status]);
 
   useEffect(() => {
     const id = scrollLane.current;
     if (!id || !lanes.some((l) => l.id === id)) return;
     scrollLane.current = null;
-    document.getElementById(`lane-row-${id}`)?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+    document.getElementById(`lane-row-${id}`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
     // Done with the hash: a reload of main should not jump back to that lane.
     history.replaceState(null, '', location.pathname + location.search);
   }, [lanes]);
@@ -409,7 +418,7 @@ export function Main() {
 
   // Clicking empty space (not a thumb, not a button) clears the selection back to the whole deck.
   const clearOnEmpty = (e: MouseEvent<HTMLElement>): void => {
-    if (e.target instanceof Element && e.target.closest('button, a, input, [data-testid="thumb"]')) return;
+    if (e.target instanceof Element && e.target.closest('button, a, input, [data-testid="thumb"], [data-testid="post-it"]')) return;
     setContext({ kind: 'arc' });
   };
 
@@ -419,24 +428,18 @@ export function Main() {
       <div style={{ padding: 32 }}>
         <p style={{ color: 'var(--warn)', fontWeight: 700 }}>Could not load the deck.</p>
         <p className="muted mono">{load.message}</p>
-        <button type="button" onClick={reloadAll}>Retry</button>
+        <button type="button" className="btn" onClick={reloadAll}>Retry</button>
       </div>
     );
   }
 
   const { deck, versions } = load;
   const shownThumbs = failed.size === 0 ? thumbs : Object.fromEntries(deck.order.map((id) => [id, failed.has(id) ? FAILED_THUMB : thumbs[id]]));
-  // One post-it per open remark anchored on main, across the columns of its anchor; the grid stacks them.
+  const selectedCols = context.kind === 'arc' ? null : anchorColumns(context, deck.order);
+  // One card per open remark anchored on main, pinned to the first column of its anchor.
   // Remarks from a lane-scoped check describe that lane's preview, not main: they go on the lane row.
   const openRemarks = remarks.filter((r) => r.status === 'open');
   const mainRemarks = openRemarks.filter((r) => !r.sourceLaneId);
-  const postIts = mainRemarks.flatMap((remark) => {
-    if (remark.anchor.kind === 'arc') return [];
-    const cols = anchorColumns(remark.anchor, deck.order);
-    return cols ? [{ remark, col: cols.start, span: cols.span }] : [];
-  }).sort((a, b) => a.col - b.col);
-  const warnCount = mainRemarks.filter((r) => r.severity === 'warn').length;
-  const selectedCols = context.kind === 'range' ? anchorColumns(context, deck.order) : null;
   const propose = async (id: string): Promise<void> => {
     const r = remarks.find((x) => x.id === id);
     await remarkApi.proposeRemark(id);
@@ -446,34 +449,69 @@ export function Main() {
   };
   const trackedRemarkApi = { proposeRemark: propose, resolveRemark: remarkApi.resolveRemark };
   const draftOf = (r: Remark): string | undefined => (r.laneId && drafts.has(r.laneId) ? r.laneId : undefined);
+  const pinned: Pinned[] = mainRemarks.flatMap((remark) => {
+    if (remark.anchor.kind === 'arc') return [];
+    const cols = anchorColumns(remark.anchor, deck.order);
+    if (!cols) return [];
+    // Selected: the current selection starts inside the remark's columns.
+    const selected = selectedCols !== null && selectedCols.start >= cols.start && selectedCols.start < cols.start + cols.span;
+    return [
+      {
+        id: remark.id,
+        col: cols.start,
+        span: cols.span,
+        selected,
+        card: (
+          <div onClick={() => setContext(remark.anchor)} style={{ cursor: 'pointer' }}>
+            <RemarkPostIt remark={remark} onPropose={propose} onResolve={remarkApi.resolveRemark} draftLaneId={draftOf(remark)} onOpenLane={openLane} selected={selected} />
+          </div>
+        ),
+      },
+    ];
+  });
+  // Main keeps its lanes in view: one row of cards, the selection's own remarks first; the pins still mark every slide.
+  const hiddenRemarks = pinned.length - placeCards(pinned, deck.order.length, REMARK_ROWS).length;
+  const warnCount = mainRemarks.filter((r) => r.severity === 'warn').length;
+  const rangeCols = context.kind === 'range' ? selectedCols : null;
   const onSelect = (id: SlideId): void => {
     select(id);
     if (failed.has(id)) refreshThumb(id, generation.current).catch((err: unknown) => console.warn('deckstudio: thumb retry failed', err));
   };
+  const gridRow = (children: React.ReactNode, testId?: string): React.ReactNode => (
+    <div style={{ display: 'flex' }}>
+      <div className="gutter" />
+      <div data-testid={testId} style={{ display: 'grid', gridTemplateColumns: `repeat(${deck.order.length}, var(--thumb-w))`, columnGap: 'var(--col-gap)', padding: '0 6px' }}>
+        {children}
+      </div>
+    </div>
+  );
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <header style={{ display: 'flex', alignItems: 'baseline', gap: 16, padding: '16px 24px', borderBottom: '1px solid var(--line)' }}>
-        <h1 style={{ margin: 0, fontSize: 18 }}>{deck.brief.title || deck.state.name}</h1>
-        <span className="muted mono">v{deck.state.version} · {deck.order.length} slides</span>
-        <a
-          href={BRIEF_PATH}
-          onClick={(e) => {
-            e.preventDefault();
-            navigate(BRIEF_PATH);
-          }}
-          style={{ marginLeft: 'auto', color: 'var(--ink)', fontWeight: 600, textDecoration: 'none' }}
-        >
-          brief &amp; checks{warnCount > 0 ? <span data-testid="warn-badge" className="accent"> · {warnCount}</span> : null}
-        </a>
-        <a href="/api/present" style={{ color: 'var(--accent)', fontWeight: 700, textDecoration: 'none' }}>Present ▸</a>
-      </header>
-      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <main onClick={clearOnEmpty} style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: '20px 24px' }}>
+    <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        <header style={{ display: 'flex', alignItems: 'baseline', gap: 12, padding: '18px 24px 14px' }}>
+          <h1 className="screen-title">{deck.brief.title || deck.state.name}</h1>
+          <span className="meta">v{deck.state.version}</span>
+          <span className="meta">{deck.order.length} slides</span>
+          <a
+            href={BRIEF_PATH}
+            onClick={(e) => {
+              e.preventDefault();
+              navigate(BRIEF_PATH);
+            }}
+            className="link"
+            style={{ marginLeft: 'auto', color: 'var(--ink)', display: 'inline-flex', gap: 6, alignItems: 'baseline' }}
+          >
+            <span>Brief and checks</span>
+            {warnCount > 0 ? <span data-testid="warn-badge" className="meta">{warnCount}</span> : null}
+          </a>
+          <a href="/api/present" className="btn-primary" style={{ alignSelf: 'center' }}>Present</a>
+        </header>
+        <main ref={canvas} data-testid="canvas" onClick={clearOnEmpty} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '8px 24px 24px' }}>
           {deck.order.length === 0 ? (
             <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
           ) : (
             // max-content: the filmstrip and the lane rows scroll together, so lane columns stay under main's.
-            <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 28 }}>
+            <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 24 }}>
               <div
                 onClickCapture={(e) => {
                   shift.current = e.shiftKey;
@@ -486,49 +524,42 @@ export function Main() {
                   selected={context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : undefined}
                   onSelect={onSelect}
                 />
-                {selectedCols ? (
-                  <div style={{ display: 'flex' }}>
-                    <div style={{ width: 120, flex: '0 0 120px' }} />
-                    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${deck.order.length}, var(--thumb-w))`, columnGap: 'var(--col-gap)', padding: '0 6px' }}>
-                      <div data-testid="range-selection" style={{ gridColumn: `${selectedCols.start + 1} / span ${selectedCols.span}`, height: 3, borderRadius: 2, background: 'var(--accent)' }} />
+                {rangeCols
+                  ? gridRow(<div data-testid="range-selection" style={{ gridColumn: `${rangeCols.start + 1} / span ${rangeCols.span}`, height: 2, borderRadius: 1, background: 'var(--accent)' }} />)
+                  : null}
+                {pinned.length > 0 ? (
+                  <div style={{ display: 'flex', marginTop: 2 }}>
+                    <div className="gutter" style={{ paddingTop: 14 }}>
+                      {hiddenRemarks > 0 ? (
+                        <span className="meta" data-testid="remarks-more" style={{ display: 'block' }}>
+                          {hiddenRemarks} more {hiddenRemarks === 1 ? 'remark' : 'remarks'}: select a slide to see its own
+                        </span>
+                      ) : null}
                     </div>
-                  </div>
-                ) : null}
-                {postIts.length > 0 ? (
-                  <div style={{ display: 'flex', marginTop: 8 }}>
-                    <div style={{ width: 120, flex: '0 0 120px', fontSize: 12 }} className="muted">remarks</div>
-                    <div
-                      data-testid="post-its"
-                      style={{ display: 'grid', gridTemplateColumns: `repeat(${deck.order.length}, var(--thumb-w))`, columnGap: 'var(--col-gap)', rowGap: 8, gridAutoFlow: 'row dense', alignItems: 'start', padding: '0 6px' }}
-                    >
-                      {postIts.map(({ remark, col, span }) => (
-                        <div key={remark.id} data-testid="post-it-slot" style={{ gridColumn: span > 1 ? `${col + 1} / span ${span}` : `${col + 1}` }}>
-                          <RemarkPostIt remark={remark} onPropose={propose} onResolve={remarkApi.resolveRemark} draftLaneId={draftOf(remark)} onOpenLane={openLane} />
-                        </div>
-                      ))}
-                    </div>
+                    <RemarkRow testId="post-its" items={pinned} columns={deck.order.length} maxRows={REMARK_ROWS} />
                   </div>
                 ) : null}
                 {remarkError ? (
-                  <p style={{ margin: '6px 0 0 126px', color: 'var(--warn)', fontSize: 12 }}>
-                    <span>Remarks: {remarkError}</span> <button type="button" onClick={reloadAll}>Retry</button>
+                  <p style={{ margin: '6px 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>
+                    <span>Remarks: {remarkError}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
                   </p>
                 ) : null}
               </div>
-              {laneError && !lanesFailed ? <p style={{ margin: 0, color: 'var(--warn)', fontSize: 12 }}>Lanes: {laneError}</p> : null}
+              {laneError && !lanesFailed ? <p style={{ margin: '0 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>Lanes: {laneError}</p> : null}
               {lanesFailed ? (
-                <p role="alert" style={{ margin: '0 0 0 126px', color: 'var(--warn)', fontSize: 13 }}>
-                  <span>Lanes: {lanesFailed}</span> <button type="button" onClick={reloadAll}>Retry</button>
+                <p role="alert" style={{ margin: '0 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 13 }}>
+                  <span>Lanes: {lanesFailed}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
                 </p>
               ) : lanes.length === 0 ? (
-                <p className="muted" style={{ margin: '0 0 0 126px', fontSize: 13 }}>
+                <p className="muted" style={{ margin: '0 0 0 var(--gutter)', fontSize: 13, maxWidth: 520 }}>
                   No open lanes. Ask the co-author in the thread; its proposals appear here, under the slides they touch.
                 </p>
               ) : (
-                lanes.map((l) => (
+                lanes.map((l, i) => (
                   <LaneRow
                     key={l.id}
                     lane={l}
+                    letter={laneLetter(i)}
                     preview={previews[l.id]}
                     mainOrder={deck.order}
                     mainThumbs={shownThumbs}
@@ -543,58 +574,53 @@ export function Main() {
             </div>
           )}
         </main>
-        <aside data-testid="thread-panel" style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          {notes.length > 0 ? (
-            <div role="status" aria-live="polite" style={{ padding: '12px 20px 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {notes.map((n) => {
-                const href = noteHref(n, remarks, lanes);
-                return (
-                  <div key={n.remarkId} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, lineHeight: 1.4 }}>
-                    <span data-testid="propose-note" style={{ flex: 1, minWidth: 0, fontStyle: 'italic', color: 'var(--grey)' }}>
-                      {href ? (
-                        <a
-                          href={href}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            navigate(href);
-                          }}
-                          style={{ color: 'var(--accent)', fontStyle: 'normal', fontWeight: 600, textDecoration: 'none' }}
-                        >
-                          lane ready for {n.where} → review
-                        </a>
-                      ) : (
-                        `asked the co-author for a lane on ${n.where}…`
-                      )}
-                    </span>
-                    <button
-                      type="button"
-                      aria-label="dismiss"
-                      onClick={() => setNotes((prev) => prev.filter((x) => x.remarkId !== n.remarkId))}
-                      style={{ all: 'unset', cursor: 'pointer', color: 'var(--grey)' }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          ) : null}
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <Thread
-              threadKey="global"
-              context={context}
-              order={deck.order}
-              slides={deck.slides}
-              api={threadApi}
-              subscribe={fanout}
-              onClearContext={() => setContext({ kind: 'arc' })}
-            />
-          </div>
-        </aside>
+        <div style={{ padding: '14px 24px 16px' }}>
+          <VersionLine versions={versions} current={deck.state.version} />
+        </div>
       </div>
-      <footer style={{ borderTop: '1px solid var(--line)', padding: '10px 24px', background: 'var(--paper)' }}>
-        <VersionLine versions={versions} current={deck.state.version} />
-      </footer>
+      <aside data-testid="thread-panel" style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {notes.length > 0 ? (
+          <div role="status" aria-live="polite" style={{ padding: '12px 20px 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {notes.map((n) => {
+              const href = noteHref(n, remarks, lanes);
+              return (
+                <div key={n.remarkId} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, lineHeight: 1.4 }}>
+                  <span data-testid="propose-note" style={{ flex: 1, minWidth: 0, color: 'var(--grey)' }}>
+                    {href ? (
+                      <a
+                        href={href}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          navigate(href);
+                        }}
+                        style={{ color: 'var(--ink)', fontWeight: 500 }}
+                      >
+                        lane ready for {n.where}, review it
+                      </a>
+                    ) : (
+                      `asked the co-author for a lane on ${n.where}…`
+                    )}
+                  </span>
+                  <button type="button" aria-label="dismiss" className="link" onClick={() => setNotes((prev) => prev.filter((x) => x.remarkId !== n.remarkId))} style={{ fontSize: 12 }}>
+                    ×
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <Thread
+            threadKey="global"
+            context={context}
+            order={deck.order}
+            slides={deck.slides}
+            api={threadApi}
+            subscribe={fanout}
+            onClearContext={() => setContext({ kind: 'arc' })}
+          />
+        </div>
+      </aside>
     </div>
   );
 }

@@ -9,16 +9,18 @@ export interface FilmstripProps {
   selected?: SlideId;
   onSelect(id: SlideId): void;
   label?: string;
+  /** Full row name, as the gutter label's tooltip when `label` is a shortened one. */
+  fullLabel?: string;
 }
 
-/** A labelled, horizontally scrollable row of slide thumbnails in deck order. */
-export function Filmstrip({ order, slides, thumbs, selected, onSelect, label = 'main' }: FilmstripProps) {
+/** A row of slide thumbnails in deck order, its name in the gutter. The canvas around it scrolls, not the row. */
+export function Filmstrip({ order, slides, thumbs, selected, onSelect, label = 'main', fullLabel }: FilmstripProps) {
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', minWidth: 0 }}>
-      <div style={{ width: 120, flex: '0 0 120px', paddingTop: 'calc(var(--thumb-h) / 2 - 9px)', fontWeight: 700, fontSize: 13, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+      <div className="gutter row-label" title={fullLabel} style={{ paddingTop: 8 }}>
         {label}
       </div>
-      <div role="list" style={{ display: 'flex', gap: 'var(--col-gap)', overflowX: 'auto', padding: '6px 6px 12px', minWidth: 0, flex: 1 }}>
+      <div role="list" style={{ display: 'flex', gap: 'var(--col-gap)', padding: '6px 6px 4px' }}>
         {order.map((id, i) => {
           const slide = slides[id];
           return (

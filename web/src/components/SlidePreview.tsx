@@ -3,7 +3,7 @@ import { useEffect, useState, type CSSProperties } from 'react';
 export type SlidePreviewVariant = 'main' | 'lane' | 'missing';
 
 export interface SlidePreviewProps {
-  /** Caption in the card's corner, eg "main · slide 7". */
+  /** Caption in the card's corner, eg "main, slide 7". */
   label: string;
   variant: SlidePreviewVariant;
   /** Slide title, shown until the thumbnail is ready. Ignored for `missing`. */

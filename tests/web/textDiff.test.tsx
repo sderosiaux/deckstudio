@@ -15,6 +15,14 @@ describe('TextDiff', () => {
     expect(screen.getAllByTestId('diff-line').filter((l) => l.getAttribute('data-op') === 'add')).toHaveLength(1);
   });
 
+  it('marks only the changed words of an edited line: struck in the removed line, accent in the added one', () => {
+    render(<TextDiff label="story" before={['Consumers pull from the log']} after={['Consumers push from the log']} />);
+    const [del, add] = screen.getAllByTestId('diff-line');
+    const marked = (el: HTMLElement) => Array.from(el.querySelectorAll('span[style]')).filter((s) => (s as HTMLElement).style.textDecoration === 'line-through' || (s as HTMLElement).style.color === 'var(--accent)').map((s) => s.textContent);
+    expect(marked(del!)).toEqual(['pull']);
+    expect(marked(add!)).toEqual(['push']);
+  });
+
   it('says so when nothing changed', () => {
     render(<TextDiff label="title" before={['Same']} after={['Same']} />);
     expect(screen.getByTestId('text-diff').textContent).toContain('no text change');

@@ -3,14 +3,40 @@
   --paper: #FAF9F6; --ink: #17171A; --accent: #E4572E; --grey: #7A7873; --grey-2: #B5B2AB; --line: #E4E1DA; --card: #FFFFFF;
   --ok: #2E8B57; --warn: #E4572E;
   --font: 'Archivo', system-ui, sans-serif; --mono: 'IBM Plex Mono', ui-monospace, monospace;
-  --radius: 10px; --shadow: 0 4px 12px rgba(23, 23, 26, .08);
-  --thumb-w: 160px; --thumb-h: 90px; --col-gap: 12px;
+  --radius: 6px; --shadow: 0 4px 12px rgba(23, 23, 26, .08);
+  /* One column grid for the filmstrip and the lanes: 14 columns fit next to the gutter at 1440px. */
+  --gutter: 120px; --thumb-w: 60px; --thumb-h: 80px; --col-gap: 6px;
+  /* Type scale: meta, body, row labels, screen title. */
+  --fs-meta: 12px; --fs-body: 13px; --fs-row: 15px; --fs-title: 20px;
 }
 *, *::before, *::after { box-sizing: border-box; }
-html, body, #root { height: 100%; margin: 0; }
-body { background: var(--paper); color: var(--ink); font-family: var(--font); font-size: 14px; }
+/* clip, not hidden: nothing (scrollIntoView included) can scroll the page itself, only the canvases inside it. */
+html, body, #root { height: 100%; margin: 0; overflow: clip; }
+body { background: var(--paper); color: var(--ink); font-family: var(--font); font-size: var(--fs-body); }
 button { font: inherit; }
-.card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); }
 .mono { font-family: var(--mono); }
 .muted { color: var(--grey); }
 .accent { color: var(--accent); }
+
+.screen-title { margin: 0; font-size: var(--fs-title); font-weight: 700; line-height: 1.2; }
+.meta { font-size: var(--fs-meta); color: var(--grey); }
+.row-label { font-size: var(--fs-row); font-weight: 500; line-height: 1.25; color: var(--ink); }
+
+.btn-primary {
+  padding: 8px 16px; border-radius: var(--radius); border: none; background: var(--accent); color: var(--card);
+  font-size: var(--fs-body); font-weight: 700; cursor: pointer; text-decoration: none; transition: opacity .15s ease;
+}
+.btn {
+  padding: 7px 14px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--card); color: var(--ink);
+  font-size: var(--fs-body); font-weight: 500; cursor: pointer; transition: border-color .15s ease;
+}
+.btn:hover:not(:disabled) { border-color: var(--grey-2); }
+.btn-primary:disabled, .btn:disabled { opacity: .6; cursor: default; }
+.link {
+  all: unset; cursor: pointer; font-size: var(--fs-body); font-weight: 500; color: var(--grey); text-decoration: none; transition: color .15s ease;
+}
+.link:hover:not(:disabled) { color: var(--ink); }
+.link:disabled { opacity: .4; cursor: default; }
+
+/* The row-name margin of the ledger: stays put while the canvas scrolls sideways. */
+.gutter { position: sticky; left: 0; z-index: 3; width: var(--gutter); flex: 0 0 var(--gutter); padding-right: 12px; background: var(--paper); }

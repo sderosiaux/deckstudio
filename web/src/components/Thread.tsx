@@ -15,6 +15,8 @@ export interface ThreadProps {
   subscribe(handler: (e: BusEvent) => void): () => void;
   onClearContext?(): void;
   title?: string;
+  /** A line under the title, eg the lane the thread belongs to. */
+  subtitle?: string;
 }
 
 const time = (iso: string): string => {
@@ -51,7 +53,7 @@ export function renderInline(text: string): React.ReactNode[] {
 }
 
 /** A conversation with the co-author. The reply streams in from `assistant.delta`; on `assistant.done` the stored thread is reloaded. */
-export function Thread({ threadKey, context, order, slides, api, subscribe, onClearContext, title = 'thread' }: ThreadProps) {
+export function Thread({ threadKey, context, order, slides, api, subscribe, onClearContext, title = 'Thread', subtitle }: ThreadProps) {
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState('');
@@ -59,7 +61,7 @@ export function Thread({ threadKey, context, order, slides, api, subscribe, onCl
   const [agentError, setAgentError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const bottom = useRef<HTMLDivElement>(null);
+  const log = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -100,8 +102,10 @@ export function Thread({ threadKey, context, order, slides, api, subscribe, onCl
     });
   }, [threadKey, load, subscribe]);
 
+  // Scroll the log itself: scrollIntoView would also scroll every ancestor, the page included.
   useEffect(() => {
-    bottom.current?.scrollIntoView?.({ block: 'end' });
+    const el = log.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages, streaming]);
 
   const submit = async (ev: FormEvent) => {
@@ -127,12 +131,15 @@ export function Thread({ threadKey, context, order, slides, api, subscribe, onCl
   return (
     <div data-testid="thread" data-thread={threadKey} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{ padding: '18px 20px 12px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <h2 style={{ margin: 0, fontSize: 16 }}>{title}</h2>
+        <div>
+          <h2 className="screen-title">{title}</h2>
+          {subtitle ? <p className="meta" style={{ margin: '2px 0 0' }}>{subtitle}</p> : null}
+        </div>
         <div>
           <ContextChip context={context} order={order} slides={slides} onClear={onClearContext} />
         </div>
       </div>
-      <div role="log" aria-live="polite" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div ref={log} role="log" aria-live="polite" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
         {loadError ? <p style={{ color: 'var(--warn)', fontSize: 12, margin: 0 }}>Could not load the thread: {loadError}</p> : null}
         {!loadError && messages.length === 0 && !streaming ? (
           <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.5 }}>
@@ -142,7 +149,7 @@ export function Thread({ threadKey, context, order, slides, api, subscribe, onCl
         {messages.map((m) => (
           <div key={m.id} data-testid="thread-message" data-role={m.role} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}>
-              <strong style={{ color: m.role === 'assistant' ? 'var(--accent)' : 'var(--ink)' }}>{m.role === 'assistant' ? 'co-author' : 'you'}</strong>
+              <strong style={{ fontWeight: 700, color: 'var(--ink)' }}>{m.role === 'assistant' ? 'co-author' : 'you'}</strong>
               <span className="muted">{time(m.at)}</span>
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{renderInline(m.text)}</div>
@@ -150,9 +157,9 @@ export function Thread({ threadKey, context, order, slides, api, subscribe, onCl
         ))}
         {streaming || tool ? (
           <div data-testid="thread-streaming" style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-            <strong style={{ fontSize: 12, color: 'var(--accent)' }}>co-author</strong>
+            <strong style={{ fontSize: 12, color: 'var(--ink)' }}>co-author</strong>
             {streaming ? <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{streaming}</div> : null}
-            {tool ? <span className="muted" style={{ fontSize: 11 }}>{describeTool(tool)}…</span> : null}
+            {tool ? <span className="meta">{describeTool(tool)}…</span> : null}
           </div>
         ) : null}
         {agentError ? (
@@ -160,7 +167,6 @@ export function Thread({ threadKey, context, order, slides, api, subscribe, onCl
             {agentError}
           </p>
         ) : null}
-        <div ref={bottom} />
       </div>
       <form onSubmit={(e) => void submit(e)} style={{ display: 'flex', gap: 8, padding: 16, borderTop: '1px solid var(--line)' }}>
         <input
@@ -168,12 +174,12 @@ export function Thread({ threadKey, context, order, slides, api, subscribe, onCl
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Write a message…"
-          style={{ flex: 1, minWidth: 0, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--line)', background: 'var(--card)', font: 'inherit', color: 'var(--ink)' }}
+          style={{ flex: 1, minWidth: 0, padding: '8px 12px', borderRadius: 'var(--radius)', border: '1px solid var(--line)', background: 'var(--card)', font: 'inherit', color: 'var(--ink)' }}
         />
         <button
           type="submit"
           disabled={sending || draft.trim() === ''}
-          style={{ padding: '9px 16px', borderRadius: 8, border: 'none', background: 'var(--accent)', color: 'var(--card)', fontWeight: 700, cursor: 'pointer', opacity: sending || draft.trim() === '' ? 0.6 : 1 }}
+          className="btn-primary"
         >
           Send
         </button>

@@ -17,7 +17,7 @@ const btn = (tone: 'ok' | 'warn', disabled: boolean): CSSProperties => ({
   borderRadius: 6,
   border: '1px solid var(--line)',
   background: 'var(--card)',
-  color: tone === 'ok' ? 'var(--ok)' : 'var(--grey)',
+  color: tone === 'ok' ? 'var(--ink)' : 'var(--grey)',
   cursor: disabled ? 'default' : 'pointer',
   opacity: disabled ? 0.5 : 1,
   fontSize: 13,

@@ -141,14 +141,15 @@ describe('History', () => {
     api.getDeck.mockImplementationOnce(() => first.promise).mockImplementation(async () => deck4);
     render(<History api={api} subscribe={bus.subscribe} navigate={vi.fn()} />);
     bus.emit({ type: 'deck.changed', version: 4 });
-    await waitFor(() => screen.queryByText('demo · v4') !== null);
+    const shownVersion = () => screen.queryByTestId('history-version')?.textContent;
+    await waitFor(() => shownVersion() === 'v4');
     // The mount-time refresh answers last, with the older main: it must not overwrite v4.
     await act(async () => {
       first.resolve(deck);
       await first.promise;
     });
-    expect(screen.queryByText('demo · v3')).toBeNull();
-    expect(screen.getByText('demo · v4')).toBeTruthy();
+    expect(shownVersion()).toBe('v4');
+    expect(screen.getByTestId('history-deck').textContent).toBe('demo');
   });
 
   it('on deck.changed, re-requests only the thumbs of slides whose content changed', async () => {
@@ -191,7 +192,7 @@ describe('History', () => {
     render(<History api={api} subscribe={noEvents} navigate={navigate} />);
     await waitFor(() => screen.queryAllByTestId('version').length === 3);
     fireEvent.click(versionButton(1));
-    fireEvent.click(await screen.findByRole('button', { name: 'open v1 as a lane' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open v1 as a lane' }));
     await waitFor(() => navigate.mock.calls.length === 1);
     expect(api.openVersionAsLane).toHaveBeenCalledWith(1);
     expect(navigate).toHaveBeenCalledWith('/#lane=lv');
@@ -225,17 +226,18 @@ describe('History', () => {
     expect(api.thumbFor).not.toHaveBeenCalledWith('s4');
   });
 
-  it('names each restore by what it does to main', async () => {
+  it('every row says "restore"; its label names what it does to main', async () => {
     const api = stubApi();
     render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryAllByTestId('version').length === 3);
     fireEvent.click(versionButton(1));
     await waitFor(() => screen.queryAllByTestId('diff-entry').length === 4);
-    const verb = (kind: string) => within(screen.getAllByTestId('diff-entry').find((e) => e.getAttribute('data-kind') === kind)!).getByRole('button').textContent;
-    expect(verb('added')).toBe('remove from main');
-    expect(verb('removed')).toBe('bring back');
-    expect(verb('modified')).toBe('revert content');
-    expect(verb('moved')).toBe('move back');
+    const button = (kind: string) => within(screen.getAllByTestId('diff-entry').find((e) => e.getAttribute('data-kind') === kind)!).getByRole('button');
+    for (const kind of ['added', 'removed', 'modified', 'moved']) expect(button(kind).textContent).toBe('restore');
+    expect(button('added').getAttribute('aria-label')).toMatch(/^restore \(remove from main\)/);
+    expect(button('removed').getAttribute('aria-label')).toMatch(/^restore \(bring back\)/);
+    expect(button('modified').getAttribute('aria-label')).toMatch(/^restore \(revert content\)/);
+    expect(button('moved').getAttribute('aria-label')).toMatch(/^restore \(move back\)/);
     const panel = screen.getByRole('complementary', { name: 'what changed' });
     expect(within(panel).getByText('added in v3')).toBeTruthy();
     expect(within(panel).getAllByText(/^slide \d+$/)).toHaveLength(4);
@@ -263,7 +265,7 @@ describe('History', () => {
     api.getHistoryDiff.mockImplementation(async (a: number, b: number) => ({ a, b, entries: [] }));
     render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryByText('v2 and v3 have the same slides in the same order.'));
-    const open = screen.getByRole('button', { name: 'open v2 as a lane' }) as HTMLButtonElement;
+    const open = screen.getByRole('button', { name: 'Open v2 as a lane' }) as HTMLButtonElement;
     expect(open.disabled).toBe(true);
     expect(open.title).toBe("main already has v2's slides");
     expect(api.getHistoryDiff.mock.calls).toEqual([[2, 3]]);
@@ -276,9 +278,9 @@ describe('History', () => {
     await waitFor(() => screen.queryAllByTestId('version').length === 3);
     fireEvent.click(versionButton(1));
     fireEvent.click(versionButton(2), { shiftKey: true });
-    await waitFor(() => (screen.getByRole('button', { name: 'open v1 as a lane' }) as HTMLButtonElement).disabled);
+    await waitFor(() => (screen.getByRole('button', { name: 'Open v1 as a lane' }) as HTMLButtonElement).disabled);
     expect(api.getHistoryDiff.mock.calls.filter(([a, b]) => a === 3 && b === 1)).toHaveLength(1);
-    expect(screen.getByRole('button', { name: 'open v1 as a lane' }).title).toBe("main already has v1's slides");
+    expect(screen.getByRole('button', { name: 'Open v1 as a lane' }).title).toBe("main already has v1's slides");
   });
 
   it('a 409 from open-as-lane never shows the raw HTTP error in the header', async () => {
@@ -287,7 +289,7 @@ describe('History', () => {
     render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryAllByTestId('version').length === 3);
     fireEvent.click(versionButton(1));
-    const open = await screen.findByRole('button', { name: 'open v1 as a lane' });
+    const open = await screen.findByRole('button', { name: 'Open v1 as a lane' });
     await waitFor(() => !(open as HTMLButtonElement).disabled);
     fireEvent.click(open);
     const alert = await screen.findByRole('alert');

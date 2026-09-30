@@ -13,7 +13,7 @@ import {
   type ThumbStatus,
 } from '../api.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { anchorColumns } from '../components/LaneRow.js';
+import { anchorColumns, shortLabel } from '../components/LaneRow.js';
 import { SlidePreview, type SlidePreviewProps } from '../components/SlidePreview.js';
 import { TextDiff, plainText } from '../components/TextDiff.js';
 import { Thread } from '../components/Thread.js';
@@ -76,39 +76,20 @@ export function textChanges(change: Change, before: Slide | undefined): { field:
  * scales to its column (16:9 kept), so both slides fit next to the thread instead of the second one falling under the fold.
  */
 const FOCUS_CSS = `
-.focus-pair { display: grid; grid-template-columns: minmax(0, 560px); justify-content: center; gap: 24px; }
+.focus-pair { display: grid; grid-template-columns: minmax(0, 560px); justify-content: start; gap: 24px; }
 @media (min-width: 1280px) { .focus-pair { grid-template-columns: repeat(2, minmax(0, 560px)); } }
 .focus-pair > [data-testid="slide-preview"] { width: 100% !important; height: auto !important; aspect-ratio: 16 / 9; flex: none !important; }
 `;
 
-const navBtn = (disabled: boolean): CSSProperties => ({
-  all: 'unset',
-  cursor: disabled ? 'default' : 'pointer',
-  opacity: disabled ? 0.4 : 1,
-  fontSize: 14,
-  color: 'var(--ink)',
-  padding: '8px 4px',
-  transition: 'color .15s ease',
-});
-const decide = (primary: boolean, disabled: boolean): CSSProperties => ({
-  padding: '10px 18px',
-  borderRadius: 8,
-  border: primary ? 'none' : '1px solid var(--line)',
-  background: primary ? 'var(--accent)' : 'var(--card)',
-  color: primary ? 'var(--card)' : 'var(--ink)',
-  fontWeight: primary ? 700 : 500,
-  cursor: disabled ? 'default' : 'pointer',
-  opacity: disabled ? 0.6 : 1,
-  transition: 'opacity .15s ease, border-color .15s ease',
-});
+const navBtn: CSSProperties = { padding: '8px 0' };
 
 function RangeUnderline({ count, cols }: { count: number; cols: { start: number; span: number } | null }) {
   if (!cols) return null;
   return (
     <div style={{ display: 'flex' }}>
-      <div style={{ width: 120, flex: '0 0 120px' }} />
+      <div className="gutter" />
       <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(count, 1)}, var(--thumb-w))`, columnGap: 'var(--col-gap)', padding: '0 6px' }}>
-        <div data-testid="range-underline" style={{ gridColumn: `${cols.start + 1} / span ${cols.span}`, height: 3, borderRadius: 2, background: 'var(--accent)' }} />
+        <div data-testid="range-underline" style={{ gridColumn: `${cols.start + 1} / span ${cols.span}`, height: 2, borderRadius: 1, background: 'var(--accent)' }} />
       </div>
     </div>
   );
@@ -201,8 +182,8 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
       <div style={{ padding: 32 }}>
         <p style={{ color: 'var(--warn)', fontWeight: 700 }}>Could not load this lane.</p>
         <p className="muted mono">{load.message}</p>
-        <button type="button" onClick={() => void reload()}>Retry</button>{' '}
-        <a href="/" onClick={go('/')}>back to main</a>
+        <button type="button" className="btn" onClick={() => void reload()}>Retry</button>{' '}
+        <a href="/" onClick={go('/')} className="link">back to main</a>
       </div>
     );
   }
@@ -256,6 +237,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
     if (c && c.id !== changeId) navigate(focusPath(lane.id, c.id));
   };
 
+  const short = shortLabel(lane.label);
   let left: SlidePreviewProps | null = null;
   let right: SlidePreviewProps | null = null;
   const skipped = change ? preview.skipped.includes(change.id) : false;
@@ -267,13 +249,13 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
         ? { label: 'main', variant: 'missing', missingText: 'not in main' }
         : mainAt < 0
           ? { label: 'main', variant: 'missing', missingText: 'no longer in main' }
-          : { label: `main · slide ${mainAt + 1}`, variant: 'main', title: deck.slides[target]?.title ?? target, url: mainUrl(target) };
+          : { label: `main, slide ${mainAt + 1}`, variant: 'main', title: deck.slides[target]?.title ?? target, url: mainUrl(target) };
     right = skipped
-      ? { label: lane.label, variant: 'missing', missingText: 'no longer applies on main' }
+      ? { label: short, variant: 'missing', missingText: 'no longer applies on main' }
       : change.kind === 'remove' || laneAt < 0
-        ? { label: lane.label, variant: 'missing', missingText: 'removed' }
+        ? { label: short, variant: 'missing', missingText: 'removed' }
         : {
-            label: `${lane.label} · slide ${laneAt + 1}${change.kind === 'move' && mainAt >= 0 ? ` (was ${mainAt + 1})` : ''}`,
+            label: `${short}, slide ${laneAt + 1}${change.kind === 'move' && mainAt >= 0 ? ` (was ${mainAt + 1})` : ''}`,
             variant: 'lane',
             title: preview.slides[target]?.title ?? target,
             url: laneUrl(target),
@@ -287,93 +269,76 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <header style={{ display: 'flex', alignItems: 'baseline', gap: 16, padding: '16px 24px', borderBottom: '1px solid var(--line)' }}>
-        <a href="/" onClick={go('/')} style={{ color: 'var(--grey)', textDecoration: 'none', fontSize: 13 }}>← main</a>
-        <h1 data-testid="focus-crumb" style={{ margin: 0, fontSize: 18 }}>
-          lane {lane.label} <span className="muted" style={{ fontWeight: 500 }}>· change {change ? index + 1 : '–'} of {n}</span>
-        </h1>
-      </header>
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <main style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: '24px 24px 0', display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {!change ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
-              <p style={{ margin: 0 }}>
-                {lane.status === 'closed'
-                  ? 'This lane is closed: all its changes were decided or it was discarded.'
-                  : `This change is ${lane.changes.find((c) => c.id === changeId)?.status ?? 'not part of this lane'}.`}
-              </p>
-              {next ? (
-                <a href={next} onClick={go(next)} style={{ color: 'var(--accent)', fontWeight: 700 }}>review the first pending change →</a>
-              ) : (
-                <a href="/" onClick={go('/')} style={{ color: 'var(--accent)', fontWeight: 700 }}>back to main →</a>
-              )}
-            </div>
-          ) : (
-            <>
-              <style>{FOCUS_CSS}</style>
-              <div data-testid="focus-pair" className="focus-pair">
-                {left ? <SlidePreview {...left} /> : null}
-                {right ? <SlidePreview {...right} /> : null}
-              </div>
-              <p data-testid="focus-reason" style={{ margin: 0, textAlign: 'center', color: 'var(--grey)', fontSize: 14 }}>
-                {change.kind}: {change.reason}
-              </p>
-              {texts.length > 0 ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 1144, width: '100%', margin: '0 auto' }}>
-                  {texts.map((t) => (
-                    <TextDiff key={t.field} label={t.field} before={t.before} after={t.after} />
-                  ))}
-                </div>
-              ) : null}
-              {actionError ? (
-                <p role="alert" style={{ margin: 0, textAlign: 'center', color: 'var(--warn)', fontSize: 13 }}>
-                  {actionError}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+          <header style={{ display: 'flex', alignItems: 'baseline', gap: 16, padding: '18px 24px 14px' }}>
+            <a href="/" onClick={go('/')} className="link">main</a>
+            <h1 data-testid="focus-crumb" className="screen-title" title={lane.label}>
+              {short}, change {change ? index + 1 : '–'} of {n}
+            </h1>
+          </header>
+          <main style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 24px 0', display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {!change ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
+                <p style={{ margin: 0 }}>
+                  {lane.status === 'closed'
+                    ? 'This lane is closed: all its changes were decided or it was discarded.'
+                    : `This change is ${lane.changes.find((c) => c.id === changeId)?.status ?? 'not part of this lane'}.`}
                 </p>
-              ) : null}
-              <div
-                data-testid="decide-bar"
-                style={{
-                  position: 'sticky',
-                  bottom: 0,
-                  marginTop: 'auto',
-                  zIndex: 2,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 16,
-                  padding: '12px 0',
-                  background: 'var(--paper)',
-                  borderTop: '1px solid var(--line)',
-                }}
-              >
-                <button type="button" style={navBtn(!prev || n <= 1)} disabled={!prev || n <= 1} onClick={() => prev && navigate(prev)}>
-                  ← prev change
-                </button>
-                <div style={{ display: 'flex', gap: 10 }}>
-                  <button type="button" disabled={busy} onClick={accept} style={decide(true, busy)}>
-                    accept this change
+                {next ? (
+                  <a href={next} onClick={go(next)} className="btn-primary">Review the first pending change</a>
+                ) : (
+                  <a href="/" onClick={go('/')} className="btn-primary">Back to main</a>
+                )}
+              </div>
+            ) : (
+              <>
+                <style>{FOCUS_CSS}</style>
+                <div data-testid="focus-pair" className="focus-pair">
+                  {left ? <SlidePreview {...left} /> : null}
+                  {right ? <SlidePreview {...right} /> : null}
+                </div>
+                <p data-testid="focus-reason" style={{ margin: 0, display: 'flex', gap: 12, alignItems: 'baseline', fontSize: 13, maxWidth: 1144 }}>
+                  <span className="meta">{change.kind}</span>
+                  <span style={{ color: 'var(--grey)' }}>{change.reason}</span>
+                </p>
+                {texts.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1144, width: '100%' }}>
+                    {texts.map((t) => (
+                      <TextDiff key={t.field} label={t.field} before={t.before} after={t.after} />
+                    ))}
+                  </div>
+                ) : null}
+                {actionError ? (
+                  <p role="alert" style={{ margin: 0, color: 'var(--warn)', fontSize: 13 }}>
+                    {actionError}
+                  </p>
+                ) : null}
+                <div
+                  data-testid="decide-bar"
+                  style={{ position: 'sticky', bottom: 0, marginTop: 'auto', zIndex: 2, display: 'flex', alignItems: 'center', gap: 20, padding: '12px 0 14px', background: 'var(--paper)' }}
+                >
+                  <button type="button" className="link" style={navBtn} disabled={!prev || n <= 1} onClick={() => prev && navigate(prev)}>
+                    previous change
                   </button>
-                  <button type="button" disabled={busy} onClick={refuse} style={decide(false, busy)}>
-                    refuse
+                  <div style={{ display: 'flex', gap: 10 }}>
+                    <button type="button" className="btn-primary" disabled={busy} onClick={accept}>
+                      Accept
+                    </button>
+                    <button type="button" className="btn" disabled={busy} onClick={refuse}>
+                      refuse
+                    </button>
+                  </div>
+                  <button type="button" className="link" style={navBtn} disabled={!next || n <= 1} onClick={() => next && navigate(next)}>
+                    next change
                   </button>
                 </div>
-                <button type="button" style={navBtn(!next || n <= 1)} disabled={!next || n <= 1} onClick={() => next && navigate(next)}>
-                  next change →
-                </button>
-              </div>
-            </>
-          )}
-        </main>
+              </>
+            )}
+          </main>
+        </div>
         <aside style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0 }}>
-          <Thread
-            threadKey={`lane:${lane.id}`}
-            title={`thread · ${lane.label}`}
-            context={context}
-            order={deck.order}
-            slides={deck.slides}
-            api={api}
-            subscribe={fanout}
-          />
+          <Thread threadKey={`lane:${lane.id}`} subtitle={`lane ${short}`} context={context} order={deck.order} slides={deck.slides} api={api} subscribe={fanout} />
         </aside>
       </div>
       <footer style={{ borderTop: '1px solid var(--line)', background: 'var(--paper)', overflow: 'auto', maxHeight: '40%', padding: '14px 24px' }}>
@@ -383,7 +348,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
             <RangeUnderline count={deck.order.length} cols={anchorColumns(lane.anchor, deck.order)} />
           </div>
           <div>
-            <Filmstrip order={preview.order} slides={preview.slides} thumbs={laneThumbUrls} selected={target ?? undefined} onSelect={openSlide} label={lane.label} />
+            <Filmstrip order={preview.order} slides={preview.slides} thumbs={laneThumbUrls} selected={target ?? undefined} onSelect={openSlide} label={short} fullLabel={lane.label} />
             <RangeUnderline count={preview.order.length} cols={laneColumns(lane, preview, deck.order)} />
           </div>
         </div>
