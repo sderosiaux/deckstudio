@@ -240,6 +240,67 @@ describe('lanes API', () => {
     expect(await statuses()).toEqual({ r_a: 'resolved', r_b: 'resolved', r_c: 'resolved', r_deck: 'open' });
   });
 
+  it('GET /api/lanes lists open lanes by default and filters by ?status=draft|open|all', async () => {
+    await store.putLane(lane('l_open', [modify('c_1', 's1', 'x')]));
+    await store.putLane({ ...lane('l_draft', [modify('c_2', 's2', 'y')]), status: 'draft', origin: 'check:arc' });
+    await store.putLane({ ...lane('l_closed', [modify('c_3', 's3', 'z')]), status: 'closed' });
+    const ids = async (url: string) => ((await app.inject({ method: 'GET', url })).json() as Lane[]).map((l) => l.id).sort();
+    expect(await ids('/api/lanes')).toEqual(['l_open']);
+    expect(await ids('/api/lanes?status=open')).toEqual(['l_open']);
+    expect(await ids('/api/lanes?status=draft')).toEqual(['l_draft']);
+    expect(await ids('/api/lanes?status=all')).toEqual(['l_closed', 'l_draft', 'l_open']);
+    const bad = await app.inject({ method: 'GET', url: '/api/lanes?status=nope' });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error).toMatch(/nope/);
+  });
+
+  it('POST /api/lanes/:id/open turns a draft into an open lane and emits lane.updated; 404 unknown, 409 closed', async () => {
+    await store.putLane({ ...lane('l_draft', [modify('c_1', 's1', 'x')]), status: 'draft', origin: 'check:arc' });
+    const res = await app.inject({ method: 'POST', url: '/api/lanes/l_draft/open' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ id: 'l_draft', status: 'open', origin: 'check:arc' });
+    expect((await getLane('l_draft')).status).toBe('open');
+    expect(events).toContainEqual({ type: 'lane.updated', laneId: 'l_draft' });
+    // Opening an open lane is a no-op that answers the lane.
+    events.length = 0;
+    const again = await app.inject({ method: 'POST', url: '/api/lanes/l_draft/open' });
+    expect(again.statusCode).toBe(200);
+    expect(again.json().status).toBe('open');
+    expect(events).toEqual([]);
+
+    expect((await app.inject({ method: 'POST', url: '/api/lanes/l_nope/open' })).statusCode).toBe(404);
+    await store.putLane({ ...lane('l_closed', [modify('c_2', 's2', 'y')]), status: 'closed' });
+    expect((await app.inject({ method: 'POST', url: '/api/lanes/l_closed/open' })).statusCode).toBe(409);
+  });
+
+  it('accept and refuse work on a draft lane and open it implicitly', async () => {
+    await store.putLane({ ...lane('l_a', [modify('c_1', 's1', 'A'), modify('c_2', 's2', 'B')]), status: 'draft', origin: 'check:arc' });
+    const a = await accept('l_a', 'c_1');
+    expect(a.statusCode).toBe(200);
+    expect(a.json().lane.status).toBe('open');
+    expect((await deck()).slides.s1.title).toBe('A');
+
+    await store.putLane({ ...lane('l_b', [modify('c_3', 's3', 'C'), modify('c_4', 's4', 'D')]), status: 'draft', origin: 'check:order' });
+    const r = await refuse('l_b', 'c_3');
+    expect(r.statusCode).toBe(200);
+    expect(r.json().status).toBe('open');
+    expect((await getLane('l_b')).status).toBe('open');
+    expect(events).toContainEqual({ type: 'lane.updated', laneId: 'l_b' });
+  });
+
+  it('an accept rebases draft lanes like open ones: a draft whose only change is orphaned is closed', async () => {
+    await store.putLane(lane('l_a', [remove('c_rm', 's3')]));
+    await store.putLane({ ...lane('l_d', [modify('c_m3', 's3', 'x')]), status: 'draft', origin: 'check:render' });
+    await store.putLane({ ...lane('l_e', [modify('c_m3b', 's3', 'x'), modify('c_m4', 's4', 'y')]), status: 'draft', origin: 'check:render' });
+    expect((await accept('l_a', 'c_rm')).statusCode).toBe(200);
+    expect((await getLane('l_d')).status).toBe('closed');
+    const e = await getLane('l_e');
+    // Still a draft: rebasing is not the creator acting on it.
+    expect(e.status).toBe('draft');
+    expect(e.changes.map((c) => c.status)).toEqual(['orphan', 'pending']);
+    expect(events).toContainEqual({ type: 'lane.closed', laneId: 'l_d' });
+  });
+
   it('preview skips pending changes that fail to apply and reports them', async () => {
     await store.putLane(lane('l_a', [modify('c_bad', 'zz', 'x'), modify('c_ok', 's2', 'S2 preview')]));
     const p = (await app.inject({ method: 'GET', url: '/api/lanes/l_a/preview' })).json();

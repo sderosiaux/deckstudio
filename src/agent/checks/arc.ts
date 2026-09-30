@@ -10,11 +10,11 @@ export const arc: CheckDef = {
   needsThumbs: false,
   system:
     'You review the narrative arc of a conference talk deck. You judge structure, not wording. ' +
-    'You are terse and concrete: every remark names the slide it is about and what is wrong. You answer with JSON only.',
-  buildPrompt({ brief, snap, allowLanes }) {
+    'You are terse and concrete: every remark names the slide it is about, as "slide N (title)", and what is wrong. You answer with JSON only.',
+  buildPrompt({ brief, snap, deckOrder, allowLanes }) {
     return `${briefBlock(brief)}
 
-${deckOutline(snap, { bodies: false })}
+${deckOutline(snap, deckOrder, { bodies: false })}
 
 # Task
 Judge the arc of this deck against its pattern, ${PATTERNS[brief.pattern]}

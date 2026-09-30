@@ -1,12 +1,12 @@
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { newId } from '../../model/ids.js';
 import { slidesInRange } from '../../model/ops.js';
-import type { Anchor, Brief, Lane, Remark, SlideId, Snapshot } from '../../model/types.js';
+import type { Anchor, Brief, Lane, Origin, Remark, SlideId, Snapshot } from '../../model/types.js';
 import type { ThumbService } from '../../render/thumbs.js';
 import type { Bus } from '../../server/bus.js';
 import { LaneService, resolveLaneRemarks } from '../../server/laneService.js';
 import type { DeckStore } from '../../store/deckStore.js';
-import { makeDeckToolHandlers, type DeckToolHandlers } from '../tools.js';
+import { createLane } from '../tools.js';
 import { arc } from './arc.js';
 import { gaps } from './gaps.js';
 import { CHECK_NAMES, CheckResultSchema, isCheckName, type CheckDef, type CheckName, type CheckResult, type ChecksStatus } from './index.js';
@@ -21,6 +21,31 @@ export const RETRY_INSTRUCTION = 'Return only the JSON object';
 const DEFAULT_DEBOUNCE_MS = 3000;
 /** Checks that Read thumbnails need a few turns (read images, then answer); the others answer in one. */
 const THUMB_CHECK_MAX_TURNS = 6;
+/** Lanes one check keeps attached to its remarks after a run; the other remarks get no lane. */
+export const MAX_LANES_PER_RUN = 3;
+
+/** A slide id as newId('s') makes it, not glued to a longer token. */
+const SLIDE_ID = /(?<![A-Za-z0-9_-])s_[A-Za-z0-9_-]{10}(?![A-Za-z0-9_-])/g;
+
+/** Replaces slide ids in prose by "slide N" (1-based position in `order`): the creator never sees ids. */
+export function nameSlides(text: string, order: readonly SlideId[]): string {
+  return text.replace(SLIDE_ID, (id) => {
+    const i = order.indexOf(id);
+    return i >= 0 ? `slide ${i + 1}` : 'an unknown slide';
+  });
+}
+
+const anchorKey = (a: Anchor): string => (a.kind === 'slide' ? `slide:${a.slide}` : a.kind === 'range' ? `range:${a.from}:${a.to}` : 'arc');
+/** Case, punctuation, spacing and slide numbers (which shift when slides move) do not make a remark new. */
+const normText = (text: string): string =>
+  text
+    .toLowerCase()
+    .replace(/\bslide \d+\b/g, 'slide')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+/** Two remarks with the same key report the same problem: a re-run keeps the old one instead of adding a twin. */
+const remarkKey = (origin: Origin, source: string | null, anchor: Anchor, text: string): string =>
+  [origin, source ?? '', anchorKey(anchor), normText(text)].join('\u0000');
 
 export interface CheckRunnerOptions {
   store: DeckStore;
@@ -105,7 +130,6 @@ export function parseCheckOutput(text: string, validIds: ReadonlySet<SlideId>): 
 export class CheckRunner {
   private readonly opts: CheckRunnerOptions;
   private readonly queryImpl: typeof query;
-  private readonly handlers: DeckToolHandlers;
   private tail: Promise<unknown> = Promise.resolve();
   /** Queued or running runs per check name (deck-wide, scoped and lane runs alike). */
   private readonly active = new Map<CheckName, number>();
@@ -122,18 +146,6 @@ export class CheckRunner {
   constructor(opts: CheckRunnerOptions) {
     this.opts = opts;
     this.queryImpl = opts.queryImpl ?? query;
-    // Only propose_lane is used: lanes attached to remarks go through the same validation as the co-author's.
-    this.handlers = makeDeckToolHandlers({
-      store: opts.store,
-      thumbs: opts.thumbs,
-      bus: opts.bus,
-      imageGen: async () => {
-        throw new Error('image generation is not available to checks');
-      },
-      runCheck: async () => {
-        throw new Error('checks cannot start other checks');
-      },
-    });
   }
 
   /**
@@ -302,7 +314,7 @@ export class CheckRunner {
         return { ok: false, reason: `could not render thumbnails: ${errorMessage(e)}` };
       }
     }
-    const prompt = t.def.buildPrompt({ brief: t.brief, snap: t.snap, allowLanes: t.allowLanes, ...(thumbs ? { thumbs } : {}) });
+    const prompt = t.def.buildPrompt({ brief: t.brief, snap: t.snap, deckOrder: t.order, allowLanes: t.allowLanes, ...(thumbs ? { thumbs } : {}) });
     const first = await this.ask(t, prompt);
     // Disposed (the query was aborted): a retry would only start a query nobody waits for.
     if (first.ok || this.disposed) return first;
@@ -364,94 +376,156 @@ export class CheckRunner {
     throw new Error(error ?? 'the query ended without a result');
   }
 
+  /**
+   * Did the creator act on this remark? Resolved it, asked the co-author for a lane from it, or opened or
+   * decided on the draft the check attached to it. Such a remark is never replaced by a re-run.
+   */
+  private async actedOn(r: Remark, origin: Origin): Promise<boolean> {
+    if (r.status === 'resolved') return true;
+    if (r.laneId === null) return false;
+    const lane = await this.opts.store.lane(r.laneId);
+    if (!lane) return false;
+    if (lane.origin !== origin) return true;
+    return lane.status === 'open' || lane.changes.some((c) => c.status === 'accepted' || c.status === 'refused');
+  }
+
   /** Is `r` one of the remarks this run supersedes? */
-  private async owned(t: Target, r: Remark, origin: Remark['origin']): Promise<boolean> {
+  private async owned(t: Target, r: Remark, origin: Origin): Promise<boolean> {
     if (r.origin !== origin) return false;
     const source = r.sourceLaneId ?? null;
-    // A lane run owns exactly the remarks found on that lane's preview, whatever lane answers them.
-    if (t.laneId !== null) return source === t.laneId;
-    // Remarks found on a lane's preview stay while that lane is open (closing it resolves them).
-    if (source !== null) {
+    if (t.laneId !== null) {
+      // A lane run owns exactly the remarks found on that lane's preview.
+      if (source !== t.laneId) return false;
+    } else if (source !== null) {
+      // Remarks found on a lane's preview stay while that lane is not closed; after, a deck-wide run drops them.
       const lane = await this.opts.store.lane(source);
-      if (lane && lane.status === 'open') return false;
+      return !(lane && lane.status !== 'closed');
     }
     // A failure remark is always superseded by the check's next run on the same target.
     if (isFailureRemark(r, t.def.name)) return true;
-    // A remark linked to a lane someone else opened (e.g. a lane the creator asked for from the remark's
-    // thread) stays while that lane is open.
-    if (r.laneId !== null) {
-      const lane = await this.opts.store.lane(r.laneId);
-      if (lane && lane.status === 'open' && lane.origin !== origin) return false;
-    }
-    if (t.scopeIds === null) return true;
+    if (await this.actedOn(r, origin)) return false;
+    if (t.laneId !== null || t.scopeIds === null) return true;
     const ids = r.anchor.kind === 'range' ? slidesInRange([...t.order], r.anchor) : anchorIds(r.anchor);
     return ids.some((id) => t.scopeIds!.has(id));
   }
 
+  private async split(t: Target, remarks: readonly Remark[], origin: Origin): Promise<{ kept: Remark[]; replaced: Remark[] }> {
+    const kept: Remark[] = [];
+    const replaced: Remark[] = [];
+    for (const r of remarks) ((await this.owned(t, r, origin)) ? replaced : kept).push(r);
+    return { kept, replaced };
+  }
+
+  /**
+   * Replaces the check's remarks with the new ones, except that a new remark matching a kept remark (one the
+   * creator acted on, or out of scope) is dropped, and one matching a superseded remark keeps its id and its
+   * draft lane. Drafts no remark points to any more are closed.
+   */
   private async persist(t: Target, items: Item[]): Promise<CheckRunResult> {
     const { store, bus } = this.opts;
     const origin = `check:${t.def.name}` as const;
+    const source = t.laneId;
+    const keyOf = (r: { anchor: Anchor; text: string }): string => remarkKey(origin, source, r.anchor, r.text);
+    const sameOwner = (r: Remark): boolean => r.origin === origin && (r.sourceLaneId ?? null) === source;
 
-    // Lanes first: propose_lane takes the deck lock itself.
-    const lanes: Lane[] = [];
+    // Slide ids never reach the creator; a problem reported twice in one answer is kept once.
+    const seen = new Set<string>();
+    const fresh = items
+      .map((it) => ({ ...it, text: nameSlides(it.text, t.order), lane: it.lane ? { ...it.lane, label: nameSlides(it.lane.label, t.order) } : null }))
+      .filter((it) => {
+        const k = keyOf(it);
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+
+    // Lanes first: createLane takes the deck lock itself. Planned on the remarks as they are now; the write
+    // below re-reads them under the lock and closes any draft that ends up unreferenced.
+    const before = await this.split(t, await store.remarks(), origin);
+    const keptKeys = new Set(before.kept.filter(sameOwner).map(keyOf));
+    const reusable = new Map<string, string>();
+    for (const r of before.replaced) {
+      if (!r.laneId || reusable.has(keyOf(r))) continue;
+      const lane = await store.lane(r.laneId);
+      if (lane && lane.origin === origin && lane.status === 'draft') reusable.set(keyOf(r), lane.id);
+    }
     const laneIds: (string | null)[] = [];
-    for (const item of items) {
+    const created: string[] = [];
+    let attached = 0;
+    let overCap = 0;
+    for (const it of fresh) {
       laneIds.push(null);
-      if (!item.lane || !t.allowLanes) continue;
-      const res = await this.handlers.propose_lane(item.lane);
-      if (!('laneId' in res) || typeof res.laneId !== 'string') {
-        console.warn(`[checks] ${t.def.name}: proposed lane "${item.lane.label}" rejected: ${JSON.stringify(res)}`);
+      const k = keyOf(it);
+      if (!t.allowLanes || keptKeys.has(k)) continue;
+      const reuse = reusable.get(k);
+      if (!reuse && !it.lane) continue;
+      if (attached >= MAX_LANES_PER_RUN) {
+        overCap++;
         continue;
       }
-      const id = res.laneId;
-      const lane = await store.withLock(async () => {
-        const l = await store.lane(id);
-        if (!l) return null;
-        const next: Lane = { ...l, origin };
-        await store.putLane(next);
-        return next;
-      });
-      if (!lane) continue;
-      bus.emit({ type: 'lane.updated', laneId: id });
-      lanes.push(lane);
-      laneIds[laneIds.length - 1] = id;
+      if (reuse) {
+        laneIds[laneIds.length - 1] = reuse;
+        attached++;
+        continue;
+      }
+      const res = await createLane({ store, bus }, it.lane, { origin, status: 'draft' });
+      if (!('laneId' in res) || typeof res.laneId !== 'string') {
+        console.warn(`[checks] ${t.def.name}: proposed lane "${it.lane!.label}" rejected: ${JSON.stringify(res)}`);
+        continue;
+      }
+      laneIds[laneIds.length - 1] = res.laneId;
+      created.push(res.laneId);
+      attached++;
     }
+    if (overCap > 0) console.info(`[checks] ${t.def.name}: ${overCap} lane(s) not created, over the cap of ${MAX_LANES_PER_RUN} per run`);
 
     const now = new Date().toISOString();
-    const remarks: Remark[] = items.map((item, k) => ({
-      id: newId('r'),
-      anchor: item.anchor,
-      text: item.text,
-      origin,
-      severity: item.severity,
-      status: 'open',
-      laneId: laneIds[k] ?? null,
-      ...(t.laneId !== null ? { sourceLaneId: t.laneId } : {}),
-      createdAt: now,
-    }));
-
-    const closed = await store.withLock(async () => {
-      const existing = await store.remarks();
-      const kept: Remark[] = [];
-      const replaced: Remark[] = [];
-      for (const r of existing) ((await this.owned(t, r, origin)) ? replaced : kept).push(r);
+    const out = await store.withLock(async () => {
+      const { kept, replaced } = await this.split(t, await store.remarks(), origin);
+      const keptNow = new Set(kept.filter(sameOwner).map(keyOf));
+      const previous = new Map<string, Remark>();
+      for (const r of replaced) if (!previous.has(keyOf(r))) previous.set(keyOf(r), r);
+      const remarks: Remark[] = [];
+      fresh.forEach((it, k) => {
+        const key = keyOf(it);
+        if (keptNow.has(key)) return;
+        remarks.push({
+          id: previous.get(key)?.id ?? newId('r'),
+          anchor: it.anchor,
+          text: it.text,
+          origin,
+          severity: it.severity,
+          status: 'open',
+          laneId: laneIds[k] ?? null,
+          ...(source !== null ? { sourceLaneId: source } : {}),
+          createdAt: now,
+        });
+      });
+      const referenced = new Set(remarks.flatMap((r) => (r.laneId ? [r.laneId] : [])));
+      const candidates = new Set([...replaced.flatMap((r) => (r.laneId ? [r.laneId] : [])), ...created]);
       const closedIds: string[] = [];
-      for (const r of replaced) {
-        if (!r.laneId || closedIds.includes(r.laneId)) continue;
-        const lane = await store.lane(r.laneId);
-        // Only the check's own unsolicited lanes, and only while the creator has not acted on them.
-        if (!lane || lane.origin !== origin || lane.status !== 'open' || !lane.changes.every((c) => c.status === 'pending')) continue;
+      for (const id of candidates) {
+        if (referenced.has(id)) continue;
+        const lane = await store.lane(id);
+        // Only the check's own drafts: a lane the creator opened is theirs now.
+        if (!lane || lane.origin !== origin || lane.status !== 'draft') continue;
         await store.putLane({ ...lane, status: 'closed' });
-        closedIds.push(lane.id);
+        closedIds.push(id);
       }
       const next = [...kept, ...remarks];
       await store.putRemarks(resolveLaneRemarks(next, closedIds) ?? next);
-      return closedIds;
+      return { remarks, closedIds };
     });
 
-    for (const id of closed) bus.emit({ type: 'lane.closed', laneId: id });
+    for (const id of out.closedIds) bus.emit({ type: 'lane.closed', laneId: id });
     bus.emit({ type: 'remarks.changed' });
-    return { remarks, lanes };
+    const lanes: Lane[] = [];
+    for (const id of created) {
+      if (out.closedIds.includes(id)) continue;
+      const lane = await store.lane(id);
+      if (lane) lanes.push(lane);
+    }
+    return { remarks: out.remarks, lanes };
   }
 
   /** A failed run leaves the check's remarks and lanes as they were; only its failure remark is added or replaced. */
@@ -462,7 +536,7 @@ export class CheckRunner {
     const remark: Remark = {
       id: newId('r'),
       anchor: { kind: 'arc' },
-      text,
+      text: nameSlides(text, t.order),
       origin,
       severity: 'info',
       status: 'open',

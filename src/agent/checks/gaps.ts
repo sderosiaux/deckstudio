@@ -6,10 +6,10 @@ export const gaps: CheckDef = {
   system:
     'You compare what a conference talk promises (its abstract and key message) with what its slides deliver. ' +
     'You quote the promise you are talking about. You answer with JSON only.',
-  buildPrompt({ brief, snap, allowLanes }) {
+  buildPrompt({ brief, snap, deckOrder, allowLanes }) {
     return `${briefBlock(brief)}
 
-${deckOutline(snap, { bodies: false })}
+${deckOutline(snap, deckOrder, { bodies: false })}
 
 # Task
 Compare the abstract and the message of the brief with the titles and stories of the slides.

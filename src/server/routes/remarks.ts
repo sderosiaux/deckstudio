@@ -5,6 +5,7 @@ import { AddRemarkInputSchema } from '../../model/schema.js';
 import type { Anchor, Remark } from '../../model/types.js';
 import type { DeckStore } from '../../store/deckStore.js';
 import type { Bus } from '../bus.js';
+import { LaneError, LaneService } from '../laneService.js';
 
 export const PROPOSE_REMARK_TEXT = 'Propose a lane for this remark.';
 
@@ -20,6 +21,8 @@ function unknownSlides(order: readonly string[], anchor: Anchor): string[] {
 const openFirst = (rs: Remark[]): Remark[] => [...rs.filter((r) => r.status === 'open'), ...rs.filter((r) => r.status !== 'open')];
 
 export function remarkRoutes(app: FastifyInstance, store: DeckStore, session: AgentSession, bus: Bus): void {
+  const lanes = new LaneService(store, bus);
+
   app.get<{ Querystring: ListQuery }>('/api/remarks', async (req, reply) => {
     const status = req.query.status;
     if (status !== undefined && status !== 'open' && status !== 'resolved') {
@@ -74,6 +77,17 @@ export function remarkRoutes(app: FastifyInstance, store: DeckStore, session: Ag
     const { id } = req.params;
     const remark = (await store.remarks()).find((r) => r.id === id);
     if (!remark) return reply.code(404).send({ error: `remark "${id}" not found` });
+    // The check already drafted a lane for this remark: proposing means showing it, not asking for another one.
+    const drafted = remark.laneId ? await store.lane(remark.laneId) : null;
+    if (drafted?.status === 'draft') {
+      try {
+        const lane = await lanes.open(drafted.id);
+        return reply.code(200).send({ laneId: lane.id, opened: true });
+      } catch (err) {
+        // Closed meanwhile (e.g. a concurrent accept orphaned it): fall through to the co-author.
+        if (!(err instanceof LaneError)) throw err;
+      }
+    }
     // The reply streams over the bus on thread remark:<id>; the agent links the resulting lane via link_remark_lane.
     session
       .send(`remark:${remark.id}`, PROPOSE_REMARK_TEXT, remark.anchor)

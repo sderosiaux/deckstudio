@@ -154,7 +154,7 @@ describe('CheckRunner', () => {
     const remarks = await store.remarks();
     expect(remarks.map((x) => x.text)).toEqual(['no hook', 'check arc failed: the answer contains no JSON object']);
     expect(remarks[0]!.laneId).toBe(laneId);
-    expect((await store.lane(laneId))!.status).toBe('open');
+    expect((await store.lane(laneId))!.status).toBe('draft');
     expect(events).not.toContainEqual({ type: 'lane.closed', laneId });
 
     // The next good run replaces both the old remarks and the failure remark.
@@ -237,7 +237,7 @@ describe('CheckRunner', () => {
     expect(remarks.filter((x) => x.origin === 'check:order').map((x) => x.text)).toEqual(['second']);
   });
 
-  it('a remark lane goes through propose_lane validation, gets the check origin, and is closed when the remark is replaced', async () => {
+  it('a remark lane goes through propose_lane validation, is saved as a draft with the check origin, and is closed when the remark is replaced', async () => {
     const lane = { label: 'Hook first', anchor: { kind: 'range', from: 's1', to: 's3' }, changes: [{ kind: 'move', slide: 's3', after: null, reason: 'the question opens' }] };
     const badLane = { label: 'Bad', anchor: { kind: 'slide', slide: 's1' }, changes: [{ kind: 'remove', slide: 'ghost', reason: 'x' }] };
     const { r } = runner([JSON.stringify({ remarks: [
@@ -247,7 +247,7 @@ describe('CheckRunner', () => {
     const out = await r.run('arc');
     expect(out.lanes).toHaveLength(1);
     const created = (await store.lane(out.lanes[0]!.id)) as Lane;
-    expect(created).toMatchObject({ origin: 'check:arc', status: 'open', label: 'Hook first' });
+    expect(created).toMatchObject({ origin: 'check:arc', status: 'draft', label: 'Hook first' });
     const remarks = await store.remarks();
     expect(remarks.find((x) => x.text === 'no hook')!.laneId).toBe(created.id);
     expect(remarks.find((x) => x.text === 'rejected lane')!.laneId).toBeNull();
@@ -268,9 +268,11 @@ describe('CheckRunner', () => {
     const { r } = runner([remarkJson({ kind: 'arc' }, 'reorder', lane)]);
     const out = await r.run('arc');
     const l = out.lanes[0]!;
-    await store.putLane({ ...l, changes: l.changes.map((c, i) => (i === 0 ? { ...c, status: 'refused' as const } : c)) });
+    await new LaneService(store, bus).refuse(l.id, l.changes[0]!.id);
     await runner([JSON.stringify({ remarks: [] })]).r.run('arc');
     expect((await store.lane(l.id))!.status).toBe('open');
+    // The remark the creator acted on stays too.
+    expect((await store.remarks()).map((x) => [x.text, x.laneId])).toEqual([['reorder', l.id]]);
   });
 
   it('scheduleAfterAccept debounces and then runs the four checks one after the other', async () => {
@@ -310,7 +312,8 @@ describe('CheckRunner', () => {
     expect(calls).toHaveLength(1);
     const prompt = calls[0]!.prompt;
     expect(prompt).toContain('id=n1');
-    expect(prompt).toContain('title: Sharper');
+    // Slides are numbered by their position in the lane's preview, not in the subset shown.
+    expect(prompt).toContain('slide 3 (Sharper)');
     expect(prompt).not.toContain('id=s3');
     expect(prompt).toMatch(/image: .*cache\/thumbs\/[0-9a-f]+\.png/);
     expect(prompt).toContain('"lane" must be null');
@@ -349,6 +352,83 @@ describe('CheckRunner', () => {
     r.scheduleAfterLane('l1');
     await waitFor(() => calls.length === 1 && r.status().running.length === 0, { timeout: 20_000 });
     expect((await store.remarks()).map((x) => [x.text, x.laneId, x.status])).toEqual([['title overflows', 'l1', 'open']]);
+  });
+
+  const move = (slideId: string, label: string) => ({ label, anchor: { kind: 'slide', slide: slideId }, changes: [{ kind: 'move', slide: slideId, after: null, reason: 'r' }] });
+  const item = (slideId: string, text: string, lane: object | null = null) => ({ anchor: { kind: 'slide', slide: slideId }, severity: 'warn', text, lane });
+
+  it('creates at most 3 lanes per run: the other remarks keep lane null', async () => {
+    const texts = ['s1', 's2', 's3', 's4', 's5'].map((id) => item(id, `problem on ${id}`, move(id, `fix ${id}`)));
+    const out = await runner([JSON.stringify({ remarks: texts })]).r.run('order');
+    expect(out.lanes).toHaveLength(3);
+    const lanes = await store.lanes();
+    expect(lanes).toHaveLength(3);
+    expect(lanes.every((l) => l.status === 'draft' && l.origin === 'check:order')).toBe(true);
+    const remarks = await store.remarks();
+    expect(remarks).toHaveLength(5);
+    expect(remarks.map((x) => x.laneId !== null)).toEqual([true, true, true, false, false]);
+  });
+
+  it('a second run keeps the id (and draft lane) of a remark it finds again and replaces the rest', async () => {
+    const first = await runner([JSON.stringify({ remarks: [item('s2', 'Share group is used before it is defined.', move('s2', 'Define it')), item('s3', 'Stray slide.')] })]).r.run('order');
+    const [a1, b1] = await store.remarks();
+    const laneId = first.lanes[0]!.id;
+    expect(a1!.laneId).toBe(laneId);
+    await runner([JSON.stringify({ remarks: [item('s2', '  share group is used before it is  defined', move('s2', 'Define it')), item('s4', 'New one.')] })]).r.run('order');
+    const after = await store.remarks();
+    expect(after.map((x) => x.text)).toEqual(['  share group is used before it is  defined', 'New one.']);
+    expect(after[0]!.id).toBe(a1!.id);
+    expect(after[0]!.laneId).toBe(laneId);
+    expect(after.some((x) => x.id === b1!.id)).toBe(false);
+    // The lane was reused, not duplicated nor closed.
+    expect((await store.lanes()).map((l) => [l.id, l.status])).toEqual([[laneId, 'draft']]);
+    expect(events).not.toContainEqual({ type: 'lane.closed', laneId });
+    expect(after[0]!.createdAt >= a1!.createdAt).toBe(true);
+  });
+
+  it('keeps remarks the creator resolved or proposed on, and does not duplicate them when found again', async () => {
+    await runner([JSON.stringify({ remarks: [item('s2', 'Weak hook.'), item('s3', 'Too dense.'), item('s4', 'Gone next time.')] })]).r.run('order');
+    const [hook, dense] = await store.remarks();
+    const userLane: Lane = {
+      id: 'l_user',
+      label: 'Lighter s3',
+      anchor: { kind: 'slide', slide: 's3' },
+      origin: 'user',
+      baseVersion: 1,
+      changes: [{ id: 'c1', kind: 'modify', slide: 's3', patch: { title: 'Light' }, reason: 'r', status: 'refused' }],
+      status: 'closed',
+      createdAt: new Date().toISOString(),
+    };
+    await store.putLane(userLane);
+    await store.putRemarks((await store.remarks()).map((x) => (x.id === hook!.id ? { ...x, status: 'resolved' as const } : x.id === dense!.id ? { ...x, laneId: 'l_user' } : x)));
+    await runner([JSON.stringify({ remarks: [item('s2', 'weak hook'), item('s3', 'Too dense.'), item('s5', 'Fresh.')] })]).r.run('order');
+    const after = await store.remarks();
+    expect(after.map((x) => [x.id === hook!.id ? 'hook' : x.id === dense!.id ? 'dense' : x.text, x.status, x.laneId])).toEqual([
+      ['hook', 'resolved', null],
+      ['dense', 'open', 'l_user'],
+      ['Fresh.', 'open', null],
+    ]);
+  });
+
+  it('writes slides as "slide N" in prompts, remark text and lane labels, never as ids', async () => {
+    const ids = ['s_AAAAAAAAAA', 's_BBBBBBBBBB', 's_CCCCCCCCCC', 's_DDDDDDDDDD'];
+    await store.commit(snap(ids.map((id, i) => slide(id, { title: `T${i + 1}` }))), { kind: 'import' });
+    const { r, calls } = runner([
+      JSON.stringify({
+        remarks: [
+          item('s_BBBBBBBBBB', 's_BBBBBBBBBB uses "offset" before s_DDDDDDDDDD defines it; s_ZZZZZZZZZZ is gone.', move('s_DDDDDDDDDD', 'Move s_DDDDDDDDDD before s_BBBBBBBBBB')),
+        ],
+      }),
+    ]);
+    await r.run('order');
+    expect(calls[0]!.prompt).toContain('slide 2 (T2)');
+    expect(calls[0]!.prompt).toMatch(/never write a slide id/i);
+    const [remark] = await store.remarks();
+    expect(remark!.text).toBe('slide 2 uses "offset" before slide 4 defines it; an unknown slide is gone.');
+    const [lane] = await store.lanes();
+    expect(lane!.label).toBe('Move slide 4 before slide 2');
+    // Anchors keep the ids.
+    expect(remark!.anchor).toEqual({ kind: 'slide', slide: 's_BBBBBBBBBB' });
   });
 
   it('parseCheckOutput takes the first { to the last } of a chatty answer', () => {

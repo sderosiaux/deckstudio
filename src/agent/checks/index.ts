@@ -28,6 +28,8 @@ export type CheckResult = z.infer<typeof CheckResultSchema>;
 export interface CheckPromptInput {
   brief: Brief;
   snap: Snapshot;
+  /** Order that numbers the slides ("slide N"): the whole deck (or lane preview), even when `snap` shows a subset. */
+  deckOrder: readonly SlideId[];
   /** Slide id -> absolute path of its rendered thumbnail (render check only). */
   thumbs?: Record<SlideId, string>;
   /** False when the run may not propose lanes (e.g. a render check on a lane's own preview). */
@@ -71,13 +73,18 @@ export function bodyText(html: string): string {
   return text.length > BODY_TEXT_MAX ? `${text.slice(0, BODY_TEXT_MAX)}…` : text;
 }
 
-/** One entry per slide in deck order: position, id, kind, title, story, and optionally the body text. */
-export function deckOutline(snap: Snapshot, opts: { bodies: boolean }): string {
+/** How a slide is named to the model and to the creator: its 1-based position in `deckOrder` and its title. */
+export function slideName(deckOrder: readonly SlideId[], id: SlideId, title: string): string {
+  return `slide ${deckOrder.indexOf(id) + 1} (${title})`;
+}
+
+/** One entry per slide in deck order: "slide N (title)", id, kind, story, and optionally the body text. */
+export function deckOutline(snap: Snapshot, deckOrder: readonly SlideId[], opts: { bodies: boolean }): string {
   const lines = ['<slides>'];
-  snap.order.forEach((id, i) => {
+  snap.order.forEach((id) => {
     const s = snap.slides[id];
     if (!s) return;
-    lines.push(`${i + 1}. id=${id} (${s.kind}) title: ${s.title}`);
+    lines.push(`${slideName(deckOrder, id, s.title)} · id=${id} · ${s.kind}`);
     lines.push(`   story: ${s.story || '(none)'}`);
     if (opts.bodies) lines.push(`   on screen: ${bodyText(s.body) || '(no text)'}`);
   });
@@ -107,5 +114,6 @@ NewChange is one of:
   { "kind": "move", "slide": "<slide id>", "after": "<slide id>" | null, "reason": "one line" }
 
 Rules: use only the slide ids listed above ("after": null means first position). Every remark has all four keys. ${laneRule}
+Slide ids only go in "anchor", "slide" and "after" fields. In "text" and "label", name a slide as it is listed above, "slide N (title)"; never write a slide id there: the creator does not see ids.
 If there is nothing to report, return { "remarks": [] }.`.trim();
 }

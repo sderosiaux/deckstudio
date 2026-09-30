@@ -12,7 +12,7 @@ import {
   SlideKindSchema,
   type NewChange,
 } from '../model/schema.js';
-import type { Anchor, Change, Lane, Remark, Snapshot } from '../model/types.js';
+import type { Anchor, Change, Lane, Origin, Remark, Snapshot } from '../model/types.js';
 import { loadThemeCss } from '../render/defaultTheme.js';
 import { assembleSlideHtml } from '../render/theme.js';
 import { ThumbService } from '../render/thumbs.js';
@@ -171,6 +171,41 @@ const rejected = (invalid: Invalid[]): ToolError => ({
 
 // ---------------------------------------------------------------------------
 
+/**
+ * Validates a propose_lane input against the current deck and saves it as one lane, with the given origin
+ * and status, in a single write: the co-author opens user lanes, a check saves drafts under its own origin.
+ */
+export async function createLane(
+  ctx: Pick<DeckToolContext, 'store' | 'bus'>,
+  args: unknown,
+  as: { origin: Origin; status: 'draft' | 'open' },
+): Promise<object> {
+  const { store, bus } = ctx;
+  const p = parse(ProposeLaneInputSchema, args);
+  if (!p.ok) return p.err;
+  const input = p.value;
+  return store.withLock(async () => {
+    const [state, snap] = await Promise.all([store.state(), store.snapshot()]);
+    const anchorErr = anchorProblem(snap, input.anchor);
+    if (anchorErr) return { error: `Rejected; nothing was saved: ${anchorErr}`, invalid: [] };
+    const { changes, invalid } = checkChanges(snap, input.changes);
+    if (invalid.length) return rejected(invalid);
+    const lane: Lane = {
+      id: newId('l'),
+      label: input.label,
+      anchor: input.anchor,
+      origin: as.origin,
+      baseVersion: state.version,
+      changes,
+      status: as.status,
+      createdAt: new Date().toISOString(),
+    };
+    await store.putLane(lane);
+    bus.emit({ type: 'lane.created', laneId: lane.id });
+    return { laneId: lane.id, changes: changes.map((c) => ({ id: c.id, summary: summarize(c) })) };
+  });
+}
+
 export function makeDeckToolHandlers(ctx: DeckToolContext): DeckToolHandlers {
   const { store, bus } = ctx;
 
@@ -212,29 +247,7 @@ export function makeDeckToolHandlers(ctx: DeckToolContext): DeckToolHandlers {
     },
 
     async propose_lane(args) {
-      const p = parse(ProposeLaneInputSchema, args);
-      if (!p.ok) return p.err;
-      const input = p.value;
-      return store.withLock(async () => {
-        const [state, snap] = await Promise.all([store.state(), store.snapshot()]);
-        const anchorErr = anchorProblem(snap, input.anchor);
-        if (anchorErr) return { error: `Rejected; nothing was saved: ${anchorErr}`, invalid: [] };
-        const { changes, invalid } = checkChanges(snap, input.changes);
-        if (invalid.length) return rejected(invalid);
-        const lane: Lane = {
-          id: newId('l'),
-          label: input.label,
-          anchor: input.anchor,
-          origin: 'user',
-          baseVersion: state.version,
-          changes,
-          status: 'open',
-          createdAt: new Date().toISOString(),
-        };
-        await store.putLane(lane);
-        bus.emit({ type: 'lane.created', laneId: lane.id });
-        return { laneId: lane.id, changes: changes.map((c) => ({ id: c.id, summary: summarize(c) })) };
-      });
+      return createLane(ctx, args, { origin: 'user', status: 'open' });
     },
 
     async revise_lane(args) {
@@ -244,7 +257,8 @@ export function makeDeckToolHandlers(ctx: DeckToolContext): DeckToolHandlers {
       return store.withLock(async () => {
         const lane = await store.lane(laneId);
         if (!lane) return { error: `lane "${laneId}" does not exist.` };
-        if (lane.status !== 'open') return { error: `lane "${laneId}" is closed; call propose_lane for a new proposal.` };
+        // A draft (proposed by a check) can be revised too; it stays a draft until the creator opens it.
+        if (lane.status === 'closed') return { error: `lane "${laneId}" is closed; call propose_lane for a new proposal.` };
         const [state, snap] = await Promise.all([store.state(), store.snapshot()]);
         const { changes, invalid } = checkChanges(snap, replaceChanges);
         if (invalid.length) return rejected(invalid);
