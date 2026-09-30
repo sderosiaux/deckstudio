@@ -10,6 +10,8 @@ export interface ThumbProps {
   ring?: 'accent' | 'ink';
   /** The slide number under the card (default). Lanes leave it out: their cells sit under main's numbered columns. */
   numbered?: boolean;
+  /** The one-line title shown on hover or selection (default). Off where the title is already written under the card (a lane's moved slot). */
+  hoverTitle?: boolean;
   onClick(): void;
   /** Double-click: open this slide somewhere else (main uses it for the player). */
   onDoubleClick?(): void;
@@ -46,7 +48,7 @@ const picture: CSSProperties = { width: '100%', height: '100%', display: 'block'
  * One slide in a strip: the rendered slide (a grey block until the PNG is ready), its number under it unless
  * `numbered` is off, and its title as one line on hover or selection.
  */
-export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbered = true, onClick, onDoubleClick, titleLink }: ThumbProps) {
+export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbered = true, hoverTitle = true, onClick, onDoubleClick, titleLink }: ThumbProps) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [url]);
   const showImage = url !== undefined && !failed;
@@ -70,7 +72,7 @@ export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbe
         )}
       </div>
       {numbered ? <span style={{ fontSize: 'var(--fs-meta)', lineHeight: '15px', textAlign: 'center', color: selected ? `var(--${ring})` : 'var(--grey)' }}>{n}</span> : null}
-      {titleLink ? null : <span className="thumb-title">{title}</span>}
+      {titleLink || !hoverTitle ? null : <span className="thumb-title">{title}</span>}
     </button>
   );
   if (!titleLink) return card;

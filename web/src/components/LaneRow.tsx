@@ -78,6 +78,29 @@ export interface Cell {
   dest?: { boundary: number; at: number };
 }
 
+/** Slide fields a thumbnail never shows: a change to them alone renders the same slide. */
+const OFF_SLIDE = ['story', 'notes'] as const;
+export type OffSlideField = (typeof OFF_SLIDE)[number];
+
+/**
+ * The off-slide fields a modify rewrites when it touches nothing else ("story", "notes" or both, in that order), so its
+ * lane card and its focus render as the slide on main. Empty for other kinds, or once any rendered field changes.
+ */
+export function offSlideFields(change: Change): OffSlideField[] {
+  if (change.kind !== 'modify') return [];
+  const keys = Object.keys(change.patch).filter((k) => change.patch[k as keyof typeof change.patch] !== undefined);
+  if (keys.length === 0 || !keys.every((k) => (OFF_SLIDE as readonly string[]).includes(k))) return [];
+  return OFF_SLIDE.filter((f) => keys.includes(f));
+}
+
+/** Off-slide fields every modify of a cell rewrites, when none of them changes the render; empty otherwise. */
+function cellOffSlide(changes: readonly Change[]): OffSlideField[] {
+  const modifies = changes.filter((c) => c.kind === 'modify');
+  const each = modifies.map(offSlideFields);
+  if (each.length === 0 || each.some((f) => f.length === 0)) return [];
+  return OFF_SLIDE.filter((f) => each.some((fs) => fs.includes(f)));
+}
+
 /** The slide a change is about: the inserted slide's id, or the main slide it modifies, removes or moves. */
 export const targetOf = (c: Change): SlideId => (c.kind === 'insert' ? c.slide.id : c.slide);
 
@@ -269,6 +292,28 @@ export function LaneRow({
     return mainThumbs[id];
   };
 
+  const openCell = (cell: Cell): void => {
+    if (thumbFailed(cell.id) && onRetryThumbs) {
+      onRetryThumbs(lane.id);
+      return;
+    }
+    // A changed slide opens its first pending change at reading size.
+    const first = cell.changes[0];
+    if (first) onOpenChange(lane.id, first.id);
+  };
+  const thumbOf = (cell: Cell, hoverTitle = true) => (
+    <Thumb
+      slideId={cell.id}
+      n={cell.mark === 'inserted' || cell.mark === 'moved' ? preview!.order.indexOf(cell.id) + 1 : cell.col + 1}
+      title={cell.title}
+      url={urlFor(cell.id)}
+      selected={false}
+      numbered={false}
+      hoverTitle={hoverTitle}
+      onClick={() => openCell(cell)}
+    />
+  );
+
   return (
     <div id={`lane-row-${lane.id}`} data-testid="lane-row" data-lane={lane.id} style={{ display: 'flex', alignItems: 'stretch' }}>
       <div className="gutter" style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 8 }}>
@@ -314,9 +359,18 @@ export function LaneRow({
                     // No numbers under lane cells (main's row above numbers the columns): every ✓ ✗ pair sits 12px under the cards.
                     style={{ position: 'relative', gridColumn: `${cell.col - region.start + 1}`, gridRow: '1 / span 2', display: 'grid', gridTemplateRows: 'subgrid', alignItems: 'start' }}
                   >
-                    {cell.slot ? (
+                    {cell.dest ? (
+                      <div data-testid="moved-slot" role="group" aria-label={`moved: ${cell.title}, now slide ${cell.dest.at}`} style={movedStyle}>
+                        <MoveMark />
+                        {thumbOf(cell, false)}
+                        <span style={{ lineHeight: '16px', marginTop: 6, whiteSpace: 'nowrap' }}>moved to {cell.dest.at}</span>
+                        <span data-testid="moved-title" title={cell.title} style={movedTitle}>
+                          {cell.title}
+                        </span>
+                      </div>
+                    ) : cell.slot ? (
                       <a
-                        data-testid={cell.mark === 'removed' ? 'removed-slot' : 'moved-slot'}
+                        data-testid="removed-slot"
                         href={cell.changes[0] ? focusPath(lane.id, cell.changes[0].id) : undefined}
                         onClick={(e) => {
                           const first = cell.changes[0];
@@ -324,39 +378,23 @@ export function LaneRow({
                           e.preventDefault();
                           onOpenChange(lane.id, first.id);
                         }}
-                        title={cell.dest ? `moved: ${cell.title}, now slide ${cell.dest.at}` : `removed: ${cell.title}`}
-                        aria-label={cell.dest ? `moved: ${cell.title}, now slide ${cell.dest.at}` : `removed: ${cell.title}`}
+                        title={`removed: ${cell.title}`}
+                        aria-label={`removed: ${cell.title}`}
                         className="edge-frame"
-                        style={cell.dest ? movedStyle : removedStyle}
+                        style={removedStyle}
                       >
-                        {cell.dest ? <MoveMark title={cell.title} at={cell.dest.at} /> : 'removed'}
+                        removed
                       </a>
                     ) : (
                       <>
-                        <Thumb
-                          slideId={cell.id}
-                          n={cell.mark === 'inserted' || cell.mark === 'moved' ? preview.order.indexOf(cell.id) + 1 : cell.col + 1}
-                          title={cell.title}
-                          url={urlFor(cell.id)}
-                          selected={false}
-                          numbered={false}
-                          onClick={() => {
-                            if (thumbFailed(cell.id) && onRetryThumbs) {
-                              onRetryThumbs(lane.id);
-                              return;
-                            }
-                            // A changed slide opens its first pending change at reading size.
-                            const first = cell.changes[0];
-                            if (first) onOpenChange(lane.id, first.id);
-                          }}
-                        />
+                        {thumbOf(cell)}
                         {cell.mark === 'inserted' ? (
                           <>
                             <div style={{ ...overlay, boxShadow: '0 0 0 1.5px var(--accent)' }} />
                             <div data-testid="insert-badge" style={{ ...overlay, width: 14, height: 14, top: 3, left: 'calc(var(--thumb-w) - 17px)', borderRadius: 999, background: 'var(--accent)', color: 'var(--card)', fontWeight: 700, fontSize: 12, lineHeight: '14px', textAlign: 'center' }}>+</div>
                           </>
                         ) : null}
-                        {cell.mark === 'modified' ? <div data-testid="modified-dot" style={{ ...overlay, width: 7, height: 7, top: 4, left: 'calc(var(--thumb-w) - 11px)', borderRadius: 999, background: 'var(--accent)' }} /> : null}
+                        {cell.mark === 'modified' ? <ModifiedMark fields={cellOffSlide(cell.changes)} /> : null}
                       </>
                     )}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -386,10 +424,8 @@ export function LaneRow({
   );
 }
 
-/** Where the moved hairline runs, from the left edge of its column: the same x on main's thumb and in the lane slot. */
-const MOVE_X = 4;
-/** Height of the hairline inside the slot, down to its end dot beside the "moved to" line. */
-const MOVE_END = 8;
+/** Where the moved hairline runs, from the left edge of its column: the same x on main's thumb and in the lane slot, clear of the card's rounded corner. */
+const MOVE_X = 8;
 
 const slotBox: CSSProperties = {
   position: 'relative',
@@ -406,27 +442,49 @@ const slotBox: CSSProperties = {
 };
 /** The dashed outline means "removed", and only that. */
 const removedStyle: CSSProperties = { ...slotBox, height: 'var(--thumb-h)', border: '1px dashed var(--accent)' };
-/** A moved slide's old column: no outline; the hairline from main's thumb comes down its left edge, the words beside it. */
-const movedStyle: CSSProperties = { ...slotBox, alignItems: 'stretch', justifyContent: 'flex-start', paddingLeft: MOVE_X + 7 };
+/** A moved slide's old column: its card, the hairline from main's thumb landing on the card's top edge, the words under it. */
+const movedStyle: CSSProperties = { ...slotBox, alignItems: 'stretch', justifyContent: 'flex-start' };
+/** The moved slide's title: at most two 12px lines in the one column, the whole title in the tooltip. */
+const movedTitle: CSSProperties = {
+  fontWeight: 500,
+  lineHeight: '16px',
+  color: 'var(--ink)',
+  overflowWrap: 'break-word',
+  display: '-webkit-box',
+  WebkitBoxOrient: 'vertical',
+  WebkitLineClamp: 2,
+  overflow: 'hidden',
+};
 
 /**
- * A moved slide's slot: the end of the accent hairline that leaves the slide's thumb on main (drawn by MoveRisers
- * down to the slot's top), then "moved to 24" beside it and the slide's whole title under that, wrapped on as many
- * lines as it takes (the slot grows; the lane's ✓ ✗ row follows), so the slot names what moves.
+ * Where the accent hairline that leaves the slide's thumb on main (drawn by MoveRisers down to the slot's top) lands:
+ * a dot on the top edge of the moved slide's card, which sits in its old column with "moved to 24" and its title under it.
  */
-function MoveMark({ title, at }: { title: string; at: number }) {
+function MoveMark() {
   return (
-    <>
-      <span data-testid="move-connector" aria-hidden style={{ position: 'absolute', top: 0, left: MOVE_X, width: 1, height: MOVE_END, background: 'var(--accent)', pointerEvents: 'none' }} />
-      <span aria-hidden style={{ position: 'absolute', top: MOVE_END - 2, left: MOVE_X - 2, width: 5, height: 5, borderRadius: 999, background: 'var(--accent)', pointerEvents: 'none' }} />
-      <span style={{ lineHeight: '16px', whiteSpace: 'nowrap' }}>moved to {at}</span>
-      <span
-        data-testid="moved-title"
-        style={{ fontWeight: 500, lineHeight: '16px', color: 'var(--ink)', overflowWrap: 'break-word' }}
-      >
-        {title}
-      </span>
-    </>
+    <span
+      data-testid="move-connector"
+      aria-hidden
+      style={{ position: 'absolute', zIndex: 1, top: -2, left: MOVE_X - 2, width: 5, height: 5, borderRadius: 999, background: 'var(--accent)', pointerEvents: 'none' }}
+    />
+  );
+}
+
+/**
+ * The accent dot on a modified card. A modify that only rewrites the story or the notes renders the same slide: the
+ * dot then carries those words in a small muted tag, so an identical card does not read as a missing diff.
+ */
+function ModifiedMark({ fields }: { fields: readonly OffSlideField[] }) {
+  const dot = <span data-testid="modified-dot" style={{ width: 7, height: 7, flex: '0 0 7px', borderRadius: 999, background: 'var(--accent)' }} />;
+  if (fields.length === 0) return <div style={{ ...overlay, width: 7, height: 7, top: 4, left: 'calc(var(--thumb-w) - 11px)', display: 'flex' }}>{dot}</div>;
+  return (
+    <div
+      data-testid="modified-tag-box"
+      style={{ ...overlay, width: 'auto', height: 'auto', left: 'auto', right: 3, top: 3, display: 'flex', alignItems: 'center', gap: 4, padding: '0 4px 0 5px', borderRadius: 999, background: 'var(--paper)', boxShadow: '0 0 0 1px var(--line)' }}
+    >
+      <span data-testid="modified-tag" className="meta" style={{ lineHeight: '14px' }}>{fields.join(', ')}</span>
+      {dot}
+    </div>
   );
 }
 
