@@ -86,6 +86,11 @@ export function getLanes(): Promise<Lane[]> {
   return getJson<Lane[]>('/api/lanes');
 }
 
+/** One lane by id, open or closed. */
+export function getLane(laneId: string): Promise<Lane> {
+  return getJson<Lane>(`/api/lanes/${seg(laneId)}`);
+}
+
 /** Also enqueues the thumbnails of the lane's changed slides; `thumb.ready` follows for each. */
 export function getLanePreview(laneId: string): Promise<LanePreviewPayload> {
   return getJson<LanePreviewPayload>(`/api/lanes/${seg(laneId)}/preview`);
@@ -126,8 +131,30 @@ export interface ThreadApi {
   postMessage(key: ThreadKey, text: string, context: Anchor | null): Promise<void>;
 }
 
+/** Everything the focus screen reads and writes, injectable for tests. */
+export interface FocusApi extends ThreadApi {
+  getDeck(): Promise<DeckPayload>;
+  getLane(laneId: string): Promise<Lane>;
+  getLanePreview(laneId: string): Promise<LanePreviewPayload>;
+  thumbFor(slideId: SlideId): Promise<ThumbStatus>;
+  acceptChange(laneId: string, changeId: string): Promise<{ version: Version; lane: Lane }>;
+  refuseChange(laneId: string, changeId: string): Promise<Lane>;
+}
+
 export const laneApi: LaneApi = { acceptChange, refuseChange, discardLane };
 export const threadApi: ThreadApi = { getThread, postMessage };
+export const focusApi: FocusApi = { getDeck, getLane, getLanePreview, thumbFor, acceptChange, refuseChange, getThread, postMessage };
+
+/** Client-side routes. The server answers index.html for any non-API path, so these also work on reload. */
+export function focusPath(laneId: string, changeId: string): string {
+  return `/lane/${seg(laneId)}/change/${seg(changeId)}`;
+}
+
+/** Changes the screen without a page load; App listens to popstate. */
+export function navigate(path: string): void {
+  history.pushState(null, '', path);
+  dispatchEvent(new PopStateEvent('popstate'));
+}
 
 const BACKOFF_MIN_MS = 500;
 const BACKOFF_MAX_MS = 10_000;

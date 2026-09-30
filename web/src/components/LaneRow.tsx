@@ -1,6 +1,6 @@
 import { useState, type CSSProperties } from 'react';
 import type { Anchor, Change, Lane, SlideId } from '../../../src/model/types.js';
-import { thumbUrl, type LaneApi, type LanePreviewPayload } from '../api.js';
+import { focusPath, navigate, thumbUrl, type LaneApi, type LanePreviewPayload } from '../api.js';
 import { ChangeButtons } from './ChangeButtons.js';
 import { Thumb } from './Thumb.js';
 
@@ -12,7 +12,11 @@ export interface LaneRowProps {
   /** Thumbnails of main, reused for the lane's unchanged slides. */
   mainThumbs: Record<SlideId, string | undefined>;
   api: LaneApi;
+  /** Opens the focus screen on a change; defaults to the client-side route. */
+  onOpenChange?(laneId: string, changeId: string): void;
 }
+
+const openFocus = (laneId: string, changeId: string): void => navigate(focusPath(laneId, changeId));
 
 /** Deck columns an anchor covers on main: 0-based start and width. Null when an anchor slide is no longer on main. */
 export function anchorColumns(anchor: Anchor, order: SlideId[]): { start: number; span: number } | null {
@@ -85,7 +89,7 @@ function originTag(origin: Lane['origin']): string | null {
  * One open lane, laid out under main: the row uses the same column grid as the filmstrip and the lane
  * occupies only its anchor's columns, so each proposed slide sits under the slide it replaces.
  */
-export function LaneRow({ lane, preview, mainOrder, mainThumbs, api }: LaneRowProps) {
+export function LaneRow({ lane, preview, mainOrder, mainThumbs, api, onOpenChange = openFocus }: LaneRowProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -155,12 +159,34 @@ export function LaneRow({ lane, preview, mainOrder, mainThumbs, api }: LaneRowPr
               {cells.map((cell, i) => (
                 <div key={`${cell.mark}:${cell.id}`} data-testid="lane-cell" data-slide={cell.id} data-mark={cell.mark} style={{ position: 'relative', flex: '0 0 var(--thumb-w)', display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {cell.mark === 'removed' ? (
-                    <div data-testid="removed-slot" title={`removed: ${cell.title}`} style={{ width: 'var(--thumb-w)', height: 'var(--thumb-h)', borderRadius: 6, border: '1.5px dashed var(--grey-2)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--grey)', fontSize: 11, padding: 8, textAlign: 'center' }}>
+                    <a
+                      data-testid="removed-slot"
+                      href={cell.changes[0] ? focusPath(lane.id, cell.changes[0].id) : undefined}
+                      onClick={(e) => {
+                        const first = cell.changes[0];
+                        if (!first || e.metaKey || e.ctrlKey || e.shiftKey) return;
+                        e.preventDefault();
+                        onOpenChange(lane.id, first.id);
+                      }}
+                      title={`removed: ${cell.title}`}
+                      style={{ width: 'var(--thumb-w)', height: 'var(--thumb-h)', borderRadius: 6, border: '1.5px dashed var(--grey-2)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--grey)', fontSize: 11, padding: 8, textAlign: 'center', textDecoration: 'none' }}
+                    >
                       removed · {cell.title}
-                    </div>
+                    </a>
                   ) : (
                     <>
-                      <Thumb slideId={cell.id} n={cols.start + i + 1} title={cell.title} url={urlFor(cell.id)} selected={false} onClick={() => undefined} />
+                      <Thumb
+                        slideId={cell.id}
+                        n={cols.start + i + 1}
+                        title={cell.title}
+                        url={urlFor(cell.id)}
+                        selected={false}
+                        onClick={() => {
+                          // A changed slide opens its first pending change at reading size.
+                          const first = cell.changes[0];
+                          if (first) onOpenChange(lane.id, first.id);
+                        }}
+                      />
                       {cell.mark === 'inserted' ? (
                         <>
                           <div style={{ ...overlay, boxShadow: '0 0 0 2px var(--accent)' }} />
