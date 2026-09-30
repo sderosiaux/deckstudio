@@ -1,6 +1,8 @@
 import type { ThreadKey } from '../model/types.js';
 
 export type BusEvent =
+  // Sent to one socket right after it opens (never through the bus): the client resyncs on it.
+  | { type: 'hello'; version: number }
   | { type: 'deck.changed'; version: number }
   | { type: 'thumb.ready'; hash: string; slideId: string | null }
   | { type: 'thumb.failed'; hash: string; slideId: string | null; message: string }

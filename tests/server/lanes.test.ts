@@ -5,7 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/server/app.js';
 import type { BusEvent } from '../../src/server/bus.js';
 import { DeckStore } from '../../src/store/deckStore.js';
-import { ThumbService } from '../../src/render/thumbs.js';
+import { ThumbService, type ThumbResult } from '../../src/render/thumbs.js';
 import type { Brief, Change, Lane, Slide, Snapshot, Version } from '../../src/model/types.js';
 import { tmpDir } from '../helpers/tmp.js';
 import { waitFor } from '../helpers/waitFor.js';
@@ -219,5 +219,44 @@ describe('lanes API', () => {
     expect(p.slides.s2.title).toBe('S2 preview');
     expect(Object.keys(p.thumbs)).toEqual(['s2']);
     await waitFor(() => events.some((e) => e.type === 'thumb.ready' && e.hash === p.thumbs.s2.hash), { timeout: 20_000 });
+  });
+});
+
+class FailingThumbs extends ThumbService {
+  override async thumb(_slide: Slide): Promise<ThumbResult> {
+    throw new Error('browser crashed');
+  }
+}
+
+describe('lane preview thumbnails that fail', () => {
+  let tmp: Awaited<ReturnType<typeof tmpDir>>;
+  let app: FastifyInstance;
+
+  beforeAll(async () => {
+    tmp = await tmpDir();
+  });
+  afterAll(async () => {
+    await app?.close();
+    await tmp?.cleanup();
+  });
+
+  it('emit thumb.failed with the hash and slide, not an agent error', async () => {
+    const deckDir = join(tmp.dir, 'deck');
+    const store = await DeckStore.init(deckDir, 'demo', brief);
+    await store.commit(snap(five), { kind: 'import' });
+    // Never started: thumb() fails before any browser is needed.
+    const thumbs = new FailingThumbs({ cacheDir: join(deckDir, 'cache'), themeCss, assetsDir: join(deckDir, 'assets') });
+    app = await buildApp({ deckDir, thumbs });
+    const events: BusEvent[] = [];
+    app.bus.on('any', (e) => events.push(e));
+    await app.ready();
+    await store.putLane(lane('l_a', [modify('c_1', 's2', 'S2 preview')]));
+
+    const p = (await app.inject({ method: 'GET', url: '/api/lanes/l_a/preview' })).json();
+    const hash = p.thumbs.s2.hash as string;
+    await waitFor(() => events.some((e) => e.type === 'thumb.failed'));
+    expect(events.filter((e) => e.type === 'thumb.failed' || e.type === 'agent.error')).toEqual([
+      { type: 'thumb.failed', hash, slideId: 's2', message: 'browser crashed' },
+    ]);
   });
 });

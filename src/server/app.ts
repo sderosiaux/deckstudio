@@ -40,6 +40,33 @@ export interface BuildAppOptions {
   checks?: ChecksRunner | null;
 }
 
+const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost']);
+
+const hostnameOf = (hostHeader: string): string | null => {
+  try {
+    return new URL(`http://${hostHeader}`).hostname;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * The server only listens on 127.0.0.1, but a page on any site can still reach it from the browser
+ * (DNS rebinding through Host, cross-site form posts or WebSockets through Origin). Both headers must
+ * name this machine. Any port is accepted: the Vite dev proxy forwards its own Host (localhost:5173).
+ */
+export function isLocalRequest(host: string | undefined, origin: string | undefined): boolean {
+  if (!host) return false;
+  const h = hostnameOf(host);
+  if (!h || !LOCAL_HOSTNAMES.has(h)) return false;
+  if (origin === undefined) return true;
+  try {
+    return LOCAL_HOSTNAMES.has(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
+}
+
 function defaultAgent(store: DeckStore, thumbs: ThumbService, bus: Bus, model: string, checks: ChecksRunner | null): AgentSession {
   const tools = makeDeckTools({
     store,
@@ -61,9 +88,13 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   const app = Fastify({ logger: { level: 'warn' } });
   app.decorate('bus', bus);
   app.decorate('store', store);
+  // First hook on the root instance: it runs for every route, the /ws upgrade and the 404 handler.
+  app.addHook('onRequest', async (req, reply) => {
+    if (!isLocalRequest(req.headers.host, req.headers.origin)) return reply.code(403).send({ error: 'forbidden: not a local request' });
+  });
 
   await app.register(websocket);
-  attachBus(app, bus);
+  attachBus(app, bus, async () => (await store.state()).version);
   await app.register(fastifyStatic, { root: join(store.dir, 'assets'), prefix: '/assets/' });
   // Same font files the thumbnail renderer serves, so /api/present matches the thumbs offline.
   await app.register(fastifyStatic, { root: FONTS_DIR, prefix: '/fonts/', decorateReply: false });

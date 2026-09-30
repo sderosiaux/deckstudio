@@ -5,6 +5,7 @@ import type { DeckStore } from '../../store/deckStore.js';
 import type { Bus } from '../bus.js';
 import { LaneError, type LaneService } from '../laneService.js';
 
+const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const exists = (p: string): Promise<boolean> => access(p).then(() => true, () => false);
 
 type Params = { id: string };
@@ -74,7 +75,7 @@ export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneSe
           () => bus.emit({ type: 'thumb.ready', hash, slideId: id }),
           (err: unknown) => {
             app.log.error({ err, slideId: id, laneId: req.params.id }, 'lane preview thumbnail render failed');
-            bus.emit({ type: 'agent.error', message: `thumbnail render failed for ${id}`, thread: 'global' });
+            bus.emit({ type: 'thumb.failed', hash, slideId: id, message: errorMessage(err) });
           },
         )
         .finally(() => inflight.delete(hash));

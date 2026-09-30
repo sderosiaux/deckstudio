@@ -117,7 +117,18 @@ describe('AgentSession', () => {
     expect(prompt).toContain('Tighter opening');
     expect(prompt).toContain('the claim is buried under the setup');
     expect(prompt).toContain('repeats slide three');
-    for (const id of ['s2', 's3', 's4']) expect(prompt).toContain(`Title ${id}`);
+    // The range section: from the Selected line up to the next blank line, the lane's s2..s4 with their stories.
+    const range = prompt.slice(prompt.indexOf('Selected: range s2..s4')).split('\n\n')[0]!;
+    expect(range.split('\n')).toEqual([
+      'Selected: range s2..s4',
+      '2. s2: Title s2',
+      '   story: story of s2',
+      '3. s3: Title s3',
+      '   story: story of s3',
+      '4. s4: Title s4',
+      '   story: story of s4',
+    ]);
+    for (const id of ['s1', 's5']) expect(range).not.toContain(id);
     expect(prompt.endsWith('\n\nshorten it')).toBe(true);
 
     const opts = fake.calls[0]!.options;
@@ -243,11 +254,81 @@ describe('AgentSession', () => {
     const errors = events.filter((e) => e.type === 'agent.error');
     expect(errors).toEqual([{ type: 'agent.error', thread: 'global', message: 'error_max_turns: too many turns' }]);
     expect(events.some((e) => e.type === 'assistant.done')).toBe(false);
-    expect((await store.state()).sessionId).toBe('sess-err');
+    // Only a success result persists the session id.
+    expect((await store.state()).sessionId).toBeNull();
 
     await s.send('global', 'again', null);
-    expect(fake.calls[1]!.options.resume).toBe('sess-err');
+    expect(fake.calls[1]!.options.resume).toBeUndefined();
     expect(events.at(-1)).toMatchObject({ type: 'assistant.done', thread: 'global' });
+    expect((await store.state()).sessionId).toBe('sess-ok');
+  });
+
+  it('drops a stale stored session id and retries the turn once without resume', async () => {
+    await store.setSessionId('sess-gone');
+    const fake = fakeQuery(async function* (call) {
+      if (call.options.resume) {
+        yield { type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 'sess-tmp', total_cost_usd: 0, errors: ['No conversation found with session ID: sess-gone'] };
+        throw new Error('Claude Code process exited with code 1');
+      }
+      yield assistant('fresh');
+      yield success('sess-new');
+    });
+    await session(fake.impl).send('global', 'hello', null);
+    expect(fake.calls.map((c) => c.options.resume)).toEqual(['sess-gone', undefined]);
+    expect(fake.calls[1]!.prompt).toBe(fake.calls[0]!.prompt);
+    expect(events.some((e) => e.type === 'agent.error')).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: 'assistant.done', thread: 'global' });
+    expect((await store.state()).sessionId).toBe('sess-new');
+    expect((await store.thread('global')).map((m) => m.text)).toEqual(['hello', 'fresh']);
+  });
+
+  it('does not retry a stale-session error forever: a second failure is reported', async () => {
+    await store.setSessionId('sess-gone');
+    const fake = fakeQuery(async function* () {
+      yield { type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 'x', total_cost_usd: 0, errors: ['No conversation found with session ID: x'] };
+      throw new Error('exit 1');
+    });
+    await session(fake.impl).send('global', 'hello', null);
+    expect(fake.calls).toHaveLength(2);
+    expect(events.filter((e) => e.type === 'agent.error')).toEqual([
+      { type: 'agent.error', thread: 'global', message: 'error_during_execution: No conversation found with session ID: x' },
+    ]);
+    expect((await store.state()).sessionId).toBeNull();
+  });
+
+  it('interrupt drops turns queued before it, aborts the running one and waits for both to settle', async () => {
+    const fake = fakeQuery(async function* (call, n) {
+      if (n === 1) {
+        const signal = call.options.abortController!.signal;
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+        throw new Error('aborted by user');
+      }
+      yield assistant('back');
+      yield success('sess-back');
+    });
+    const s = session(fake.impl);
+    const first = s.send('global', 'one', null);
+    const second = s.send('global', 'two', null);
+    await waitFor(() => fake.calls.length === 1);
+    await waitFor(async () => (await store.thread('global')).length === 2);
+    await s.interrupt();
+    // interrupt() resolves only once both turns are over: nothing is left running or writing.
+    expect(fake.calls).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'agent.error')).toEqual([
+      { type: 'agent.error', thread: 'global', message: 'interrupted' },
+      { type: 'agent.error', thread: 'global', message: 'interrupted' },
+    ]);
+    // A dropped turn keeps its user message (it was said) and gets no assistant reply.
+    expect((await store.thread('global')).map((m) => [m.role, m.text])).toEqual([
+      ['user', 'one'],
+      ['user', 'two'],
+    ]);
+    await Promise.all([first, second]);
+
+    // Sends after the interrupt run normally.
+    await s.send('global', 'three', null);
+    expect(fake.calls).toHaveLength(2);
+    expect((await store.thread('global')).map((m) => m.text).slice(-2)).toEqual(['three', 'back']);
   });
 
   it('interrupt aborts the running query', async () => {
@@ -324,6 +405,46 @@ describe('threads API', () => {
     ]);
     expect(msgs[0]!.context).toEqual({ kind: 'range', from: 's1', to: 's3' });
     expect(calls).toHaveLength(1);
+  });
+
+  it('app.close() aborts the running turn and only resolves once it has stopped writing', async () => {
+    const deckDir = join(tmp.dir, 'deck-close');
+    const store = await DeckStore.init(deckDir, 'demo', brief);
+    await store.commit(snap(five), { kind: 'import' });
+    const bus = new Bus();
+    const events: BusEvent[] = [];
+    bus.on('any', (e) => events.push(e));
+    const tools = makeDeckTools({
+      store,
+      thumbs,
+      bus,
+      imageGen: async () => {
+        throw new Error('unused');
+      },
+      runCheck: async () => {
+        throw new Error('unused');
+      },
+    });
+    const fake = fakeQuery(async function* (call) {
+      yield delta('Partial');
+      const signal = call.options.abortController!.signal;
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+      throw new Error('aborted');
+    });
+    const agent = new AgentSession({ store, tools, bus, model: 'claude-opus-5', deckDir, queryImpl: fake.impl });
+    const local = await buildApp({ deckDir, thumbs, agent });
+    await local.ready();
+    await local.inject({ method: 'POST', url: '/api/threads/global/messages', payload: { text: 'one' } });
+    await local.inject({ method: 'POST', url: '/api/threads/global/messages', payload: { text: 'two' } });
+    await waitFor(() => events.some((e) => e.type === 'assistant.delta'));
+    await local.close();
+    expect(fake.calls).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'agent.error')).toHaveLength(2);
+    expect((await store.thread('global')).map((m) => [m.role, m.text])).toEqual([
+      ['user', 'one'],
+      ['user', 'two'],
+      ['assistant', 'Partial'],
+    ]);
   });
 
   it('rejects a bad thread key or an empty text, and exposes interrupt', async () => {

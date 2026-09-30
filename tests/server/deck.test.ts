@@ -32,6 +32,9 @@ const five: Slide[] = [
 ];
 const snap = (slides: Slide[]): Snapshot => ({ order: slides.map((s) => s.id), slides: Object.fromEntries(slides.map((s) => [s.id, s])) });
 
+// injectWS sends no Host header of its own; a browser always does.
+const LOCAL = { headers: { host: '127.0.0.1:4177' } };
+
 describe('server core', () => {
   let tmp: Awaited<ReturnType<typeof tmpDir>>;
   let thumbs: ThumbService;
@@ -75,6 +78,42 @@ describe('server core', () => {
     expect(body.brief).toEqual(brief);
   });
 
+  it('refuses requests whose Host or Origin is not this machine, on HTTP and on the /ws upgrade', async () => {
+    expect((await app.inject({ method: 'GET', url: '/api/deck' })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/deck', headers: { host: '127.0.0.1:4177', origin: 'http://localhost:5173' } })).statusCode).toBe(200);
+    const denied = [
+      { host: 'attacker.example' },
+      { host: 'attacker.example:4177' },
+      { host: '127.0.0.1.attacker.example' },
+      { host: '127.0.0.1:4177', origin: 'http://attacker.example' },
+      { host: '127.0.0.1:4177', origin: 'null' },
+    ];
+    for (const headers of denied) {
+      expect((await app.inject({ method: 'GET', url: '/api/deck', headers })).statusCode, JSON.stringify(headers)).toBe(403);
+      expect((await app.inject({ method: 'PATCH', url: '/api/slides/s3', headers, payload: { title: 'pwned' } })).statusCode).toBe(403);
+      await expect(app.injectWS('/ws', { headers })).rejects.toThrow('403');
+    }
+    expect((await app.inject({ method: 'GET', url: '/api/deck' })).json().slides.s3.title).toBe('Title s3');
+    await expect(app.injectWS('/ws')).rejects.toThrow('403');
+  });
+
+  it('greets every new socket with hello and the current deck version, so a reconnecting client can resync', async () => {
+    const first = await waitForHello();
+    expect(first).toEqual({ type: 'hello', version: 1 });
+    await app.inject({ method: 'PATCH', url: '/api/slides/s3', payload: { title: 'New title' } });
+    expect(await waitForHello()).toEqual({ type: 'hello', version: 2 });
+  });
+
+  const waitForHello = async (): Promise<unknown> => {
+    const received: unknown[] = [];
+    const ws = await app.injectWS('/ws', LOCAL, { onInit: (w) => w.on('message', (m: Buffer) => received.push(JSON.parse(m.toString()))) });
+    try {
+      return await waitFor(() => received[0]);
+    } finally {
+      ws.terminate();
+    }
+  };
+
   it('GET /api/slides/:id returns a slide or 404', async () => {
     expect((await app.inject({ method: 'GET', url: '/api/slides/s3' })).json()).toEqual(five[2]);
     expect((await app.inject({ method: 'GET', url: '/api/slides/nope' })).statusCode).toBe(404);
@@ -82,7 +121,7 @@ describe('server core', () => {
   });
 
   it('PATCH /api/slides/:id commits v2 with a manual accept cause and emits deck.changed over the bus and the socket', async () => {
-    const ws = await app.injectWS('/ws');
+    const ws = await app.injectWS('/ws', LOCAL);
     const received: unknown[] = [];
     ws.on('message', (m: Buffer) => received.push(JSON.parse(m.toString())));
     try {
