@@ -36,17 +36,26 @@ function anchorLabel(a: Anchor): string {
   }
 }
 
-function changeTarget(c: Change): string {
+function slideRef(snapshot: Snapshot, id: string): string {
+  const s = snapshot.slides[id];
+  return s ? `"${s.title}" (${id})` : `(no longer in the deck) (${id})`;
+}
+
+function changeTarget(c: Change, snapshot: Snapshot): string {
   switch (c.kind) {
     case 'insert':
       return `"${c.slide.title}" (${c.slide.id}) ${c.after ? `after ${c.after}` : 'at the start'}`;
     case 'modify':
-      return `${c.slide} [${Object.keys(c.patch).join(', ')}]`;
     case 'remove':
-      return c.slide;
+      return slideRef(snapshot, c.slide);
     case 'move':
-      return `${c.slide} ${c.after ? `after ${c.after}` : 'to the start'}`;
+      return `${slideRef(snapshot, c.slide)} ${c.after ? `after ${c.after}` : 'to the start'}`;
   }
+}
+
+function anchorTitles(snapshot: Snapshot, a: Anchor): string {
+  const ids = slidesInRange(snapshot.order, a);
+  return ids.length ? ids.map((id) => slideRef(snapshot, id)).join(', ') : '(none of its slides are in the deck)';
 }
 
 /** The per-message context block prepended to the creator's text, so the model knows what it is looking at. */
@@ -81,13 +90,44 @@ export function contextHeader(input: {
     }
   }
 
-  if (lane) {
-    out.push('', `Lane ${lane.id} "${lane.label}" on ${anchorLabel(lane.anchor)} (${lane.status}, base v${lane.baseVersion}):`);
-    for (const c of lane.changes) out.push(`- ${c.id} ${c.kind} ${changeTarget(c)}: ${c.reason} [${c.status}]`);
-  }
-
-  if (remark) {
-    out.push('', `Remark ${remark.id} (${remark.severity}, from ${remark.origin}, ${remark.status}) on ${anchorLabel(remark.anchor)}:`, remark.text);
+  if (thread.startsWith('lane:')) {
+    if (lane) {
+      out.push(
+        '',
+        `Lane ${lane.id} "${lane.label}" on ${anchorLabel(lane.anchor)} (${lane.status}, base v${lane.baseVersion}).`,
+        `Anchor slides: ${anchorTitles(snapshot, lane.anchor)}`,
+        'Changes (id · kind · target · reason · status):',
+      );
+      for (const c of lane.changes) out.push(`- ${c.id} · ${c.kind} · ${changeTarget(c, snapshot)} · ${c.reason} · ${c.status}`);
+      out.push(
+        '',
+        `Instruction: if the creator asks to modify this lane, call revise_lane on it (laneId "${lane.id}"). ` +
+          'If they ask for an alternative, call propose_lane with a new label and mention both lanes in your reply. ' +
+          'Never edit main directly.',
+      );
+    } else {
+      out.push('', `Lane ${thread.slice('lane:'.length)} no longer exists. Instruction: call propose_lane for any new proposal. Never edit main directly.`);
+    }
+  } else if (thread.startsWith('remark:')) {
+    if (remark) {
+      out.push(
+        '',
+        `Remark ${remark.id} (from ${remark.origin}, ${remark.status}) on ${anchorLabel(remark.anchor)}:`,
+        remark.text,
+        `Severity: ${remark.severity}`,
+        `Anchor slides: ${anchorTitles(snapshot, remark.anchor)}`,
+      );
+      if (remark.laneId) out.push(`This remark is already linked to lane ${remark.laneId}.`);
+      out.push(
+        '',
+        `Instruction: if asked to propose, call propose_lane with anchor ${JSON.stringify(remark.anchor)}, then call ` +
+          `link_remark_lane(${JSON.stringify({ remarkId: remark.id }).slice(0, -1)},"laneId":<the new lane id>}) and mention the lane id in your reply.`,
+      );
+    } else {
+      out.push('', `Remark ${thread.slice('remark:'.length)} no longer exists. Instruction: proposals go through propose_lane.`);
+    }
+  } else {
+    out.push('', 'Instruction: proposals always go through propose_lane; never edit main directly. Keep replies under six sentences.');
   }
 
   out.push('</deck-context>');
