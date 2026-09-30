@@ -158,6 +158,55 @@ describe('Focus', () => {
   });
 });
 
+describe('Focus text diff and layout', () => {
+  const lines = (field: string) =>
+    Array.from(screen.getAllByTestId('text-diff').find((d) => d.getAttribute('data-field') === field)!.querySelectorAll('[data-testid="diff-line"]')).map(
+      (l) => `${l.getAttribute('data-op')}:${l.getAttribute('data-text')}`,
+    );
+
+  it('a modify shows a text diff of each changed text field under the previews', async () => {
+    const body: Change = {
+      id: 'c1',
+      kind: 'modify',
+      slide: 's3',
+      patch: { title: 'Sharper s3', body: '<p>Title s3</p><p>second line</p>', story: 'why now' },
+      reason: 'tighter title',
+      status: 'pending',
+    };
+    const api = stubApi(lane([body, c3]));
+    render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('text-diff').length === 3);
+    expect(screen.getAllByTestId('text-diff').map((d) => d.getAttribute('data-field'))).toEqual(['title', 'body', 'story']);
+    expect(lines('title')).toEqual(['del:Title s3', 'add:Sharper s3']);
+    expect(lines('body')).toEqual(['same:Title s3', 'add:second line']);
+    expect(lines('story')).toEqual(['add:why now']);
+  });
+
+  it('no text diff for an insert, a remove, or a modify that only touches assets', async () => {
+    const assetsOnly: Change = { id: 'c1', kind: 'modify', slide: 's3', patch: { assets: [] }, reason: 'r', status: 'pending' };
+    const api = stubApi(lane([assetsOnly, c3, c5]));
+    const { rerender } = render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('slide-preview').length === 2);
+    expect(screen.queryAllByTestId('text-diff')).toHaveLength(0);
+    rerender(<Focus laneId="l1" changeId="c3" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => crumb().includes('change 2 of 3'));
+    expect(screen.queryAllByTestId('text-diff')).toHaveLength(0);
+  });
+
+  it('previews sit in a pair that goes side by side from 1280px; the decision bar sticks to the bottom', async () => {
+    render(<Focus laneId="l1" changeId="c1" api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('slide-preview').length === 2);
+    const pair = screen.getByTestId('focus-pair');
+    expect(pair.className).toBe('focus-pair');
+    expect(pair.querySelectorAll('[data-testid="slide-preview"]')).toHaveLength(2);
+    expect(document.querySelector('style')!.textContent).toMatch(/@media \(min-width: 1280px\)\s*\{\s*\.focus-pair/);
+    const bar = screen.getByTestId('decide-bar');
+    expect(bar.style.position).toBe('sticky');
+    expect(bar.style.bottom).toBe('0px');
+    expect(bar.contains(screen.getByRole('button', { name: 'accept this change' }))).toBe(true);
+  });
+});
+
 describe('Focus reload', () => {
   it('reloads without content change request no thumb again; a changed slide is the only one re-requested', async () => {
     const api = stubApi();

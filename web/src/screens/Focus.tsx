@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
-import type { Anchor, Change, Lane, SlideId } from '../../../src/model/types.js';
+import type { Anchor, Change, Lane, Slide, SlideId } from '../../../src/model/types.js';
 import {
   focusApi,
   focusPath,
@@ -15,6 +15,7 @@ import {
 import { Filmstrip } from '../components/Filmstrip.js';
 import { anchorColumns } from '../components/LaneRow.js';
 import { SlidePreview, type SlidePreviewProps } from '../components/SlidePreview.js';
+import { TextDiff, plainText } from '../components/TextDiff.js';
 import { Thread } from '../components/Thread.js';
 
 export interface FocusProps {
@@ -57,6 +58,28 @@ export function laneColumns(lane: Lane, preview: LanePreviewPayload, mainOrder: 
   if (at.length === 0) return null;
   return { start: at[0]!, span: at[at.length - 1]! - at[0]! + 1 };
 }
+
+const TEXT_FIELDS = ['title', 'body', 'story', 'notes'] as const;
+
+/** Text fields a modify rewrites, each as before/after lines against main's slide. Empty for other kinds. */
+export function textChanges(change: Change, before: Slide | undefined): { field: (typeof TEXT_FIELDS)[number]; before: string[]; after: string[] }[] {
+  if (change.kind !== 'modify' || !before) return [];
+  const lines = (field: (typeof TEXT_FIELDS)[number], v: string): string[] => (field === 'body' ? plainText(v) : v === '' ? [] : v.split('\n'));
+  return TEXT_FIELDS.flatMap((field) => {
+    const next = change.patch[field];
+    return next === undefined ? [] : [{ field, before: lines(field, before[field]), after: lines(field, next) }];
+  });
+}
+
+/*
+ * Before/after side by side from 1280px, stacked below. SlidePreview has a fixed reading width; inside the pair it
+ * scales to its column (16:9 kept), so both slides fit next to the thread instead of the second one falling under the fold.
+ */
+const FOCUS_CSS = `
+.focus-pair { display: grid; grid-template-columns: minmax(0, 560px); justify-content: center; gap: 24px; }
+@media (min-width: 1280px) { .focus-pair { grid-template-columns: repeat(2, minmax(0, 560px)); } }
+.focus-pair > [data-testid="slide-preview"] { width: 100% !important; height: auto !important; aspect-ratio: 16 / 9; flex: none !important; }
+`;
 
 const navBtn = (disabled: boolean): CSSProperties => ({
   all: 'unset',
@@ -257,6 +280,9 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
           };
   }
 
+  // Only when main still has the slide: a skipped change has nothing to diff against.
+  const texts = change && target && !skipped ? textChanges(change, deck.slides[target]) : [];
+
   const context: Anchor = target && deck.order.includes(target) ? { kind: 'slide', slide: target } : lane.anchor;
 
   return (
@@ -268,7 +294,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
         </h1>
       </header>
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <main style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: '24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <main style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: '24px 24px 0', display: 'flex', flexDirection: 'column', gap: 16 }}>
           {!change ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
               <p style={{ margin: 0 }}>
@@ -284,19 +310,42 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
             </div>
           ) : (
             <>
-              <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+              <style>{FOCUS_CSS}</style>
+              <div data-testid="focus-pair" className="focus-pair">
                 {left ? <SlidePreview {...left} /> : null}
                 {right ? <SlidePreview {...right} /> : null}
               </div>
               <p data-testid="focus-reason" style={{ margin: 0, textAlign: 'center', color: 'var(--grey)', fontSize: 14 }}>
                 {change.kind}: {change.reason}
               </p>
+              {texts.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 1144, width: '100%', margin: '0 auto' }}>
+                  {texts.map((t) => (
+                    <TextDiff key={t.field} label={t.field} before={t.before} after={t.after} />
+                  ))}
+                </div>
+              ) : null}
               {actionError ? (
                 <p role="alert" style={{ margin: 0, textAlign: 'center', color: 'var(--warn)', fontSize: 13 }}>
                   {actionError}
                 </p>
               ) : null}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+              <div
+                data-testid="decide-bar"
+                style={{
+                  position: 'sticky',
+                  bottom: 0,
+                  marginTop: 'auto',
+                  zIndex: 2,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 16,
+                  padding: '12px 0',
+                  background: 'var(--paper)',
+                  borderTop: '1px solid var(--line)',
+                }}
+              >
                 <button type="button" style={navBtn(!prev || n <= 1)} disabled={!prev || n <= 1} onClick={() => prev && navigate(prev)}>
                   ← prev change
                 </button>

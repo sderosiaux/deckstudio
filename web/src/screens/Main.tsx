@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react
 import type { Anchor, Lane, Remark, SlideId, Version } from '../../../src/model/types.js';
 import {
   BRIEF_PATH,
+  focusPath,
   getDeck,
   getLane,
   getLanePreview,
@@ -10,6 +11,7 @@ import {
   getVersions,
   laneApi,
   navigate,
+  openLane,
   remarkApi,
   selectionFromSearch,
   subscribe,
@@ -22,7 +24,7 @@ import {
 } from '../api.js';
 import { Filmstrip } from '../components/Filmstrip.js';
 import { FAILED_THUMB, LaneRow, anchorColumns } from '../components/LaneRow.js';
-import { RemarkPostIt } from '../components/Remark.js';
+import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
 import { Thread } from '../components/Thread.js';
 import { VersionLine } from '../components/VersionLine.js';
 
@@ -40,6 +42,27 @@ interface Queued {
 const emptyQueue = (): Queued => ({ deck: false, lanes: false, refresh: new Set(), closed: new Set() });
 const byCreated = (a: Lane, b: Lane): number => a.createdAt.localeCompare(b.createdAt);
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** A "propose" sent from this screen, waiting for the co-author's lane. */
+interface ProposeNote {
+  remarkId: string;
+  /** "slide 3", "slides 2–4", "the whole deck". */
+  where: string;
+  /** The remark's lane when it was proposed: a link to it only counts once that lane changes again. */
+  priorLaneId: string | null;
+  /** Lanes created or updated since the propose. */
+  touched: ReadonlySet<string>;
+}
+const MAX_NOTES = 5;
+
+/** Focus route of the lane now linked to the note's remark, once the co-author's lane is there with something to review. */
+export function noteHref(note: ProposeNote, remarks: readonly Remark[], lanes: readonly Lane[]): string | undefined {
+  const laneId = remarks.find((r) => r.id === note.remarkId)?.laneId;
+  if (!laneId || (laneId === note.priorLaneId && !note.touched.has(laneId))) return undefined;
+  const lane = lanes.find((l) => l.id === laneId && l.status === 'open');
+  const first = lane?.changes.find((c) => c.status === 'pending');
+  return lane && first ? focusPath(lane.id, first.id) : undefined;
+}
 
 export function Main() {
   const [load, setLoad] = useState<Load>({ status: 'loading' });
@@ -62,6 +85,11 @@ export function Main() {
   const [remarkError, setRemarkError] = useState<string | null>(null);
   const shift = useRef(false);
   const [lanes, setLanes] = useState<Lane[]>([]);
+  // Lanes a check proposed that the creator has not opened: kept off main, reachable from their remark's post-it.
+  const [drafts, setDrafts] = useState<ReadonlySet<string>>(new Set());
+  const [notes, setNotes] = useState<ProposeNote[]>([]);
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
   const [previews, setPreviews] = useState<Record<string, LanePreviewPayload>>({});
   const previewsRef = useRef(previews);
   previewsRef.current = previews;
@@ -127,6 +155,13 @@ export function Main() {
       try {
         const lane = await getLane(laneId);
         if (laneMetaGen.current.get(laneId) !== gen || laneEpoch.current !== epoch) return;
+        setDrafts((prev) => {
+          if (prev.has(laneId) === (lane.status === 'draft')) return prev;
+          const next = new Set(prev);
+          if (lane.status === 'draft') next.add(laneId);
+          else next.delete(laneId);
+          return next;
+        });
         if (lane.status !== 'open') {
           dropLane(laneId);
           return;
@@ -145,9 +180,11 @@ export function Main() {
   const reloadLanes = useCallback(async () => {
     const epoch = ++laneEpoch.current;
     try {
-      const open = (await getLanes()).sort(byCreated);
+      const [listed, draft] = await Promise.all([getLanes(), getLanes('draft')]);
       if (laneEpoch.current !== epoch) return;
+      const open = listed.filter((l) => l.status === 'open').sort(byCreated);
       setLanes(open);
+      setDrafts(new Set(draft.map((l) => l.id)));
       setLaneError(null);
       const ids = new Set(open.map((l) => l.id));
       setPreviews((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => ids.has(id))));
@@ -160,7 +197,8 @@ export function Main() {
 
   const reloadRemarks = useCallback(async () => {
     try {
-      setRemarks((await getRemarks()).filter((r) => r.status === 'open'));
+      // All of them: a propose note follows its remark's lane link even once the remark is resolved.
+      setRemarks(await getRemarks());
       setRemarkError(null);
     } catch (err) {
       setRemarkError(err instanceof Error ? err.message : String(err));
@@ -269,8 +307,19 @@ export function Main() {
         void reloadRemarks();
       } else if (e.type === 'lane.created' || e.type === 'lane.updated') {
         schedule((q) => q.refresh.add(e.laneId));
+        // A lane answering a propose from here is linked to its remark (remark.laneId): look for the link.
+        if (notesRef.current.length > 0) {
+          setNotes((prev) => prev.map((n) => (n.touched.has(e.laneId) ? n : { ...n, touched: new Set(n.touched).add(e.laneId) })));
+          void reloadRemarks();
+        }
       } else if (e.type === 'lane.closed') {
         schedule((q) => q.closed.add(e.laneId));
+        setDrafts((prev) => {
+          if (!prev.has(e.laneId)) return prev;
+          const next = new Set(prev);
+          next.delete(e.laneId);
+          return next;
+        });
       } else if (e.type === 'thumb.ready') {
         setFailedLaneThumbs((prev) => {
           if (!prev.has(e.hash)) return prev;
@@ -359,7 +408,8 @@ export function Main() {
   const shownThumbs = failed.size === 0 ? thumbs : Object.fromEntries(deck.order.map((id) => [id, failed.has(id) ? FAILED_THUMB : thumbs[id]]));
   // One post-it per open remark anchored on main, across the columns of its anchor; the grid stacks them.
   // Remarks from a lane-scoped check describe that lane's preview, not main: they go on the lane row.
-  const mainRemarks = remarks.filter((r) => !r.sourceLaneId);
+  const openRemarks = remarks.filter((r) => r.status === 'open');
+  const mainRemarks = openRemarks.filter((r) => !r.sourceLaneId);
   const postIts = mainRemarks.flatMap((remark) => {
     if (remark.anchor.kind === 'arc') return [];
     const cols = anchorColumns(remark.anchor, deck.order);
@@ -367,6 +417,15 @@ export function Main() {
   }).sort((a, b) => a.col - b.col);
   const warnCount = mainRemarks.filter((r) => r.severity === 'warn').length;
   const selectedCols = context.kind === 'range' ? anchorColumns(context, deck.order) : null;
+  const propose = async (id: string): Promise<void> => {
+    const r = remarks.find((x) => x.id === id);
+    await remarkApi.proposeRemark(id);
+    const where = !r || r.anchor.kind === 'arc' ? 'the whole deck' : anchorLabel(r.anchor, deck.order);
+    const note: ProposeNote = { remarkId: id, where, priorLaneId: r?.laneId ?? null, touched: new Set() };
+    setNotes((prev) => [...prev.filter((n) => n.remarkId !== id), note].slice(-MAX_NOTES));
+  };
+  const trackedRemarkApi = { proposeRemark: propose, resolveRemark: remarkApi.resolveRemark };
+  const draftOf = (r: Remark): string | undefined => (r.laneId && drafts.has(r.laneId) ? r.laneId : undefined);
   const onSelect = (id: SlideId): void => {
     select(id);
     if (failed.has(id)) refreshThumb(id, generation.current).catch((err: unknown) => console.warn('deckstudio: thumb retry failed', err));
@@ -424,7 +483,7 @@ export function Main() {
                     >
                       {postIts.map(({ remark, col, span }) => (
                         <div key={remark.id} data-testid="post-it-slot" style={{ gridColumn: span > 1 ? `${col + 1} / span ${span}` : `${col + 1}` }}>
-                          <RemarkPostIt remark={remark} onPropose={remarkApi.proposeRemark} onResolve={remarkApi.resolveRemark} />
+                          <RemarkPostIt remark={remark} onPropose={propose} onResolve={remarkApi.resolveRemark} draftLaneId={draftOf(remark)} onOpenLane={openLane} />
                         </div>
                       ))}
                     </div>
@@ -448,24 +507,61 @@ export function Main() {
                     api={laneApi}
                     failedThumbs={failedLaneThumbs}
                     onRetryThumbs={(id) => void refreshPreview(id)}
-                    remarks={remarks.filter((r) => r.sourceLaneId === l.id)}
-                    remarkApi={remarkApi}
+                    remarks={openRemarks.filter((r) => r.sourceLaneId === l.id)}
+                    remarkApi={trackedRemarkApi}
                   />
                 ))
               )}
             </div>
           )}
         </main>
-        <aside style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0 }}>
-          <Thread
-            threadKey="global"
-            context={context}
-            order={deck.order}
-            slides={deck.slides}
-            api={threadApi}
-            subscribe={fanout}
-            onClearContext={() => setContext({ kind: 'arc' })}
-          />
+        <aside data-testid="thread-panel" style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {notes.length > 0 ? (
+            <div role="status" aria-live="polite" style={{ padding: '12px 20px 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {notes.map((n) => {
+                const href = noteHref(n, remarks, lanes);
+                return (
+                  <div key={n.remarkId} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, lineHeight: 1.4 }}>
+                    <span data-testid="propose-note" style={{ flex: 1, minWidth: 0, fontStyle: 'italic', color: 'var(--grey)' }}>
+                      {href ? (
+                        <a
+                          href={href}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            navigate(href);
+                          }}
+                          style={{ color: 'var(--accent)', fontStyle: 'normal', fontWeight: 600, textDecoration: 'none' }}
+                        >
+                          lane ready for {n.where} → review
+                        </a>
+                      ) : (
+                        `asked the co-author for a lane on ${n.where}…`
+                      )}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="dismiss"
+                      onClick={() => setNotes((prev) => prev.filter((x) => x.remarkId !== n.remarkId))}
+                      style={{ all: 'unset', cursor: 'pointer', color: 'var(--grey)' }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <Thread
+              threadKey="global"
+              context={context}
+              order={deck.order}
+              slides={deck.slides}
+              api={threadApi}
+              subscribe={fanout}
+              onClearContext={() => setContext({ kind: 'arc' })}
+            />
+          </div>
         </aside>
       </div>
       <footer style={{ borderTop: '1px solid var(--line)', padding: '10px 24px', background: 'var(--paper)' }}>

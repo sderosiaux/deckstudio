@@ -45,6 +45,37 @@ const sameBrief = (a: Brief, b: Brief): boolean =>
 const openOf = (rs: Remark[], name: CheckName): Remark[] => rs.filter((r) => r.status === 'open' && r.origin === `check:${name}` && !r.sourceLaneId);
 const hasWarn = (rs: Remark[], name: CheckName): boolean => openOf(rs, name).some((r) => r.severity === 'warn');
 
+/** The draft lane a remark points at, if any: a check proposed it and the creator has not opened it yet. */
+function draftLaneOf(lanes: Lane[], laneId: string | null): string | undefined {
+  return laneId && lanes.some((l) => l.id === laneId && l.status === 'draft') ? laneId : undefined;
+}
+
+export type DotState = 'idle' | 'running' | 'ok' | 'warn';
+
+/** Grey until the check has run once: green must mean "ran and found nothing", not "never looked". */
+export function dotState({ running, warn, ran }: { running: boolean; warn: boolean; ran: boolean }): DotState {
+  if (running) return 'running';
+  if (warn) return 'warn';
+  return ran ? 'ok' : 'idle';
+}
+
+const DOT: Record<DotState, { label: string; style: CSSProperties }> = {
+  idle: { label: 'not run yet', style: { background: 'var(--grey-2)' } },
+  running: { label: 'running', style: { background: 'var(--grey)', animation: 'check-dot-pulse 1.1s ease-in-out infinite' } },
+  ok: { label: 'no warnings', style: { background: 'var(--ok)' } },
+  warn: { label: 'has warnings', style: { background: 'var(--accent)' } },
+};
+const DOT_CSS = `
+@keyframes check-dot-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+@media (prefers-reduced-motion: reduce) { [data-testid="check-dot"][data-status="running"] { animation-duration: 3s !important; } }
+`;
+
+/** Rows a textarea needs to show `text` without scrolling: one per hard line, long lines wrapped at `perLine` characters. */
+export function autoRows(text: string, min: number, perLine = 44): number {
+  const rows = text.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / perLine)), 0);
+  return Math.max(min, rows);
+}
+
 /** Focus route for the first pending change of an open lane; undefined when nothing is left to review. */
 function laneHref(lanes: Lane[], laneId: string | null): string | undefined {
   const lane = laneId ? lanes.find((l) => l.id === laneId && l.status === 'open') : undefined;
@@ -64,8 +95,8 @@ export function applyRunning(prev: ChecksStatus | null, running: readonly string
 
 const card: CSSProperties = { background: 'var(--card)', borderRadius: 14, boxShadow: '0 1px 2px rgba(23,23,26,.04), 0 0 0 1px var(--line)', padding: 24, minHeight: 0, overflow: 'auto' };
 const h2: CSSProperties = { margin: '0 0 18px', fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' };
-const fieldLabel: CSSProperties = { display: 'block', fontSize: 14, fontWeight: 600, margin: '16px 0 8px' };
-const input: CSSProperties = { width: '100%', padding: '10px 14px', borderRadius: 8, border: '1px solid var(--line)', background: 'var(--card)', font: 'inherit', fontSize: 14, color: 'var(--ink)' };
+const fieldLabel: CSSProperties = { display: 'block', fontSize: 14, fontWeight: 600, margin: 0, padding: '10px 0 0' };
+const input: CSSProperties = { display: 'block', width: '100%', margin: 0, padding: '10px 14px', borderRadius: 8, border: '1px solid var(--line)', background: 'var(--card)', font: 'inherit', fontSize: 14, lineHeight: 1.45, color: 'var(--ink)' };
 
 function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
   const [draft, setDraft] = useState<Brief>(initial);
@@ -87,20 +118,25 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
     [api],
   );
 
-  const text = (key: 'title' | 'audience' | 'message' | 'abstract', label: string, multiline = false) => {
+  // `minRows` set: a textarea that grows with its content. The label and the control are two grid rows, so they cannot overlap.
+  const text = (key: 'title' | 'audience' | 'message' | 'abstract', label: string, minRows?: number) => {
     const common = {
       id: `brief-${key}`,
       value: draft[key],
       onBlur: () => persist(draft),
-      style: multiline ? { ...input, minHeight: 72, resize: 'vertical' as const } : input,
     };
     return (
       <>
         <label htmlFor={common.id} style={fieldLabel}>{label}</label>
-        {multiline ? (
-          <textarea {...common} rows={key === 'abstract' ? 6 : 2} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} />
+        {minRows !== undefined ? (
+          <textarea
+            {...common}
+            rows={autoRows(draft[key], minRows)}
+            style={{ ...input, resize: 'vertical' }}
+            onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+          />
         ) : (
-          <input {...common} type="text" onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} />
+          <input {...common} type="text" style={input} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} />
         )}
       </>
     );
@@ -114,11 +150,12 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
           {save.kind === 'saving' ? 'saving…' : save.kind === 'saved' ? 'saved' : save.kind === 'error' ? `not saved: ${save.message}` : ''}
         </span>
       </div>
+      <div data-testid="brief-fields" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gridAutoRows: 'auto', rowGap: 8, alignItems: 'start' }}>
       {text('title', 'title')}
-      {text('audience', 'audience')}
-      {text('message', 'message in one sentence', true)}
-      <fieldset style={{ border: 'none', padding: 0, margin: 0 }}>
-        <legend style={fieldLabel}>narrative pattern</legend>
+      {text('audience', 'audience', 1)}
+      {text('message', 'message in one sentence', 2)}
+      <span id="brief-pattern-label" style={fieldLabel}>narrative pattern</span>
+      <div role="radiogroup" aria-labelledby="brief-pattern-label">
         {PATTERNS.map((p) => (
           <label key={p.value} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 0', cursor: 'pointer' }}>
             <input
@@ -137,8 +174,9 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
             {p.label}
           </label>
         ))}
-      </fieldset>
-      {text('abstract', 'abstract', true)}
+      </div>
+      {text('abstract', 'abstract', 6)}
+      </div>
     </section>
   );
 }
@@ -156,6 +194,10 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
   const [liveError, setLiveError] = useState<string | null>(null);
   // Rows with warnings open by default, decided once on the first remarks load so a user's collapse sticks.
   const autoExpanded = useRef(false);
+  // Per check, the lastRun this screen saw before the current one: remarks created after it came from the latest run.
+  // Absent until a run finishes while the screen is open (the first look has nothing to compare with); null = it had never run.
+  const lastSeen = useRef<Partial<Record<CheckName, string | null>>>({});
+  const [since, setSince] = useState<Partial<Record<CheckName, string | null>>>({});
   const pendingThumbs = useRef(new Map<string, SlideId>());
 
   const reportLive = useCallback((err: unknown) => setLiveError(message(err)), []);
@@ -184,7 +226,8 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
   }, [api, loadThumb]);
 
   const loadRemarks = useCallback(async () => {
-    const [rs, ls] = await Promise.all([api.getRemarks(), api.getLanes()]);
+    // Drafts included: a remark linked to a draft lane offers to open it.
+    const [rs, ls] = await Promise.all([api.getRemarks(), api.getLanes('all')]);
     setRemarks(rs);
     setLanes(ls);
     setLiveError(null);
@@ -210,7 +253,7 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
           loadRemarks().catch(reportLive);
         }
       } else if (e.type === 'remarks.changed') loadRemarks().catch(reportLive);
-      else if (e.type === 'lane.created' || e.type === 'lane.updated' || e.type === 'lane.closed') api.getLanes().then(setLanes, reportLive);
+      else if (e.type === 'lane.created' || e.type === 'lane.updated' || e.type === 'lane.closed') api.getLanes('all').then(setLanes, reportLive);
       // The event carries the running list: no refetch per event.
       else if (e.type === 'checks.status') setStatus((prev) => applyRunning(prev, e.running, new Date().toISOString()));
       else if (e.type === 'deck.changed') void loadDeck();
@@ -220,6 +263,23 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
       }
     });
   }, [api, subscribe, loadDeck, loadRemarks, loadStatus, loadThumb, reportLive]);
+
+  useEffect(() => {
+    if (!status) return;
+    const changed: Partial<Record<CheckName, string | null>> = {};
+    for (const { name } of CHECK_ROWS) {
+      const at = status.lastRun[name];
+      if (name in lastSeen.current && lastSeen.current[name] !== at) changed[name] = lastSeen.current[name] ?? null;
+      lastSeen.current[name] = at;
+    }
+    if (Object.keys(changed).length > 0) setSince((prev) => ({ ...prev, ...changed }));
+  }, [status]);
+
+  const isNew = (r: Remark, name: CheckName): boolean => {
+    if (!(name in since)) return false;
+    const before = since[name];
+    return before === null || before === undefined || Date.parse(r.createdAt) > Date.parse(before);
+  };
 
   const run = (): void => {
     setRunError(null);
@@ -286,12 +346,14 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
         <BriefCard initial={brief} api={api} />
 
         <section style={card} aria-label="checks">
+          <style>{DOT_CSS}</style>
           <h2 style={h2}>checks</h2>
           {liveError ? <p style={{ color: 'var(--warn)', fontSize: 12 }}>Remarks: {liveError}</p> : null}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {CHECK_ROWS.map(({ name, label }) => {
               const open = openOf(remarks, name);
               const warn = hasWarn(remarks, name);
+              const dot = dotState({ running: running.has(name), warn, ran: Boolean(status?.lastRun[name]) });
               const isOpen = expanded.has(name);
               return (
                 <div key={name} data-testid="check-row" data-check={name} style={{ border: '1px solid var(--line)', borderRadius: 10 }}>
@@ -303,9 +365,10 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
                   >
                     <span
                       data-testid="check-dot"
-                      data-status={warn ? 'warn' : 'ok'}
-                      aria-label={warn ? 'has warnings' : 'no warnings'}
-                      style={{ width: 16, height: 16, borderRadius: '50%', background: warn ? 'var(--warn)' : 'var(--ok)', flex: '0 0 auto' }}
+                      data-status={dot}
+                      role="img"
+                      aria-label={DOT[dot].label}
+                      style={{ width: 16, height: 16, borderRadius: '50%', flex: '0 0 auto', transition: 'background .2s ease', ...DOT[dot].style }}
                     />
                     <span style={{ fontWeight: 700, fontSize: 16 }}>{label}</span>
                     <span className="muted" style={{ fontSize: 12 }}>
@@ -330,6 +393,9 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
                             onPropose={(id) => api.proposeRemark(id)}
                             laneHref={laneHref(lanes, r.laneId)}
                             onOpenLane={navigate}
+                            draftLaneId={draftLaneOf(lanes, r.laneId)}
+                            onOpenDraft={(id) => api.openLane(id)}
+                            isNew={isNew(r, name)}
                           />
                         ))
                       )}
