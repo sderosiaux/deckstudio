@@ -1,7 +1,16 @@
-import type { Brief, DeckState, Slide, SlideId, Version } from '../../src/model/types.js';
+import type { Anchor, Brief, DeckState, Lane, Slide, SlideId, ThreadKey, ThreadMessage, Version } from '../../src/model/types.js';
 import type { BusEvent } from '../../src/server/bus.js';
 
 export type { BusEvent };
+
+export type LaneEvent = Extract<BusEvent, { type: 'lane.created' | 'lane.updated' | 'lane.closed' }>;
+export type AssistantEvent = Extract<BusEvent, { type: 'assistant.delta' | 'assistant.done' | 'tool.call' | 'agent.error' }>;
+export type DeckChangedEvent = Extract<BusEvent, { type: 'deck.changed' }>;
+
+export const isLaneEvent = (e: BusEvent): e is LaneEvent => e.type === 'lane.created' || e.type === 'lane.updated' || e.type === 'lane.closed';
+export const isAssistantEvent = (e: BusEvent): e is AssistantEvent =>
+  e.type === 'assistant.delta' || e.type === 'assistant.done' || e.type === 'tool.call' || e.type === 'agent.error';
+export const isDeckChanged = (e: BusEvent): e is DeckChangedEvent => e.type === 'deck.changed';
 
 export interface DeckPayload {
   state: DeckState;
@@ -15,11 +24,45 @@ export interface ThumbStatus {
   ready: boolean;
 }
 
+/** Lane preview: main with all pending changes of the lane applied, plus the render status of every changed slide. */
+export interface LanePreviewPayload {
+  order: SlideId[];
+  slides: Record<SlideId, Slide>;
+  /** Pending change ids that no longer apply on current main. */
+  skipped: string[];
+  thumbs: Record<SlideId, ThumbStatus>;
+}
+
+/** The server answers errors as `{ error }`; surface that message rather than the bare status. */
+async function failure(method: string, path: string, res: Response): Promise<Error> {
+  let detail = res.statusText;
+  try {
+    const body = (await res.json()) as { error?: unknown };
+    if (typeof body.error === 'string') detail = body.error;
+  } catch {
+    // body was not JSON: keep the status text
+  }
+  return new Error(`${method} ${path} failed: ${res.status} ${detail}`);
+}
+
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: { accept: 'application/json' } });
-  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status} ${res.statusText}`);
+  if (!res.ok) throw await failure('GET', path, res);
   return (await res.json()) as T;
 }
+
+async function send(method: 'POST' | 'DELETE', path: string, body?: unknown): Promise<Response> {
+  const init: RequestInit = { method, headers: { accept: 'application/json' } };
+  if (body !== undefined) {
+    init.headers = { accept: 'application/json', 'content-type': 'application/json' };
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, init);
+  if (!res.ok) throw await failure(method, path, res);
+  return res;
+}
+
+const seg = encodeURIComponent;
 
 export function getDeck(): Promise<DeckPayload> {
   return getJson<DeckPayload>('/api/deck');
@@ -37,6 +80,54 @@ export function thumbFor(slideId: SlideId): Promise<ThumbStatus> {
 export function thumbUrl(hash: string): string {
   return `/api/thumbs/${hash}.png`;
 }
+
+/** Open lanes. */
+export function getLanes(): Promise<Lane[]> {
+  return getJson<Lane[]>('/api/lanes');
+}
+
+/** Also enqueues the thumbnails of the lane's changed slides; `thumb.ready` follows for each. */
+export function getLanePreview(laneId: string): Promise<LanePreviewPayload> {
+  return getJson<LanePreviewPayload>(`/api/lanes/${seg(laneId)}/preview`);
+}
+
+export async function acceptChange(laneId: string, changeId: string): Promise<{ version: Version; lane: Lane }> {
+  const res = await send('POST', `/api/lanes/${seg(laneId)}/changes/${seg(changeId)}/accept`);
+  return (await res.json()) as { version: Version; lane: Lane };
+}
+
+export async function refuseChange(laneId: string, changeId: string): Promise<Lane> {
+  const res = await send('POST', `/api/lanes/${seg(laneId)}/changes/${seg(changeId)}/refuse`);
+  return (await res.json()) as Lane;
+}
+
+export async function discardLane(laneId: string): Promise<void> {
+  await send('DELETE', `/api/lanes/${seg(laneId)}`);
+}
+
+export function getThread(key: ThreadKey): Promise<ThreadMessage[]> {
+  return getJson<ThreadMessage[]>(`/api/threads/${seg(key)}`);
+}
+
+/** The server answers 202 and streams the reply as `assistant.delta` events, then `assistant.done`. */
+export async function postMessage(key: ThreadKey, text: string, context: Anchor | null): Promise<void> {
+  await send('POST', `/api/threads/${seg(key)}/messages`, { text, context });
+}
+
+/** The lane-related calls, grouped so components can take them as an injectable dependency. */
+export interface LaneApi {
+  acceptChange(laneId: string, changeId: string): Promise<unknown>;
+  refuseChange(laneId: string, changeId: string): Promise<unknown>;
+  discardLane(laneId: string): Promise<void>;
+}
+
+export interface ThreadApi {
+  getThread(key: ThreadKey): Promise<ThreadMessage[]>;
+  postMessage(key: ThreadKey, text: string, context: Anchor | null): Promise<void>;
+}
+
+export const laneApi: LaneApi = { acceptChange, refuseChange, discardLane };
+export const threadApi: ThreadApi = { getThread, postMessage };
 
 const BACKOFF_MIN_MS = 500;
 const BACKOFF_MAX_MS = 10_000;
