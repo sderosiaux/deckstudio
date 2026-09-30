@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { BusEvent, DeckPayload, LanePreviewPayload } from '../../web/src/api.js';
-import type { Change, Lane, Slide, SlideId } from '../../src/model/types.js';
+import type { Change, Lane, Remark, Slide, SlideId } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
 
 const m = vi.hoisted(() => ({
@@ -13,6 +13,9 @@ const m = vi.hoisted(() => ({
   getLane: vi.fn(),
   getLanePreview: vi.fn(),
   thumbFor: vi.fn(),
+  getRemarks: vi.fn(),
+  proposeRemark: vi.fn(),
+  resolveRemark: vi.fn(),
   getThread: vi.fn(),
   postMessage: vi.fn(),
 }));
@@ -27,6 +30,8 @@ vi.mock('../../web/src/api.js', async (importOriginal) => {
     getLane: m.getLane,
     getLanePreview: m.getLanePreview,
     thumbFor: m.thumbFor,
+    getRemarks: m.getRemarks,
+    remarkApi: { proposeRemark: m.proposeRemark, resolveRemark: m.resolveRemark },
     threadApi: { getThread: m.getThread, postMessage: m.postMessage },
     laneApi: { acceptChange: vi.fn(), refuseChange: vi.fn(), discardLane: vi.fn() },
     subscribe: (h: (e: unknown) => void) => {
@@ -84,6 +89,9 @@ beforeEach(() => {
   m.getLane.mockReset().mockImplementation(async (id: string) => lanes.find((l) => l.id === id));
   m.getLanePreview.mockReset().mockImplementation(async (id: string) => previewOf(id, id === 'l1' ? 's3' : 's5'));
   m.thumbFor.mockReset().mockImplementation(async (id: SlideId) => ({ hash: hashOf(id), ready: true }));
+  m.getRemarks.mockReset().mockResolvedValue([]);
+  m.proposeRemark.mockReset().mockResolvedValue(undefined);
+  m.resolveRemark.mockReset().mockResolvedValue(undefined);
   m.getThread.mockReset().mockResolvedValue([]);
   m.postMessage.mockReset().mockResolvedValue(undefined);
 });
@@ -95,6 +103,19 @@ const mounted = async () => {
   await waitFor(() => callsFor(m.getLanePreview, 'l1') === 1 && callsFor(m.getLanePreview, 'l2') === 1);
   await waitFor(() => screen.getAllByTestId('lane-row').length === 2);
 };
+
+const remark = (id: string, over: Partial<Remark>): Remark => ({
+  id,
+  anchor: { kind: 'arc' },
+  text: `text ${id}`,
+  origin: 'check:render',
+  severity: 'warn',
+  status: 'open',
+  laneId: null,
+  createdAt: '2026-09-30T00:00:00.000Z',
+  ...over,
+});
+const warnBadge = (): string | null => screen.queryByTestId('warn-badge')?.textContent ?? null;
 
 const laneCell = (laneId: string, slideId: SlideId): HTMLElement => {
   const row = screen.getAllByTestId('lane-row').find((r) => r.getAttribute('data-lane') === laneId)!;
@@ -168,6 +189,41 @@ describe('Main', () => {
     fireEvent.click(within(laneCell('l1', 's3')).getByTestId('thumb'));
     await waitFor(() => callsFor(m.getLanePreview, 'l1') === 2);
     await waitFor(() => laneCell('l1', 's3').getAttribute('data-thumb-failed') === null);
+  });
+});
+
+describe('Main remarks', () => {
+  it('an open slide remark sits under its column, a range remark spans its columns; resolved ones are gone after remarks.changed', async () => {
+    m.getRemarks.mockResolvedValue([
+      remark('r_slide', { anchor: { kind: 'slide', slide: 's2' } }),
+      remark('r_range', { anchor: { kind: 'range', from: 's3', to: 's5' }, severity: 'info' }),
+      remark('r_done', { anchor: { kind: 'slide', slide: 's1' }, status: 'resolved' }),
+    ]);
+    await mounted();
+    await waitFor(() => screen.queryAllByTestId('post-it').length === 2);
+    const slot = (id: string) => screen.getAllByTestId('post-it-slot').find((s) => within(s).getByTestId('post-it').getAttribute('data-remark') === id)!;
+    expect(slot('r_slide').style.gridColumn).toBe('2');
+    expect(slot('r_range').style.gridColumn).toBe('3 / span 3');
+    expect(warnBadge()).toBe(' · 1');
+
+    m.getRemarks.mockResolvedValue([remark('r_slide', { anchor: { kind: 'slide', slide: 's2' }, status: 'resolved' })]);
+    emit({ type: 'remarks.changed' });
+    await waitFor(() => screen.queryByTestId('post-its') === null);
+    expect(warnBadge()).toBeNull();
+  });
+
+  it('a lane-scoped remark shows under that lane cell, not under main, and does not count in the warn badge', async () => {
+    m.getRemarks.mockResolvedValue([remark('r_lane', { anchor: { kind: 'slide', slide: 's3' }, sourceLaneId: 'l1' })]);
+    await mounted();
+    await waitFor(() => within(laneCell('l1', 's3')).queryAllByTestId('post-it').length === 1);
+    expect(within(laneCell('l1', 's3')).getByTestId('post-it').getAttribute('data-remark')).toBe('r_lane');
+    expect(screen.queryByTestId('post-its')).toBeNull();
+    expect(screen.getAllByTestId('post-it')).toHaveLength(1);
+    expect(within(laneCell('l2', 's5')).queryAllByTestId('post-it')).toHaveLength(0);
+    expect(warnBadge()).toBeNull();
+
+    fireEvent.click(within(laneCell('l1', 's3')).getByRole('button', { name: 'resolve' }));
+    expect(m.resolveRemark).toHaveBeenCalledWith('r_lane');
   });
 });
 

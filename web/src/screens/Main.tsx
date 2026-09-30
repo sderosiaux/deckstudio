@@ -357,12 +357,15 @@ export function Main() {
 
   const { deck, versions } = load;
   const shownThumbs = failed.size === 0 ? thumbs : Object.fromEntries(deck.order.map((id) => [id, failed.has(id) ? FAILED_THUMB : thumbs[id]]));
-  // One post-it per open remark anchored on main, under the first column of its anchor; the grid stacks them.
-  const postIts = remarks.flatMap((remark) => {
+  // One post-it per open remark anchored on main, across the columns of its anchor; the grid stacks them.
+  // Remarks from a lane-scoped check describe that lane's preview, not main: they go on the lane row.
+  const mainRemarks = remarks.filter((r) => !r.sourceLaneId);
+  const postIts = mainRemarks.flatMap((remark) => {
     if (remark.anchor.kind === 'arc') return [];
     const cols = anchorColumns(remark.anchor, deck.order);
-    return cols ? [{ remark, col: cols.start }] : [];
+    return cols ? [{ remark, col: cols.start, span: cols.span }] : [];
   }).sort((a, b) => a.col - b.col);
+  const warnCount = mainRemarks.filter((r) => r.severity === 'warn').length;
   const selectedCols = context.kind === 'range' ? anchorColumns(context, deck.order) : null;
   const onSelect = (id: SlideId): void => {
     select(id);
@@ -381,7 +384,7 @@ export function Main() {
           }}
           style={{ marginLeft: 'auto', color: 'var(--ink)', fontWeight: 600, textDecoration: 'none' }}
         >
-          brief &amp; checks{remarks.some((r) => r.severity === 'warn') ? <span className="accent"> · {remarks.filter((r) => r.severity === 'warn').length}</span> : null}
+          brief &amp; checks{warnCount > 0 ? <span data-testid="warn-badge" className="accent"> · {warnCount}</span> : null}
         </a>
         <a href="/api/present" style={{ color: 'var(--accent)', fontWeight: 700, textDecoration: 'none' }}>Present ▸</a>
       </header>
@@ -419,8 +422,8 @@ export function Main() {
                       data-testid="post-its"
                       style={{ display: 'grid', gridTemplateColumns: `repeat(${deck.order.length}, var(--thumb-w))`, columnGap: 'var(--col-gap)', rowGap: 8, gridAutoFlow: 'row dense', alignItems: 'start', padding: '0 6px' }}
                     >
-                      {postIts.map(({ remark, col }) => (
-                        <div key={remark.id} style={{ gridColumn: `${col + 1}` }}>
+                      {postIts.map(({ remark, col, span }) => (
+                        <div key={remark.id} data-testid="post-it-slot" style={{ gridColumn: span > 1 ? `${col + 1} / span ${span}` : `${col + 1}` }}>
                           <RemarkPostIt remark={remark} onPropose={remarkApi.proposeRemark} onResolve={remarkApi.resolveRemark} />
                         </div>
                       ))}
@@ -445,6 +448,8 @@ export function Main() {
                     api={laneApi}
                     failedThumbs={failedLaneThumbs}
                     onRetryThumbs={(id) => void refreshPreview(id)}
+                    remarks={remarks.filter((r) => r.sourceLaneId === l.id)}
+                    remarkApi={remarkApi}
                   />
                 ))
               )}

@@ -5,7 +5,7 @@ import { LaneRow } from '../../web/src/components/LaneRow.js';
 import { ContextChip } from '../../web/src/components/ContextChip.js';
 import { Thread } from '../../web/src/components/Thread.js';
 import type { BusEvent, LaneApi, LanePreviewPayload, ThreadApi } from '../../web/src/api.js';
-import type { Change, Lane, Slide, SlideId, ThreadMessage } from '../../src/model/types.js';
+import type { Change, Lane, Remark, Slide, SlideId, ThreadMessage } from '../../src/model/types.js';
 import { act } from '@testing-library/react';
 import { waitFor } from '../helpers/waitFor.js';
 
@@ -161,6 +161,33 @@ describe('LaneRow', () => {
     expect((within(cell).getByTestId('thumb-image') as HTMLImageElement).getAttribute('src')).toMatch(/^data:image\/svg\+xml/);
     fireEvent.click(within(cell).getByTestId('thumb'));
     expect(onRetry).toHaveBeenCalledWith('l1');
+  });
+
+  it('pins lane-scoped remarks under the cell they anchor to; an arc or off-row remark goes below the cells', () => {
+    const r = (id: string, anchor: Remark['anchor']): Remark => ({
+      id, anchor, text: `text ${id}`, origin: 'check:render', severity: 'warn', status: 'open', laneId: null, sourceLaneId: 'l1', createdAt: '2026-09-30T00:00:00.000Z',
+    });
+    const remarkApi = { proposeRemark: vi.fn(async () => undefined), resolveRemark: vi.fn(async () => undefined) };
+    render(
+      <LaneRow
+        lane={lane()}
+        preview={preview}
+        mainOrder={order}
+        mainThumbs={{}}
+        api={stubApi()}
+        remarks={[r('r_n1', { kind: 'slide', slide: 'n1' }), r('r_range', { kind: 'range', from: 's3', to: 's2' }), r('r_arc', { kind: 'arc' })]}
+        remarkApi={remarkApi}
+      />,
+    );
+    const cell = (id: string) => screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === id)!;
+    const ids = (el: HTMLElement) => within(el).queryAllByTestId('post-it').map((p) => p.getAttribute('data-remark'));
+    expect(ids(cell('n1'))).toEqual(['r_n1']);
+    // a range goes under whichever end comes first in the lane: s2 before s3
+    expect(ids(cell('s2'))).toEqual(['r_range']);
+    expect(ids(cell('s3'))).toEqual([]);
+    expect(ids(screen.getByTestId('lane-remarks'))).toEqual(['r_arc']);
+    fireEvent.click(within(cell('n1')).getByRole('button', { name: 'propose' }));
+    expect(remarkApi.proposeRemark).toHaveBeenCalledWith('r_n1');
   });
 });
 

@@ -158,6 +158,28 @@ describe('Focus', () => {
   });
 });
 
+describe('Focus reload', () => {
+  it('reloads without content change request no thumb again; a changed slide is the only one re-requested', async () => {
+    const api = stubApi();
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<Focus laneId="l1" changeId="c1" api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => api.thumbFor.mock.calls.length === order.length);
+    const perSlide = () => order.map((id) => api.thumbFor.mock.calls.filter((c) => c[0] === id).length);
+
+    push({ type: 'deck.changed', version: 3 });
+    await waitFor(() => api.getDeck.mock.calls.length === 2);
+    push({ type: 'lane.updated', laneId: 'l1' });
+    await waitFor(() => api.getLanePreview.mock.calls.length === 3);
+    // The lane's own events are the marker the reloads ran to their end; a changed slide proves the loop runs.
+    const changed: DeckPayload = { ...deck, state: { ...deck.state, version: 4 }, slides: { ...mainSlides, s4: slide('s4', 'Edited s4') } };
+    api.getDeck.mockResolvedValue(changed);
+    push({ type: 'deck.changed', version: 4 });
+    await waitFor(() => api.thumbFor.mock.calls.length === order.length + 1);
+    expect(perSlide()).toEqual([1, 1, 1, 2, 1]);
+    expect(api.thumbFor.mock.calls.at(-1)).toEqual(['s4']);
+  });
+});
+
 describe('LaneRow links to the focus screen', () => {
   it('clicking a changed thumb opens its change, an unchanged one does nothing', async () => {
     const { LaneRow } = await import('../../web/src/components/LaneRow.js');

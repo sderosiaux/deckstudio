@@ -95,6 +95,8 @@ function RangeUnderline({ count, cols }: { count: number; cols: { start: number;
 export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSubscribe, navigate = defaultNavigate }: FocusProps) {
   const [load, setLoad] = useState<Load>({ status: 'loading' });
   const [mainThumbs, setMainThumbs] = useState<Record<SlideId, ThumbStatus>>({});
+  // Content each main thumb was fetched for, so a reload only re-requests the thumbs of slides that changed.
+  const thumbStamps = useRef<Record<SlideId, string>>({});
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const generation = useRef(0);
@@ -115,13 +117,20 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
       const [deck, lane, preview] = await Promise.all([api.getDeck(), api.getLane(laneId), api.getLanePreview(laneId)]);
       if (gen !== generation.current) return;
       setLoad({ status: 'ready', deck, lane, preview });
+      const stamp = (id: SlideId): string => JSON.stringify(deck.slides[id] ?? null);
+      const onMain = new Set(deck.order);
+      thumbStamps.current = Object.fromEntries(Object.entries(thumbStamps.current).filter(([id]) => onMain.has(id)));
+      setMainThumbs((prev) => (Object.keys(prev).every((id) => onMain.has(id)) ? prev : Object.fromEntries(Object.entries(prev).filter(([id]) => onMain.has(id)))));
       // The focused slide first, then the rest left to right: the server renders one thumb at a time.
+      // Only slides never fetched, or whose content changed since: a stamp is recorded once its thumb is in,
+      // so a fetch cut short by a newer reload is retried by that reload.
       const focused = lane.changes.find((c) => c.id === changeRef.current);
       const first = focused ? targetOf(focused) : null;
       const ids = first && deck.order.includes(first) ? [first, ...deck.order.filter((id) => id !== first)] : deck.order;
-      for (const id of ids) {
+      for (const id of ids.filter((x) => thumbStamps.current[x] !== stamp(x))) {
         const t = await api.thumbFor(id);
         if (gen !== generation.current) return;
+        thumbStamps.current[id] = stamp(id);
         setMainThumbs((prev) => ({ ...prev, [id]: t }));
       }
     } catch (err) {
