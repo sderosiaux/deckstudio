@@ -53,14 +53,16 @@ export class LaneService {
 
   async accept(laneId: string, changeId: string): Promise<{ version: Version; lane: Lane }> {
     const out = await this.store.withLock(async () => {
-      const lane = await this.openLane(laneId);
+      const lane = await this.actionableLane(laneId);
       const change = this.pendingChange(lane, changeId);
       const res = applyChange(await this.store.snapshot(), change);
       if (!res.ok) throw new LaneError(409, `change ${changeId} no longer applies on main: ${res.error}`);
       const version = await this.store.commit(res.next, { kind: 'accept', laneId, changeId });
 
-      const accepted = this.withStatus(lane, changeId, 'accepted');
-      const others = (await this.store.lanes()).filter((l) => l.status === 'open' && l.id !== laneId);
+      // Acting on a draft opens it.
+      const accepted: Lane = { ...this.withStatus(lane, changeId, 'accepted'), status: 'open' };
+      // Drafts are rebased like open lanes: main moved under them too.
+      const others = (await this.store.lanes()).filter((l) => l.status !== 'closed' && l.id !== laneId);
       const touched: { lane: Lane; changed: boolean }[] = [];
       for (const l of [accepted, ...others]) {
         const rebased = rebaseLane(l, res.next);
@@ -81,9 +83,9 @@ export class LaneService {
 
   async refuse(laneId: string, changeId: string): Promise<Lane> {
     const out = await this.store.withLock(async () => {
-      const lane = await this.openLane(laneId);
+      const lane = await this.actionableLane(laneId);
       this.pendingChange(lane, changeId);
-      const refused = this.withStatus(lane, changeId, 'refused');
+      const refused: Lane = { ...this.withStatus(lane, changeId, 'refused'), status: 'open' };
       const next: Lane = hasPending(refused) ? refused : { ...refused, status: 'closed' };
       await this.store.putLane(next);
       const remarksChanged = next.status === 'closed' && (await this.resolveRemarksOf([next.id]));
@@ -92,6 +94,21 @@ export class LaneService {
     this.emitLane(out.next);
     if (out.remarksChanged) this.bus.emit({ type: 'remarks.changed' });
     return out.next;
+  }
+
+  /** Shows a draft (proposed by a check) on main. Opening an open lane is a no-op; a closed lane cannot be reopened. */
+  async open(laneId: string): Promise<Lane> {
+    const out = await this.store.withLock(async () => {
+      const lane = await this.store.lane(laneId);
+      if (!lane) throw new LaneError(404, `unknown lane ${laneId}`);
+      if (lane.status === 'closed') throw new LaneError(409, `lane ${laneId} is closed`);
+      if (lane.status === 'open') return { lane, changed: false };
+      const next: Lane = { ...lane, status: 'open' };
+      await this.store.putLane(next);
+      return { lane: next, changed: true };
+    });
+    if (out.changed) this.bus.emit({ type: 'lane.updated', laneId });
+    return out.lane;
   }
 
   async closeLane(laneId: string): Promise<void> {
@@ -136,10 +153,11 @@ export class LaneService {
     return next !== null;
   }
 
-  private async openLane(laneId: string): Promise<Lane> {
+  /** An open or draft lane: the creator may accept or refuse its changes. */
+  private async actionableLane(laneId: string): Promise<Lane> {
     const lane = await this.store.lane(laneId);
     if (!lane) throw new LaneError(404, `unknown lane ${laneId}`);
-    if (lane.status !== 'open') throw new LaneError(409, `lane ${laneId} is closed`);
+    if (lane.status === 'closed') throw new LaneError(409, `lane ${laneId} is closed`);
     return lane;
   }
 

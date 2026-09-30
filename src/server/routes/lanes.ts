@@ -10,6 +10,8 @@ const exists = (p: string): Promise<boolean> => access(p).then(() => true, () =>
 
 type Params = { id: string };
 type ChangeParams = { id: string; cid: string };
+type ListQuery = { status?: string };
+const LIST_STATUSES = ['draft', 'open', 'all'] as const;
 
 export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneService, thumbs: ThumbService, bus: Bus): void {
   const inflight = new Set<string>();
@@ -19,7 +21,23 @@ export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneSe
     throw err;
   };
 
-  app.get('/api/lanes', async () => (await store.lanes()).filter((l) => l.status === 'open'));
+  // Open lanes by default: drafts are check proposals the creator has not opened yet.
+  app.get<{ Querystring: ListQuery }>('/api/lanes', async (req, reply) => {
+    const status = req.query.status ?? 'open';
+    if (!(LIST_STATUSES as readonly string[]).includes(status)) {
+      return reply.code(400).send({ error: `invalid status "${status}": expected ${LIST_STATUSES.join(', ')}` });
+    }
+    const all = await store.lanes();
+    return status === 'all' ? all : all.filter((l) => l.status === status);
+  });
+
+  app.post<{ Params: Params }>('/api/lanes/:id/open', async (req, reply) => {
+    try {
+      return await lanes.open(req.params.id);
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
 
   app.get<{ Params: Params }>('/api/lanes/:id', async (req, reply) => {
     const lane = await store.lane(req.params.id);

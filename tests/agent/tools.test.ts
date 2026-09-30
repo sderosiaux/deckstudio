@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { access, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { makeDeckToolHandlers, makeDeckTools, type DeckToolContext } from '../../src/agent/tools.js';
+import { createLane, makeDeckToolHandlers, makeDeckTools, type DeckToolContext } from '../../src/agent/tools.js';
 import { contextHeader, SYSTEM_APPEND } from '../../src/agent/prompts.js';
 import { DeckStore } from '../../src/store/deckStore.js';
 import { ThumbService } from '../../src/render/thumbs.js';
@@ -200,6 +200,28 @@ describe('deck tools', () => {
     expect(await h.revise_lane({ laneId: 'l_missing', replaceChanges: [{ kind: 'remove', slide: 's1', reason: 'r' }] })).toMatchObject({
       error: expect.stringContaining('l_missing'),
     });
+  });
+
+  it('createLane validates like propose_lane and saves the lane with the given origin and status in one write', async () => {
+    const res = (await createLane(ctx, { label: 'Hook first', anchor: { kind: 'arc' }, changes: [{ kind: 'move', slide: 's3', after: null, reason: 'hook' }] }, { origin: 'check:arc', status: 'draft' })) as { laneId: string };
+    expect(await store.lane(res.laneId)).toMatchObject({ origin: 'check:arc', status: 'draft', label: 'Hook first' });
+    expect(events).toContainEqual({ type: 'lane.created', laneId: res.laneId });
+    const bad = await createLane(ctx, { label: 'x', anchor: { kind: 'arc' }, changes: [{ kind: 'remove', slide: 'ghost', reason: 'r' }] }, { origin: 'check:arc', status: 'draft' });
+    expect(bad).toMatchObject({ invalid: [{ index: 0 }] });
+    // The co-author's propose_lane still opens a user lane.
+    const h = makeDeckToolHandlers(ctx);
+    const own = (await h.propose_lane({ label: 'y', anchor: { kind: 'arc' }, changes: [{ kind: 'remove', slide: 's4', reason: 'r' }] })) as { laneId: string };
+    expect(await store.lane(own.laneId)).toMatchObject({ origin: 'user', status: 'open' });
+  });
+
+  it('revise_lane works on a draft lane and keeps it a draft; a closed lane is refused', async () => {
+    const h = makeDeckToolHandlers(ctx);
+    const { laneId } = (await createLane(ctx, { label: 'd', anchor: { kind: 'arc' }, changes: [{ kind: 'remove', slide: 's4', reason: 'r' }] }, { origin: 'check:gaps', status: 'draft' })) as { laneId: string };
+    const res = await h.revise_lane({ laneId, replaceChanges: [{ kind: 'remove', slide: 's5', reason: 'r2' }] });
+    expect(res).toMatchObject({ laneId });
+    expect(await store.lane(laneId)).toMatchObject({ status: 'draft', changes: [{ kind: 'remove', slide: 's5' }] });
+    await store.putLane({ ...(await store.lane(laneId))!, status: 'closed' });
+    expect(await h.revise_lane({ laneId, replaceChanges: [{ kind: 'remove', slide: 's5', reason: 'r2' }] })).toMatchObject({ error: expect.stringContaining('closed') });
   });
 
   it('add_remark appends an open user remark; link_remark_lane sets its lane', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { contextHeader } from '../../src/agent/prompts.js';
+import { contextHeader, SYSTEM_APPEND } from '../../src/agent/prompts.js';
 import type { Brief, Lane, Remark, Slide, Snapshot } from '../../src/model/types.js';
 
 const brief: Brief = { title: 'Deck', audience: 'devs', message: 'one log', pattern: 'solution-first', abstract: 'abs' };
@@ -82,5 +82,15 @@ describe('reply rules', () => {
     const { SYSTEM_APPEND } = await import('../../src/agent/prompts.js');
     expect(SYSTEM_APPEND).toMatch(/language the creator writes in/);
     expect(SYSTEM_APPEND).toMatch(/Never mention pixel sizes/);
+  });
+});
+
+describe('SYSTEM_APPEND', () => {
+  it('forbids truncating content to fit, offers a split or a remark instead, and never claims a render check passed', () => {
+    expect(SYSTEM_APPEND).toMatch(/Never truncate code or text to make it fit/);
+    expect(SYSTEM_APPEND).toMatch(/split it into two slides/);
+    expect(SYSTEM_APPEND).toMatch(/add_remark/);
+    expect(SYSTEM_APPEND).toMatch(/render_slide only validates structure/);
+    expect(SYSTEM_APPEND).toMatch(/Never claim .*render check passed/);
   });
 });

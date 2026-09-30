@@ -128,6 +128,59 @@ describe('remarks and checks API', () => {
     expect((await app.inject({ method: 'POST', url: '/api/remarks/r_missing/propose' })).statusCode).toBe(404);
   });
 
+  it('propose on a remark whose lane is a check draft opens that lane instead of asking the co-author', async () => {
+    await build();
+    await store.putLane({
+      id: 'l_d',
+      label: 'Tighter hook',
+      anchor: { kind: 'slide', slide: 's2' },
+      origin: 'check:arc',
+      baseVersion: 1,
+      changes: [{ id: 'c_1', kind: 'modify', slide: 's2', patch: { title: 'Sharper' }, reason: 'hook', status: 'pending' }],
+      status: 'draft',
+      createdAt: '2026-09-30T00:00:00.000Z',
+    });
+    const remark: Remark = {
+      id: 'r_1',
+      anchor: { kind: 'slide', slide: 's2' },
+      text: 'weak hook',
+      origin: 'check:arc',
+      severity: 'warn',
+      status: 'open',
+      laneId: 'l_d',
+      createdAt: '2026-09-30T00:00:00.000Z',
+    };
+    await store.putRemarks([remark]);
+    const res = await app.inject({ method: 'POST', url: '/api/remarks/r_1/propose' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ laneId: 'l_d', opened: true });
+    expect((await store.lane('l_d'))!.status).toBe('open');
+    expect(events).toContainEqual({ type: 'lane.updated', laneId: 'l_d' });
+    expect(calls).toHaveLength(0);
+    expect((await app.inject({ method: 'GET', url: '/api/lanes' })).json().map((l: { id: string }) => l.id)).toEqual(['l_d']);
+  });
+
+  it('propose on a remark whose lane is already open or closed asks the co-author as usual', async () => {
+    await build();
+    await store.putLane({
+      id: 'l_c',
+      label: 'Done',
+      anchor: { kind: 'slide', slide: 's2' },
+      origin: 'check:arc',
+      baseVersion: 1,
+      changes: [],
+      status: 'closed',
+      createdAt: '2026-09-30T00:00:00.000Z',
+    });
+    await store.putRemarks([
+      { id: 'r_1', anchor: { kind: 'slide', slide: 's2' }, text: 'weak hook', origin: 'check:arc', severity: 'warn', status: 'open', laneId: 'l_c', createdAt: '2026-09-30T00:00:00.000Z' },
+    ]);
+    const res = await app.inject({ method: 'POST', url: '/api/remarks/r_1/propose' });
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ accepted: true, thread: 'remark:r_1' });
+    await waitFor(() => calls.length === 1);
+  });
+
   it('checks: 503 on run and status when no runner is wired', async () => {
     await build();
     const res = await app.inject({ method: 'POST', url: '/api/checks/run', payload: {} });
