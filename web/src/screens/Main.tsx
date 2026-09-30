@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
-import type { Anchor, Lane, SlideId, Version } from '../../../src/model/types.js';
+import type { Anchor, Lane, Remark, SlideId, Version } from '../../../src/model/types.js';
 import {
+  BRIEF_PATH,
   getDeck,
   getLanePreview,
   getLanes,
+  getRemarks,
   getVersions,
   isLaneEvent,
   laneApi,
+  navigate,
+  remarkApi,
+  selectionFromSearch,
   subscribe,
   threadApi,
   thumbFor,
@@ -17,6 +22,7 @@ import {
 } from '../api.js';
 import { Filmstrip } from '../components/Filmstrip.js';
 import { LaneRow, anchorColumns } from '../components/LaneRow.js';
+import { RemarkPostIt } from '../components/Remark.js';
 import { Thread } from '../components/Thread.js';
 import { VersionLine } from '../components/VersionLine.js';
 
@@ -37,7 +43,11 @@ export function Main() {
   const generation = useRef(0);
   const mainOrder = useRef<SlideId[]>([]);
   // Nothing selected means the whole deck: the context sent with a message is never null here.
-  const [context, setContext] = useState<Anchor>({ kind: 'arc' });
+  // `?select=` comes from "show" on the brief & checks screen; reload() drops it if the slide is gone.
+  const [context, setContext] = useState<Anchor>(() => selectionFromSearch(location.search) ?? { kind: 'arc' });
+  const scrollTo = useRef<SlideId | null>(context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.from : null);
+  const [remarks, setRemarks] = useState<Remark[]>([]);
+  const [remarkError, setRemarkError] = useState<string | null>(null);
   const shift = useRef(false);
   const [lanes, setLanes] = useState<Lane[]>([]);
   const [previews, setPreviews] = useState<Record<string, LanePreviewPayload>>({});
@@ -78,6 +88,15 @@ export function Main() {
       setLaneError(err instanceof Error ? err.message : String(err));
     }
   }, [refreshPreview]);
+
+  const reloadRemarks = useCallback(async () => {
+    try {
+      setRemarks((await getRemarks()).filter((r) => r.status === 'open'));
+      setRemarkError(null);
+    } catch (err) {
+      setRemarkError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
 
   const refreshThumb = useCallback(async (id: SlideId, gen: number) => {
     const t = await thumbFor(id);
@@ -121,12 +140,18 @@ export function Main() {
   useEffect(() => {
     void reload();
     void reloadLanes();
+    void reloadRemarks();
+    // The selection is now in state; a later reload should not re-apply a stale query.
+    if (location.search) history.replaceState(null, '', location.pathname);
     const onEvent = (e: BusEvent): void => {
       for (const h of listeners.current) h(e);
       if (e.type === 'deck.changed') {
         // Accepting a change rebases every open lane: all previews are stale.
         void reload();
         void reloadLanes();
+        void reloadRemarks();
+      } else if (e.type === 'remarks.changed') {
+        void reloadRemarks();
       } else if (isLaneEvent(e)) {
         void reloadLanes();
       } else if (e.type === 'thumb.ready') {
@@ -158,7 +183,14 @@ export function Main() {
       }
     };
     return subscribe(onEvent);
-  }, [reload, reloadLanes, refreshThumb]);
+  }, [reload, reloadLanes, reloadRemarks, refreshThumb]);
+
+  useEffect(() => {
+    if (load.status !== 'ready' || !scrollTo.current) return;
+    const el = document.querySelector(`[data-testid="thumb"][data-slide="${CSS.escape(scrollTo.current)}"]`);
+    scrollTo.current = null;
+    el?.scrollIntoView?.({ block: 'nearest', inline: 'center' });
+  }, [load.status]);
 
   const select = useCallback((id: SlideId) => {
     const extend = shift.current;
@@ -193,6 +225,12 @@ export function Main() {
 
   const { deck, versions } = load;
   const shownThumbs = failed.size === 0 ? thumbs : Object.fromEntries(deck.order.map((id) => [id, failed.has(id) ? FAILED_THUMB : thumbs[id]]));
+  // One post-it per open remark anchored on main, under the first column of its anchor; the grid stacks them.
+  const postIts = remarks.flatMap((remark) => {
+    if (remark.anchor.kind === 'arc') return [];
+    const cols = anchorColumns(remark.anchor, deck.order);
+    return cols ? [{ remark, col: cols.start }] : [];
+  }).sort((a, b) => a.col - b.col);
   const selectedCols = context.kind === 'range' ? anchorColumns(context, deck.order) : null;
   const onSelect = (id: SlideId): void => {
     select(id);
@@ -203,7 +241,17 @@ export function Main() {
       <header style={{ display: 'flex', alignItems: 'baseline', gap: 16, padding: '16px 24px', borderBottom: '1px solid var(--line)' }}>
         <h1 style={{ margin: 0, fontSize: 18 }}>{deck.brief.title || deck.state.name}</h1>
         <span className="muted mono">v{deck.state.version} · {deck.order.length} slides</span>
-        <a href="/api/present" style={{ marginLeft: 'auto', color: 'var(--accent)', fontWeight: 700, textDecoration: 'none' }}>Present ▸</a>
+        <a
+          href={BRIEF_PATH}
+          onClick={(e) => {
+            e.preventDefault();
+            navigate(BRIEF_PATH);
+          }}
+          style={{ marginLeft: 'auto', color: 'var(--ink)', fontWeight: 600, textDecoration: 'none' }}
+        >
+          brief &amp; checks{remarks.some((r) => r.severity === 'warn') ? <span className="accent"> · {remarks.filter((r) => r.severity === 'warn').length}</span> : null}
+        </a>
+        <a href="/api/present" style={{ color: 'var(--accent)', fontWeight: 700, textDecoration: 'none' }}>Present ▸</a>
       </header>
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <main onClick={clearOnEmpty} style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: '20px 24px' }}>
@@ -232,6 +280,22 @@ export function Main() {
                     </div>
                   </div>
                 ) : null}
+                {postIts.length > 0 ? (
+                  <div style={{ display: 'flex', marginTop: 8 }}>
+                    <div style={{ width: 120, flex: '0 0 120px', fontSize: 12 }} className="muted">remarks</div>
+                    <div
+                      data-testid="post-its"
+                      style={{ display: 'grid', gridTemplateColumns: `repeat(${deck.order.length}, var(--thumb-w))`, columnGap: 'var(--col-gap)', rowGap: 8, gridAutoFlow: 'row dense', alignItems: 'start', padding: '0 6px' }}
+                    >
+                      {postIts.map(({ remark, col }) => (
+                        <div key={remark.id} style={{ gridColumn: `${col + 1}` }}>
+                          <RemarkPostIt remark={remark} onPropose={remarkApi.proposeRemark} onResolve={remarkApi.resolveRemark} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {remarkError ? <p style={{ margin: '6px 0 0 126px', color: 'var(--warn)', fontSize: 12 }}>Remarks: {remarkError}</p> : null}
               </div>
               {laneError ? <p style={{ margin: 0, color: 'var(--warn)', fontSize: 12 }}>Lanes: {laneError}</p> : null}
               {lanes.length === 0 ? (

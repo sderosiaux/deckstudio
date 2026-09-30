@@ -38,3 +38,20 @@
 - minor · Lane after accepting its only change: The lane disappears the moment its last change is accepted, so the refuse and discard buttons could not be tested. There was also no undo right after accepting.
 - minor · Lane header: A small empty tab or box is drawn above the lane title, with no evident purpose.
 - minor · Tooling note (not a product defect): agent-browser could not hold Shift across separate commands, so the shift-click had to be sent from a script with shiftKey=true. A real user would not hit this.
+
+## M2 review (base 1efa3f2, head 8b6d008): 7 lenses, 13 confirmed, 2 rejected
+- CONFIRMED · In interrupt(), bump a generation counter or set a cancelled flag that is captured when a turn is queued. run() checks it before starting a query and skips stale turns (optionally with an 'interrupted' agent.error), then
+- CONFIRMED · In laneCells, also keep any slide that has a live change of any kind (e.g. `range.has(id) || byTarget.has(id)`). Alternatively, reject changes outside the anchor in propose_lane, or list out-of-cell pending changes with 
+- CONFIRMED · Give each lane cell an explicit deck column instead of using its flex index: put an unchanged, modified or removed slide in its main column and stack inserts inside the column they are inserted after (or widen the region
+- CONFIRMED · In lanes.ts, emit `{type:'thumb.failed', hash, slideId:id, message}` instead of agent.error. In Main.tsx, have thumb.failed also mark the matching lane preview thumb as failed (by hash) so LaneRow renders FAILED_THUMB wi
+- CONFIRMED · Add a generation counter (or a closed flag) that interrupt() increments; each queued run() checks it and skips if it was queued before the interrupt. interrupt() should then abort the running turn and `await this.tail` (
+- CONFIRMED · In run(), when the result has subtype error_during_execution and errors include "No conversation found", call store.setSessionId(null) instead of persisting m.session_id, and retry once without `resume`.
+- CONFIRMED · At session.test.ts:120, cut the prompt to the text after the 'Selected: range s2..s4' line and check that s2, s3 and s4 each appear with their `story:` line while s1 and s5 do not.
+- CONFIRMED · In reload(), keep the previous deck.slides in a ref and only call refreshThumb for ids that are new or whose slide changed (deep-compare or hash the slide). Keep the existing thumb URLs for the rest instead of clearing t
+- CONFIRMED · In run(), when a resumed turn fails with "No conversation found with session ID" (error_during_execution), call store.setSessionId(null) and run the query once more without `resume`. Only save m.session_id from a success
+- CONFIRMED · In Main.tsx onEvent: on lane.created/updated call refreshPreview(e.laneId) (plus getLanes for metadata), on lane.closed drop that lane from lanes/previews, and do the full reloadLanes() only on deck.changed (or debounce/
+- CONFIRMED · Add an `onOpen`/reconnect callback to `subscribe()` that fires on every open after the first. Use it so Thread calls `load()` and clears `streaming`/`tool`, and Main calls `reload()`/`reloadLanes()`. On the server, make 
+- CONFIRMED · Give each cell an explicit grid column under the main slide it relates to: its own main index for none/modified/removed, or the index of its `after` slide for insert/move, drawn as a narrow marker between columns. Drop o
+- CONFIRMED · Add an app-wide Fastify onRequest hook in app.ts that returns 403 when Host is not `127.0.0.1:PORT` or `localhost:PORT`, or when a present Origin is not the app origin. Apply the same check to the /ws upgrade, since it a
+- REJECTED · I couldn't reproduce this against the real SDK (@anthropic-ai/claude-agent-sdk 0.3.285, from the deckstudio node_modules), repo at 8b6d008 with a clean tree. Th
+- REJECTED · I ran a real (live model) reproduction against the repo's pinned SDK, @anthropic-ai/claude-agent-sdk 0.3.285 at /Users/sderosiaux/code/personal/deckstudio/node_

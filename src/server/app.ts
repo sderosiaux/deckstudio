@@ -12,9 +12,11 @@ import { DeckStore } from '../store/deckStore.js';
 import { Bus } from './bus.js';
 import { LaneService } from './laneService.js';
 import { briefRoutes } from './routes/brief.js';
+import { checkRoutes } from './routes/checks.js';
 import { deckRoutes } from './routes/deck.js';
 import { laneRoutes } from './routes/lanes.js';
 import { presentRoutes } from './routes/present.js';
+import { remarkRoutes } from './routes/remarks.js';
 import { slideRoutes } from './routes/slides.js';
 import { threadRoutes } from './routes/threads.js';
 import { thumbRoutes } from './routes/thumbs.js';
@@ -69,11 +71,15 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   laneRoutes(app, store, new LaneService(store, bus), opts.thumbs, bus);
   const model = (await store.state()).model;
   const checks = new CheckRunner({ store, thumbs: opts.thumbs, bus, model });
+  app.decorate('checks', checks);
   bus.on('deck.changed', () => checks.scheduleAfterAccept());
   bus.on('lane.created', (e) => {
     if (e.type === 'lane.created') checks.scheduleAfterLane(e.laneId);
   });
   app.addHook('onClose', async () => checks.dispose());
-  threadRoutes(app, store, opts.agent ?? defaultAgent(store, opts.thumbs, bus, model, checks));
+  const agent = opts.agent ?? defaultAgent(store, opts.thumbs, bus, model, checks);
+  threadRoutes(app, store, agent);
+  remarkRoutes(app, store, agent, bus);
+  checkRoutes(app, bus);
   return app;
 }
