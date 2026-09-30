@@ -203,8 +203,10 @@ export class DeckStore {
     return v;
   }
 
+  /** Committed versions only: a v{n}.json above deck.json's version is a crash leftover, not history. */
   async versions(): Promise<Version[]> {
-    const files = (await readdir(this.path('versions'))).filter((f) => /^v\d+\.json$/.test(f));
+    const { version } = await this.state();
+    const files = (await readdir(this.path('versions'))).filter((f) => /^v\d+\.json$/.test(f) && Number(f.slice(1, -5)) <= version);
     const vs = await Promise.all(files.map((f) => readJson(this.path('versions', f), VersionSchema)));
     return vs.sort((a, b) => a.n - b.n);
   }

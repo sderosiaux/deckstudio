@@ -41,6 +41,43 @@ export function resolveLaneRemarks(remarks: readonly Remark[], closedLaneIds: re
   return changed ? next : null;
 }
 
+/** Open lanes rewritten after main moved; `remarksChanged` when some remark of a now-closed lane was resolved. */
+export interface LaneRebase {
+  lanes: Lane[];
+  remarksChanged: boolean;
+}
+
+/**
+ * Call under the deck lock right after a commit moved main to `main`. Rebases every open lane on it (orphaning changes
+ * that no longer apply), closes lanes left without a pending change and resolves their remarks. `touched` is a lane
+ * the caller already modified (the one whose change was just accepted): it is always written and listed first.
+ */
+export async function rebaseOpenLanesAfterMain(store: DeckStore, main: Snapshot, touched?: Lane): Promise<LaneRebase> {
+  const others = (await store.lanes()).filter((l) => l.status === 'open' && l.id !== touched?.id);
+  const lanes: Lane[] = [];
+  for (const l of touched ? [touched, ...others] : others) {
+    const rebased = rebaseLane(l, main);
+    const next: Lane = hasPending(rebased) ? rebased : { ...rebased, status: 'closed' };
+    if (l !== touched && JSON.stringify(next) === JSON.stringify(l)) continue;
+    await store.putLane(next);
+    lanes.push(next);
+  }
+  const resolved = resolveLaneRemarks(await store.remarks(), lanes.filter((l) => l.status === 'closed').map((l) => l.id));
+  if (resolved) await store.putRemarks(resolved);
+  return { lanes, remarksChanged: resolved !== null };
+}
+
+/** Emits what a rebase changed. Call after releasing the deck lock, once deck.changed went out. */
+export function emitLaneRebase(bus: Bus, r: LaneRebase): void {
+  for (const l of r.lanes) emitLane(bus, l);
+  if (r.remarksChanged) bus.emit({ type: 'remarks.changed' });
+}
+
+function emitLane(bus: Bus, lane: Lane): void {
+  bus.emit({ type: 'lane.updated', laneId: lane.id });
+  if (lane.status === 'closed') bus.emit({ type: 'lane.closed', laneId: lane.id });
+}
+
 /**
  * Every lane mutation runs under the deck lock, so accepts are strictly sequential
  * and each one applies on top of the previous commit (Review Focus 5).
@@ -59,24 +96,13 @@ export class LaneService {
       if (!res.ok) throw new LaneError(409, `change ${changeId} no longer applies on main: ${res.error}`);
       const version = await this.store.commit(res.next, { kind: 'accept', laneId, changeId });
 
-      const accepted = this.withStatus(lane, changeId, 'accepted');
-      const others = (await this.store.lanes()).filter((l) => l.status === 'open' && l.id !== laneId);
-      const touched: { lane: Lane; changed: boolean }[] = [];
-      for (const l of [accepted, ...others]) {
-        const rebased = rebaseLane(l, res.next);
-        const next: Lane = hasPending(rebased) ? rebased : { ...rebased, status: 'closed' };
-        const changed = l === accepted || JSON.stringify(next) !== JSON.stringify(l);
-        if (changed) await this.store.putLane(next);
-        touched.push({ lane: next, changed });
-      }
-      const remarksChanged = await this.resolveRemarksOf(touched.filter((t) => t.changed && t.lane.status === 'closed').map((t) => t.lane.id));
-      return { version, touched, remarksChanged };
+      const rebase = await rebaseOpenLanesAfterMain(this.store, res.next, this.withStatus(lane, changeId, 'accepted'));
+      return { version, rebase };
     });
 
     this.bus.emit({ type: 'deck.changed', version: out.version.n });
-    for (const { lane, changed } of out.touched) if (changed) this.emitLane(lane);
-    if (out.remarksChanged) this.bus.emit({ type: 'remarks.changed' });
-    return { version: out.version, lane: out.touched[0]!.lane };
+    emitLaneRebase(this.bus, out.rebase);
+    return { version: out.version, lane: out.rebase.lanes[0]! };
   }
 
   async refuse(laneId: string, changeId: string): Promise<Lane> {
@@ -89,7 +115,7 @@ export class LaneService {
       const remarksChanged = next.status === 'closed' && (await this.resolveRemarksOf([next.id]));
       return { next, remarksChanged };
     });
-    this.emitLane(out.next);
+    emitLane(this.bus, out.next);
     if (out.remarksChanged) this.bus.emit({ type: 'remarks.changed' });
     return out.next;
   }
@@ -152,10 +178,5 @@ export class LaneService {
 
   private withStatus(lane: Lane, changeId: string, status: 'accepted' | 'refused'): Lane {
     return { ...lane, changes: lane.changes.map((c) => (c.id === changeId ? { ...c, status } : c)) };
-  }
-
-  private emitLane(lane: Lane): void {
-    this.bus.emit({ type: 'lane.updated', laneId: lane.id });
-    if (lane.status === 'closed') this.bus.emit({ type: 'lane.closed', laneId: lane.id });
   }
 }

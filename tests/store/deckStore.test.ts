@@ -171,6 +171,14 @@ describe('DeckStore', () => {
     expect(await store.snapshotAt(2)).toEqual(await store.snapshot());
   });
 
+  it('versions() lists only committed versions, never an orphan file above deck.json', async () => {
+    const store = await DeckStore.init(dir, 'demo', brief);
+    await store.commit(snap(slide('a')), { kind: 'import' });
+    const orphan: Version = { n: 99, order: ['zz'], slides: { zz: hashSlide(slide('zz')) }, cause: { kind: 'import' }, createdAt: '2026-09-30T00:00:00Z' };
+    await writeFile(join(dir, 'versions', 'v99.json'), JSON.stringify(orphan));
+    expect((await store.versions()).map((v) => v.n)).toEqual([0, 1]);
+  });
+
   it('setSessionId racing a commit loses neither update', async () => {
     const store = await DeckStore.init(dir, 'demo', brief);
     await Promise.all([store.commit(snap(slide('a')), { kind: 'import' }), store.setSessionId('s')]);
