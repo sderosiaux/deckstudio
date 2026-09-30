@@ -1,5 +1,5 @@
 import type { Slide, SlideId } from '../../../src/model/types.js';
-import { Thumb } from './Thumb.js';
+import { Thumb, type ThumbTitleLink } from './Thumb.js';
 
 export interface FilmstripProps {
   order: SlideId[];
@@ -13,10 +13,12 @@ export interface FilmstripProps {
   label?: string;
   /** Full row name, as the gutter label's tooltip when `label` is a shortened one. */
   fullLabel?: string;
+  /** Makes the selected slide's title line a link (main: to its edit screen). */
+  titleLink?(id: SlideId): ThumbTitleLink | undefined;
 }
 
 /** A row of slide thumbnails in deck order, its name in the gutter. The canvas around it scrolls, not the row. */
-export function Filmstrip({ order, slides, thumbs, selected, onSelect, onOpen, label = 'main', fullLabel }: FilmstripProps) {
+export function Filmstrip({ order, slides, thumbs, selected, onSelect, onOpen, label = 'main', fullLabel, titleLink }: FilmstripProps) {
   return (
     <div style={{ display: 'flex', alignItems: 'stretch' }}>
       <div className="gutter row-label" title={fullLabel} style={{ paddingTop: 8 }}>
@@ -28,7 +30,16 @@ export function Filmstrip({ order, slides, thumbs, selected, onSelect, onOpen, l
           const slide = slides[id];
           return (
             <div role="listitem" key={id} data-edge-item style={{ flex: '0 0 auto' }}>
-              <Thumb slideId={id} n={i + 1} title={slide?.title ?? id} url={thumbs[id]} selected={id === selected} onClick={() => onSelect(id)} onDoubleClick={onOpen ? () => onOpen(id) : undefined} />
+              <Thumb
+                slideId={id}
+                n={i + 1}
+                title={slide?.title ?? id}
+                url={thumbs[id]}
+                selected={id === selected}
+                onClick={() => onSelect(id)}
+                onDoubleClick={onOpen ? () => onOpen(id) : undefined}
+                titleLink={id === selected ? titleLink?.(id) : undefined}
+              />
             </div>
           );
         })}

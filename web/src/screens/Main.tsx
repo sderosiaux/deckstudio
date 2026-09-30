@@ -18,6 +18,7 @@ import {
   playerHref,
   remarkApi,
   selectionFromSearch,
+  slidePath,
   subscribe,
   threadApi,
   thumbFor,
@@ -34,6 +35,7 @@ import { RemarkRow, placeCards, type Pinned } from '../components/RemarkRow.js';
 import { ScreenHeader } from '../components/ScreenHeader.js';
 import { Thread } from '../components/Thread.js';
 import { VersionLine } from '../components/VersionLine.js';
+import { modified, typingIn } from '../keys.js';
 
 /** Bus events arriving within this window are applied together (an accept emits deck.changed plus one lane.updated per rebased lane). */
 export const COALESCE_MS = 100;
@@ -425,6 +427,21 @@ export function Main() {
     });
   }, []);
 
+  // One slide selected: Enter or e opens its edit screen, unless the key is meant for a text field or a control.
+  useEffect(() => {
+    if (context.kind !== 'slide') return;
+    const id = context.slide;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.defaultPrevented || modified(e) || typingIn(e.target)) return;
+      if (e.key !== 'Enter' && e.key !== 'e') return;
+      if (e.key === 'Enter' && e.target instanceof Element && e.target.closest('button, a') && !e.target.closest('[data-testid="thumb"]')) return;
+      e.preventDefault();
+      navigate(slidePath(id));
+    };
+    addEventListener('keydown', onKey);
+    return () => removeEventListener('keydown', onKey);
+  }, [context]);
+
   // Clicking empty space (not a thumb, not a button) clears the selection back to the whole deck.
   const clearOnEmpty = (e: MouseEvent<HTMLElement>): void => {
     if (e.target instanceof Element && e.target.closest('button, a, input, [data-testid="thumb"], [data-testid="post-it"]')) return;
@@ -491,6 +508,8 @@ export function Main() {
   // Double-click on a main slide: present from it.
   const presentFrom = (id: SlideId): void => openPlayer(playerHref(deck.order.indexOf(id)));
   const rangeCols = context.kind === 'range' ? selectedCols : null;
+  const editSlide = (id: SlideId): void => navigate(slidePath(id));
+  const editLink = (id: SlideId) => ({ href: slidePath(id), onFollow: () => editSlide(id) });
   const onSelect = (id: SlideId): void => {
     select(id);
     if (failed.has(id)) refreshThumb(id, generation.current).catch((err: unknown) => console.warn('deckstudio: thumb retry failed', err));
@@ -546,6 +565,7 @@ export function Main() {
                     selected={context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : undefined}
                     onSelect={onSelect}
                     onOpen={presentFrom}
+                    titleLink={context.kind === 'slide' ? editLink : undefined}
                   />
                   {rangeCols
                     ? gridRow(<div data-testid="range-selection" style={{ gridColumn: `${rangeCols.start + 1} / span ${rangeCols.span}`, height: 2, borderRadius: 1, background: 'var(--accent)' }} />)
@@ -646,6 +666,7 @@ export function Main() {
             api={threadApi}
             subscribe={fanout}
             onClearContext={() => setContext({ kind: 'arc' })}
+            onEditContext={editSlide}
           />
         </div>
       </aside>

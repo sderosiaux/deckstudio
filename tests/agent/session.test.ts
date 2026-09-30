@@ -202,6 +202,35 @@ describe('AgentSession', () => {
     expect(prompt.endsWith('\n\nPropose a lane for this remark')).toBe(true);
   });
 
+  it('slide thread: a message without context is anchored on that slide, stored so, and scoped on it in the prompt', async () => {
+    const fake = fakeQuery(async function* () {
+      yield assistant('ok');
+      yield success('sess-s');
+    });
+    await session(fake.impl).send('slide:s3', 'make the claim sharper', null);
+    const prompt = fake.calls[0]!.prompt;
+    expect(prompt).toContain('Thread: slide:s3');
+    expect(prompt).toContain('Selected: slide s3');
+    expect(prompt).toContain('the creator is editing slide 3 "Title s3" (s3)');
+    expect(prompt).toContain('<p>body s3</p>');
+    expect(prompt.endsWith('\n\nmake the claim sharper')).toBe(true);
+    const stored = await store.thread('slide:s3');
+    expect(stored.map((m) => [m.role, m.context])).toEqual([
+      ['user', { kind: 'slide', slide: 's3' }],
+      ['assistant', null],
+    ]);
+  });
+
+  it('slide thread: an explicit context wins over the slide anchor', async () => {
+    const fake = fakeQuery(async function* () {
+      yield assistant('ok');
+      yield success('sess-s2');
+    });
+    await session(fake.impl).send('slide:s3', 'and its neighbours', { kind: 'range', from: 's2', to: 's4' });
+    expect(fake.calls[0]!.prompt).toContain('Selected: range s2..s4');
+    expect((await store.thread('slide:s3'))[0]!.context).toEqual({ kind: 'range', from: 's2', to: 's4' });
+  });
+
   it('does not stream tool input as text and reports tool calls', async () => {
     const fake = fakeQuery(async function* () {
       yield toolStart('mcp__deck__get_deck');

@@ -241,6 +241,13 @@ export interface FocusApi extends ThreadApi {
   refuseChange(laneId: string, changeId: string): Promise<Lane>;
 }
 
+/** Everything the slide edit screen reads and writes, injectable for tests. */
+export interface SlideApi extends ThreadApi, LaneApi {
+  getDeck(): Promise<DeckPayload>;
+  getLanes(status?: LaneFilter): Promise<Lane[]>;
+  thumbFor(slideId: SlideId): Promise<ThumbStatus>;
+}
+
 /** Remark actions available from a post-it on main. */
 export interface RemarkApi {
   proposeRemark(id: string): Promise<void>;
@@ -275,6 +282,7 @@ export interface HistoryApi {
 export const laneApi: LaneApi = { acceptChange, refuseChange, discardLane };
 export const threadApi: ThreadApi = { getThread, postMessage };
 export const focusApi: FocusApi = { getDeck, getLane, getLanePreview, thumbFor, acceptChange, refuseChange, getThread, postMessage };
+export const slideApi: SlideApi = { getDeck, getLanes, thumbFor, acceptChange, refuseChange, discardLane, getThread, postMessage };
 export const remarkApi: RemarkApi = { proposeRemark, resolveRemark };
 export const briefChecksApi: BriefChecksApi = { getDeck, getBrief, putBrief, getRemarks, proposeRemark, runChecks, getChecksStatus, getLanes, openLane, thumbFor };
 export const historyApi: HistoryApi = { getDeck, getVersions, getVersionSnapshot, getHistoryDiff, restoreEntry, openVersionAsLane, thumbFor };
@@ -282,6 +290,11 @@ export const historyApi: HistoryApi = { getDeck, getVersions, getVersionSnapshot
 /** Client-side routes. The server answers index.html for any non-API path, so these also work on reload. */
 export function focusPath(laneId: string, changeId: string): string {
   return `/lane/${seg(laneId)}/change/${seg(changeId)}`;
+}
+
+/** One slide of main on its edit screen, with the co-author thread `slide:<id>`. */
+export function slidePath(slideId: SlideId): string {
+  return `/slide/${seg(slideId)}`;
 }
 
 /** Main with a slide (or range) selected: `?select=<slideId>` and, for a range, `&to=<slideId>`. Arc selects nothing. */

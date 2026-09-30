@@ -78,7 +78,11 @@ export function contextHeader(input: {
   out.push('', 'Deck outline (index. id: title):');
   for (const id of snapshot.order) out.push(`${index.get(id)}. ${id}: ${snapshot.slides[id]?.title ?? ''}`);
 
-  const anchor = input.anchor ?? lane?.anchor ?? remark?.anchor ?? null;
+  // A slide thread is anchored on its slide unless the message says otherwise.
+  const slideId = thread.startsWith('slide:') ? thread.slice('slide:'.length) : null;
+  const edited = slideId !== null ? snapshot.slides[slideId] : undefined;
+  const slideAnchor: Anchor | null = edited && index.has(edited.id) ? { kind: 'slide', slide: edited.id } : null;
+  const anchor = input.anchor ?? lane?.anchor ?? remark?.anchor ?? slideAnchor;
   if (anchor) {
     out.push('', `Selected: ${anchorLabel(anchor)}`);
     const ids = slidesInRange(snapshot.order, anchor);
@@ -127,6 +131,26 @@ export function contextHeader(input: {
       );
     } else {
       out.push('', `Remark ${thread.slice('remark:'.length)} no longer exists. Instruction: proposals go through propose_lane.`);
+    }
+  } else if (slideId !== null) {
+    if (edited && slideAnchor) {
+      out.push(
+        '',
+        `Scope: the creator is editing slide ${index.get(edited.id)} "${edited.title}" (${edited.id}) on its own screen and talks about it.`,
+        `story: ${edited.story || '(none)'}`,
+        `notes: ${edited.notes || '(none)'}`,
+        'body (HTML):',
+        edited.body,
+        '',
+        'Instruction: Decide the scope yourself. ' +
+          `If the request stays inside this slide, call propose_lane once with anchor ${JSON.stringify(slideAnchor)}, a label naming the change in a few words, ` +
+          `and a single modify change on ${edited.id} (a patch of body, title, story or notes), and nothing else. ` +
+          'If it needs the neighbours, several slides or the narrative, call propose_lane once on the smallest range that holds the change, or on the arc, ' +
+          'and say in one sentence why the change goes beyond this slide. ' +
+          'Never edit main directly. In the reply, never describe pixels, sizes or positions: say what the slide now says.',
+      );
+    } else {
+      out.push('', `Slide ${slideId} is no longer in the deck. Instruction: proposals go through propose_lane; never edit main directly.`);
     }
   } else {
     out.push('', 'Instruction: proposals always go through propose_lane; never edit main directly. Keep replies under six sentences.');

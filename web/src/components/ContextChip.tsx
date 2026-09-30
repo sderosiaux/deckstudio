@@ -1,10 +1,13 @@
 import type { Anchor, Slide, SlideId } from '../../../src/model/types.js';
+import { slidePath } from '../api.js';
 
 export interface ContextChipProps {
   context: Anchor;
   order: SlideId[];
   slides: Record<SlideId, Slide>;
   onClear?(): void;
+  /** For a slide context: an "edit" link to that slide's edit screen. */
+  onEdit?(slide: SlideId): void;
 }
 
 /** Human label of an anchor against the current main order (1-based slide numbers). */
@@ -24,7 +27,7 @@ export function describeAnchor(context: Anchor, order: SlideId[], slides: Record
 }
 
 /** What the next message is about: the current selection on main. */
-export function ContextChip({ context, order, slides, onClear }: ContextChipProps) {
+export function ContextChip({ context, order, slides, onClear, onEdit }: ContextChipProps) {
   const label = describeAnchor(context, order, slides);
   const title = context.kind === 'slide' ? slides[context.slide]?.title : undefined;
   return (
@@ -38,6 +41,20 @@ export function ContextChip({ context, order, slides, onClear }: ContextChipProp
         <span className="muted" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }} title={title}>
           {title}
         </span>
+      ) : null}
+      {onEdit && context.kind === 'slide' ? (
+        <a
+          href={slidePath(context.slide)}
+          className="link"
+          style={{ fontSize: 12, color: 'var(--ink)' }}
+          onClick={(e) => {
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            e.preventDefault();
+            onEdit(context.slide);
+          }}
+        >
+          edit
+        </a>
       ) : null}
       {onClear && context.kind !== 'arc' ? (
         <button type="button" aria-label="clear context" onClick={onClear} style={{ all: 'unset', cursor: 'pointer', color: 'var(--grey)', padding: '0 2px' }}>

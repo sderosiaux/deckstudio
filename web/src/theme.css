@@ -71,3 +71,7 @@ button { font: inherit; }
 /* The selected thumb keeps its title, unless another thumb of the strip is hovered. */
 .thumb[aria-pressed='true'] .thumb-title { visibility: visible; }
 [role='list']:hover .thumb[aria-pressed='true']:not(:hover) .thumb-title { visibility: hidden; }
+/* On main the selected slide's title is the way into its edit screen: a live link, hidden like a title while another thumb is hovered. */
+.thumb-title-link { visibility: visible; pointer-events: auto; cursor: pointer; text-decoration: none; transition: color .15s ease; }
+.thumb-title-link:hover { color: var(--accent); }
+[role='list']:hover .thumb-wrap:not(:hover) .thumb-title-link { visibility: hidden; }

@@ -77,6 +77,46 @@ describe('contextHeader', () => {
   });
 });
 
+describe('contextHeader: slide thread', () => {
+  const edited: Snapshot = {
+    ...snapshot,
+    slides: { ...snapshot.slides, s3: { ...snapshot.slides['s3']!, notes: 'pause after the claim', body: '<div class="flow"><span>log</span></div>' } },
+  };
+
+  it('scopes the request on the slide: number, title, story, notes, full body, and the decide-the-scope instruction', () => {
+    const h = contextHeader({ thread: 'slide:s3', anchor: null, snapshot: edited, brief });
+    expect(h).toContain('Selected: slide s3');
+    const scope = h.slice(h.indexOf('Scope:'));
+    expect(scope).toContain('the creator is editing slide 3 "Title s3" (s3)');
+    expect(scope).toContain('story: story of s3');
+    expect(scope).toContain('notes: pause after the claim');
+    expect(scope).toContain('<div class="flow"><span>log</span></div>');
+    expect(scope).toContain('Decide the scope yourself');
+    expect(scope).toContain('call propose_lane once with anchor {"kind":"slide","slide":"s3"}');
+    expect(scope).toContain('a single modify change on s3');
+    expect(scope).toContain('nothing else');
+    expect(scope).toContain('smallest range');
+    expect(scope).toContain('the arc');
+    expect(scope).toContain('one sentence why the change goes beyond this slide');
+    expect(scope).toContain('Never edit main directly');
+    expect(scope).toMatch(/never describe pixels/i);
+    expect(h).not.toContain('six sentences');
+    expect(h).not.toContain('revise_lane on it');
+  });
+
+  it('keeps the slide scope when the message carries the slide as context', () => {
+    const h = contextHeader({ thread: 'slide:s3', anchor: { kind: 'slide', slide: 's3' }, snapshot: edited, brief });
+    expect(h).toContain('the creator is editing slide 3 "Title s3" (s3)');
+  });
+
+  it('a slide no longer in the deck: says so and still routes proposals through propose_lane', () => {
+    const h = contextHeader({ thread: 'slide:s9', anchor: null, snapshot, brief });
+    expect(h).toContain('Slide s9 is no longer in the deck');
+    expect(h).toContain('propose_lane');
+    expect(h).not.toContain('the creator is editing slide');
+  });
+});
+
 describe('reply rules', () => {
   it('tell the co-author to answer in the creator language and without layout jargon', async () => {
     const { SYSTEM_APPEND } = await import('../../src/agent/prompts.js');

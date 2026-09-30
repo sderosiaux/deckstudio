@@ -78,7 +78,8 @@ export interface Cell {
   dest?: { boundary: number; at: number };
 }
 
-const targetOf = (c: Change): SlideId => (c.kind === 'insert' ? c.slide.id : c.slide);
+/** The slide a change is about: the inserted slide's id, or the main slide it modifies, removes or moves. */
+export const targetOf = (c: Change): SlideId => (c.kind === 'insert' ? c.slide.id : c.slide);
 
 /**
  * The lane's slides laid in one row, each pinned to a main column:
@@ -160,7 +161,8 @@ export function regionColumns(cols: { start: number; span: number }, cells: read
 
 const overlay: CSSProperties = { position: 'absolute', top: 0, left: 0, width: 'var(--thumb-w)', height: 'var(--thumb-h)', pointerEvents: 'none', borderRadius: 4 };
 
-function originTag(origin: Lane['origin']): string | null {
+/** "unsolicited, from check: arc" for a lane a check proposed; null for the creator's own. */
+export function originTag(origin: Lane['origin']): string | null {
   return origin.startsWith('check:') ? `unsolicited, from check: ${origin.slice('check:'.length)}` : null;
 }
 
@@ -186,6 +188,33 @@ export function laneLetter(i: number): string {
 }
 
 /**
+ * Accept, refuse or discard on one lane, one call at a time: `busy` while a call runs, `error` holds the server's
+ * message of the last failed one. Shared by every place that decides a lane's changes.
+ */
+export function useLaneActions(laneId: string, api: LaneApi) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (fn: () => Promise<unknown>): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return {
+    busy,
+    error,
+    accept: (changeId: string): void => void run(() => api.acceptChange(laneId, changeId)),
+    refuse: (changeId: string): void => void run(() => api.refuseChange(laneId, changeId)),
+    discard: (): void => void run(() => api.discardLane(laneId)),
+  };
+}
+
+/**
  * One open lane, laid out under main: its name in the gutter, then the same column grid as the filmstrip, where the
  * lane occupies only the columns it touches, so each proposed slide sits under the slide it replaces.
  */
@@ -204,22 +233,7 @@ export function LaneRow({
   view,
   avoid,
 }: LaneRowProps) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const run = async (fn: () => Promise<unknown>): Promise<void> => {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const accept = (cid: string) => void run(() => api.acceptChange(lane.id, cid));
-  const refuse = (cid: string) => void run(() => api.refuseChange(lane.id, cid));
+  const { busy, error, accept, refuse, discard } = useLaneActions(lane.id, api);
 
   const anchored = anchorColumns(lane.anchor, mainOrder);
   const n = Math.max(mainOrder.length, 1);
@@ -264,7 +278,7 @@ export function LaneRow({
         </span>
         {tag ? <span className="meta">{tag}</span> : null}
         {anchored ? null : <span className="meta">anchor no longer on main</span>}
-        <button type="button" className="link" disabled={busy} onClick={() => void run(() => api.discardLane(lane.id))} style={{ fontSize: 12, alignSelf: 'flex-start' }}>
+        <button type="button" className="link" disabled={busy} onClick={discard} style={{ fontSize: 12, alignSelf: 'flex-start' }}>
           discard lane
         </button>
       </div>

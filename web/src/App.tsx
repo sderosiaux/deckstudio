@@ -5,9 +5,11 @@ import { Focus } from './screens/Focus.js';
 import { History } from './screens/History.js';
 import { Main } from './screens/Main.js';
 import { Present } from './screens/Present.js';
+import { Slide } from './screens/Slide.js';
 
 const currentPath = (): string => location.pathname.replace(/\/+$/, '') || '/';
 const FOCUS = /^\/lane\/([^/]+)\/change\/([^/]+)$/;
+const SLIDE = /^\/slide\/([^/]+)$/;
 
 /** No router library: the path picks the screen, and `navigate` (api.ts) re-renders through popstate. */
 export function App() {
@@ -26,5 +28,8 @@ export function App() {
     const laneId = decodeURIComponent(focus[1]!);
     return <Focus key={laneId} laneId={laneId} changeId={decodeURIComponent(focus[2]!)} />;
   }
+  const slide = SLIDE.exec(path);
+  // No key: stepping to the next slide keeps the screen (and the deck it loaded) and swaps the slide.
+  if (slide) return <Slide slideId={decodeURIComponent(slide[1]!)} />;
   return <Main />;
 }

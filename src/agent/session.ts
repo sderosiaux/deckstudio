@@ -45,7 +45,7 @@ interface TurnOutcome {
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
- * One Claude Agent SDK session per deck. Every thread (global, lane:*, remark:*) talks to the same
+ * One Claude Agent SDK session per deck. Every thread (global, lane:*, remark:*, slide:*) talks to the same
  * session: the thread only changes the context header and where the reply is stored. Sends are
  * serialized so a deck never has two queries in flight and the resumed session id stays linear.
  */
@@ -65,8 +65,10 @@ export class AgentSession {
   }
 
   /** Resolves when this message's turn is over (reply stored, or error emitted). Never rejects on agent errors. */
-  async send(thread: ThreadKey, text: string, context: Anchor | null): Promise<void> {
+  async send(thread: ThreadKey, text: string, given: Anchor | null): Promise<void> {
     const generation = this.generation;
+    // A slide thread speaks about its slide: without an explicit context, the message is anchored on it.
+    const context: Anchor | null = given ?? (thread.startsWith('slide:') ? { kind: 'slide', slide: thread.slice('slide:'.length) } : null);
     const user: ThreadMessage = { id: newId('m'), thread, role: 'user', text, context, at: new Date().toISOString() };
     await this.append(user);
     // The user message stays in the thread even when the turn is dropped by an interrupt: it was said.

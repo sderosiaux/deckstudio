@@ -14,6 +14,10 @@ export interface ThreadProps {
   /** Server events; returns the unsubscribe function. */
   subscribe(handler: (e: BusEvent) => void): () => void;
   onClearContext?(): void;
+  /** Adds an "edit" link to a slide context chip. */
+  onEditContext?(slide: SlideId): void;
+  /** What to ask for, shown while the thread is empty. */
+  hint?: string;
   title?: string;
   /** A line under the title, eg the lane the thread belongs to. */
   subtitle?: string;
@@ -53,7 +57,10 @@ export function renderInline(text: string): React.ReactNode[] {
 }
 
 /** A conversation with the co-author. The reply streams in from `assistant.delta`; on `assistant.done` the stored thread is reloaded. */
-export function Thread({ threadKey, context, order, slides, api, subscribe, onClearContext, title = 'Thread', subtitle }: ThreadProps) {
+const DEFAULT_HINT =
+  'Ask the co-author for a change. Select a slide (shift-click for a range) to anchor the request; with nothing selected it applies to the whole deck.';
+
+export function Thread({ threadKey, context, order, slides, api, subscribe, onClearContext, onEditContext, hint = DEFAULT_HINT, title = 'Thread', subtitle }: ThreadProps) {
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState('');
@@ -136,14 +143,14 @@ export function Thread({ threadKey, context, order, slides, api, subscribe, onCl
           {subtitle ? <p className="meta" style={{ margin: '2px 0 0' }}>{subtitle}</p> : null}
         </div>
         <div>
-          <ContextChip context={context} order={order} slides={slides} onClear={onClearContext} />
+          <ContextChip context={context} order={order} slides={slides} onClear={onClearContext} onEdit={onEditContext} />
         </div>
       </div>
       <div ref={log} role="log" aria-live="polite" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
         {loadError ? <p style={{ color: 'var(--warn)', fontSize: 12, margin: 0 }}>Could not load the thread: {loadError}</p> : null}
         {!loadError && messages.length === 0 && !streaming ? (
           <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.5 }}>
-            Ask the co-author for a change. Select a slide (shift-click for a range) to anchor the request; with nothing selected it applies to the whole deck.
+            {hint}
           </p>
         ) : null}
         {messages.map((m) => (

@@ -149,6 +149,49 @@ describe('Main', () => {
     expect(m.openPlayer.mock.calls).toEqual([['/api/present#3']]);
   });
 
+  describe('opening a slide to edit it', () => {
+    const mainThumb = (id: SlideId): HTMLElement => screen.getAllByTestId('thumb').find((t) => t.closest('[data-strip="main"]') && t.getAttribute('data-slide') === id)!;
+    afterEach(() => history.replaceState(null, '', '/'));
+
+    it('Enter or e with one slide selected opens /slide/<id>; nothing selected, a range or a text field does nothing', async () => {
+      await mounted();
+      fireEvent.keyDown(document.body, { key: 'Enter' });
+      expect(location.pathname).toBe('/');
+      fireEvent.click(mainThumb('s2'));
+      fireEvent.click(mainThumb('s4'), { shiftKey: true });
+      fireEvent.keyDown(document.body, { key: 'e' });
+      expect(location.pathname).toBe('/');
+      fireEvent.click(mainThumb('s2'));
+      fireEvent.keyDown(screen.getByLabelText('message'), { key: 'e' });
+      expect(location.pathname).toBe('/');
+      fireEvent.keyDown(document.body, { key: 'Enter' });
+      expect(location.pathname).toBe('/slide/s2');
+      history.replaceState(null, '', '/');
+      fireEvent.keyDown(document.body, { key: 'e' });
+      expect(location.pathname).toBe('/slide/s2');
+    });
+
+    it('the selected slide title is a link to its edit screen; the thread chip has an edit link too', async () => {
+      await mounted();
+      expect(screen.queryByTestId('thumb-title-link')).toBeNull();
+      expect(within(screen.getByTestId('context-chip')).queryByRole('link', { name: 'edit' })).toBeNull();
+      fireEvent.click(mainThumb('s3'));
+      const title = await waitFor(() => screen.queryByTestId('thumb-title-link'));
+      expect(title.textContent).toBe('Title s3');
+      expect(title.getAttribute('href')).toBe('/slide/s3');
+      const edit = within(screen.getByTestId('context-chip')).getByRole('link', { name: 'edit' });
+      expect(edit.getAttribute('href')).toBe('/slide/s3');
+      fireEvent.click(title);
+      expect(location.pathname).toBe('/slide/s3');
+      history.replaceState(null, '', '/');
+      fireEvent.click(edit);
+      expect(location.pathname).toBe('/slide/s3');
+      // The double-click still presents.
+      fireEvent.doubleClick(mainThumb('s3'));
+      expect(m.openPlayer.mock.calls).toEqual([['/api/present#3']]);
+    });
+  });
+
   it('after a deck.changed that modifies one slide, re-requests only that slide thumb; the others keep their URL', async () => {
     await mounted();
     m.thumbFor.mockClear();
