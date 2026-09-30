@@ -100,3 +100,15 @@ Scenario completed (compare, restore one entry, open a version as a lane, accept
 9. Version chips on main look clickable but do nothing.
 10. Lane titles keep referring to a slide number after the structure changed; one lane label still shows an internal id.
 Not tested: modified and moved entries (the demo deck's history had none).
+
+## M6 deck-loop (tool screens)
+Targets rendered from the three mockups with the design plan; five rounds of Opus fix + fresh Opus judge at 1440x900 (.deck-loop/round-N/{main,focus,history}.png).
+| round | score | tier | what the judge blocked on |
+|---|---|---|---|
+| 1 | 2.5 | 1 | canvas scrolled off origin, page overflow, post-it colours outside the palette |
+| 2 | 4.5 | 2 | lane ribbon zigzag, removed slots without accept/refuse, clipped right edge |
+| 3 | 5.5 | 3 | header differs per screen, thumbs cropped, remark cards too wide |
+| 4 | 6.5 | 3 | 16:9 thumbs cropped, focus body off the title column, "main" header duplicated |
+| 5 | 7.2 | 4 | moved hairlines through remark cards, 2px strip gaps, focus card label over the render |
+The round-5 fix landed after that verdict (see the final judge line below). Exit criterion (8) not reached within the five rounds.
+Leftovers the judge kept naming: empty paper under the rail on history (~360px) and main (~230px); alignment of ghost slots when a compare has both adds and removes is per-index, not joint.
