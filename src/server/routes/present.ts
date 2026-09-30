@@ -31,6 +31,7 @@ function slideSection(slide: Slide): string {
 
 // Same behaviour as the original deck.html player: #n hash navigation, arrows/space/PageUp/PageDown,
 // Home/End, click halves, "s" story panel, "n" notes to console, "h" hud, strata lines drawn as SVG.
+// Escape leaves the player for the workbench with the current slide selected (the original deck had no way out).
 const PLAYER = `
 (function(){
   const slides=[...document.querySelectorAll('#viewport>.slide')];
@@ -41,11 +42,11 @@ const PLAYER = `
   let i=Math.max(1,Math.min(slides.length,parseInt(location.hash.slice(1))||1))-1;
   function fit(){const s=Math.min(innerWidth/1280,innerHeight/720);document.documentElement.style.setProperty('--s',s);}
   function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;');}
-  function show(n){i=(n+slides.length)%slides.length;slides.forEach((s,k)=>s.classList.toggle('active',k===i));history.replaceState(null,'','#'+(i+1));hud.textContent=(i+1)+' / '+slides.length;const t=(meta[i].story||meta[i].notes||'').trim();story.innerHTML='<b>'+(i+1)+' / '+slides.length+' · the story</b> '+esc(t);}
+  function show(n){i=(n+slides.length)%slides.length;slides.forEach((s,k)=>s.classList.toggle('active',k===i));history.replaceState(null,'','#'+(i+1));hud.textContent=(i+1)+' / '+slides.length+'  ·  esc: back to the workbench';const t=(meta[i].story||meta[i].notes||'').trim();story.innerHTML='<b>'+(i+1)+' / '+slides.length+' · the story</b> '+esc(t);}
   btn.addEventListener('click',e=>{e.stopPropagation();document.body.classList.toggle('story');});
   story.addEventListener('click',e=>e.stopPropagation());
   addEventListener('resize',fit);fit();show(i);
-  addEventListener('keydown',e=>{if(['ArrowRight',' ','PageDown'].includes(e.key)){e.preventDefault();show(i+1);}else if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();show(i-1);}else if(e.key==='Home'){show(0);}else if(e.key==='End'){show(slides.length-1);}else if(e.key==='n'){console.log(meta[i].notes);}else if(e.key==='h'){document.body.classList.toggle('hud');}else if(e.key==='s'){document.body.classList.toggle('story');}});
+  addEventListener('keydown',e=>{if(['ArrowRight',' ','PageDown'].includes(e.key)){e.preventDefault();show(i+1);}else if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();show(i-1);}else if(e.key==='Home'){show(0);}else if(e.key==='End'){show(slides.length-1);}else if(e.key==='n'){console.log(meta[i].notes);}else if(e.key==='h'){document.body.classList.toggle('hud');}else if(e.key==='s'){document.body.classList.toggle('story');}else if(e.key==='Escape'){e.preventDefault();location.href='/?select='+encodeURIComponent(meta[i].id);}});
   addEventListener('hashchange',()=>show((parseInt(location.hash.slice(1))||1)-1));
   addEventListener('click',e=>{if(e.clientX>innerWidth/2)show(i+1);else show(i-1);});
 })();

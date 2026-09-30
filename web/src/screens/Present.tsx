@@ -8,7 +8,8 @@ export const PRESENT_URL = '/api/present';
  */
 export function Present() {
   useEffect(() => {
-    location.replace(PRESENT_URL);
+    // assign, not replace: the browser's back button must return to the workbench.
+    location.assign(PRESENT_URL);
   }, []);
   return (
     <div style={{ padding: 32 }}>

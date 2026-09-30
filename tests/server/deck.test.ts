@@ -276,6 +276,9 @@ describe('server core', () => {
     expect(html).toContain('story of s3');
     expect(html).toContain('ArrowRight');
     expect(html).toContain('location.hash');
+    // Escape leaves the player for the workbench on the current slide.
+    expect(html).toContain("e.key==='Escape'");
+    expect(html).toContain("'/?select='");
   });
 
   it('GET /api/present sends a CSP whose script nonce matches the player script, and a fresh nonce per response', async () => {

@@ -483,6 +483,10 @@ export function Main() {
   // Main keeps its lanes in view: one row of cards, the selection's own remarks first; the pins still mark every slide.
   const hiddenRemarks = pinned.length - placeCards(pinned, deck.order.length, REMARK_ROWS, view, mainAvoid).length;
   const warnCount = mainRemarks.filter((r) => r.severity === 'warn').length;
+  // The player opens on the selected slide (last of a range); Escape in the player comes back here with it selected.
+  const presentSlide = context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : null;
+  const presentIndex = presentSlide ? deck.order.indexOf(presentSlide) : -1;
+  const presentHref = presentIndex >= 0 ? `/api/present#${presentIndex + 1}` : '/api/present';
   const rangeCols = context.kind === 'range' ? selectedCols : null;
   const onSelect = (id: SlideId): void => {
     select(id);
@@ -515,7 +519,7 @@ export function Main() {
             <span>Brief and checks</span>
             {warnCount > 0 ? <span data-testid="warn-badge" className="meta">{warnCount}</span> : null}
           </a>
-          <a href="/api/present" className="btn-primary" style={{ alignSelf: 'center' }}>Present</a>
+          <a href={presentHref} className="btn-primary" title="esc returns here" style={{ alignSelf: 'center' }}>Present</a>
         </ScreenHeader>
         {/* Sized to its rows (scrolling past the window height): the versions rail follows 48px under the lowest lane element. */}
         <div style={{ position: 'relative', flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>

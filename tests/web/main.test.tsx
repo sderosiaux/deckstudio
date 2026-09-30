@@ -130,6 +130,15 @@ const laneCell = (laneId: string, slideId: SlideId): HTMLElement => {
 };
 
 describe('Main', () => {
+  it('the Present button opens the player on the selected slide, plain when nothing is selected', async () => {
+    await mounted();
+    const present = () => screen.getByText('Present').closest('a')!;
+    expect(present().getAttribute('href')).toBe('/api/present');
+    const thumb = screen.getAllByTestId('thumb').find((t) => t.closest('[data-strip="main"]') && t.getAttribute('data-slide') === 's3');
+    fireEvent.click(thumb ?? screen.getAllByTestId('thumb')[2]!);
+    await waitFor(() => present().getAttribute('href') === '/api/present#3');
+  });
+
   it('after a deck.changed that modifies one slide, re-requests only that slide thumb; the others keep their URL', async () => {
     await mounted();
     m.thumbFor.mockClear();
