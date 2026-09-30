@@ -3,11 +3,11 @@ import type { Anchor, Lane, Remark, SlideId, Version } from '../../../src/model/
 import {
   BRIEF_PATH,
   getDeck,
+  getLane,
   getLanePreview,
   getLanes,
   getRemarks,
   getVersions,
-  isLaneEvent,
   laneApi,
   navigate,
   remarkApi,
@@ -21,18 +21,25 @@ import {
   type LanePreviewPayload,
 } from '../api.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { LaneRow, anchorColumns } from '../components/LaneRow.js';
+import { FAILED_THUMB, LaneRow, anchorColumns } from '../components/LaneRow.js';
 import { RemarkPostIt } from '../components/Remark.js';
 import { Thread } from '../components/Thread.js';
 import { VersionLine } from '../components/VersionLine.js';
 
-// Shown in the thumb slot when the server reports a failed render; clicking that thumb re-requests it.
-const FAILED_THUMB = `data:image/svg+xml,${encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><rect width="160" height="90" fill="#F3E3DD"/>' +
-    '<text x="80" y="50" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#B8432A">render failed · retry</text></svg>',
-)}`;
+/** Bus events arriving within this window are applied together (an accept emits deck.changed plus one lane.updated per rebased lane). */
+export const COALESCE_MS = 100;
 
 type Load = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; deck: DeckPayload; versions: Version[] };
+
+interface Queued {
+  deck: boolean;
+  lanes: boolean;
+  refresh: Set<string>;
+  closed: Set<string>;
+}
+const emptyQueue = (): Queued => ({ deck: false, lanes: false, refresh: new Set(), closed: new Set() });
+const byCreated = (a: Lane, b: Lane): number => a.createdAt.localeCompare(b.createdAt);
+const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 export function Main() {
   const [load, setLoad] = useState<Load>({ status: 'loading' });
@@ -42,6 +49,11 @@ export function Main() {
   const pending = useRef(new Map<string, SlideId>());
   const generation = useRef(0);
   const mainOrder = useRef<SlideId[]>([]);
+  // Content of each main slide as last shown, so a reload only re-requests the thumbs of slides that changed.
+  const shownSlides = useRef<Record<SlideId, string>>({});
+  const shownVersion = useRef<number | undefined>(undefined);
+  const thumbsRef = useRef(thumbs);
+  thumbsRef.current = thumbs;
   // Nothing selected means the whole deck: the context sent with a message is never null here.
   // `?select=` comes from "show" on the brief & checks screen; reload() drops it if the slide is gone.
   const [context, setContext] = useState<Anchor>(() => selectionFromSearch(location.search) ?? { kind: 'arc' });
@@ -51,9 +63,18 @@ export function Main() {
   const shift = useRef(false);
   const [lanes, setLanes] = useState<Lane[]>([]);
   const [previews, setPreviews] = useState<Record<string, LanePreviewPayload>>({});
+  const previewsRef = useRef(previews);
+  previewsRef.current = previews;
+  // Lane preview thumb hashes the server failed to render.
+  const [failedLaneThumbs, setFailedLaneThumbs] = useState<ReadonlySet<string>>(new Set());
   const [laneError, setLaneError] = useState<string | null>(null);
-  // Latest request per lane, so a slow preview never overwrites a newer one.
+  // Latest request per lane (preview, and lane metadata), so a slow response never overwrites a newer one
+  // or resurrects a closed lane. `laneEpoch` does the same for the full list.
   const laneGen = useRef(new Map<string, number>());
+  const laneMetaGen = useRef(new Map<string, number>());
+  const laneEpoch = useRef(0);
+  const queued = useRef<Queued>(emptyQueue());
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // One WebSocket for the screen; children (the thread) register here instead of opening their own.
   const listeners = useRef(new Set<(e: BusEvent) => void>());
   const fanout = useCallback((h: (e: BusEvent) => void) => {
@@ -63,29 +84,77 @@ export function Main() {
     };
   }, []);
 
+  const bump = (m: Map<string, number>, id: string): number => {
+    const g = (m.get(id) ?? 0) + 1;
+    m.set(id, g);
+    return g;
+  };
+
   const refreshPreview = useCallback(async (laneId: string) => {
-    const gen = (laneGen.current.get(laneId) ?? 0) + 1;
-    laneGen.current.set(laneId, gen);
+    const gen = bump(laneGen.current, laneId);
+    // Fetching the preview re-enqueues its thumbnails: failed ones get another try.
+    const old = previewsRef.current[laneId];
+    if (old) {
+      const hashes = new Set(Object.values(old.thumbs).map((t) => t.hash));
+      setFailedLaneThumbs((prev) => ([...prev].some((h) => hashes.has(h)) ? new Set([...prev].filter((h) => !hashes.has(h))) : prev));
+    }
     try {
       const p = await getLanePreview(laneId);
       if (laneGen.current.get(laneId) !== gen) return;
       setPreviews((prev) => ({ ...prev, [laneId]: p }));
     } catch (err) {
       if (laneGen.current.get(laneId) !== gen) return;
-      setLaneError(err instanceof Error ? err.message : String(err));
+      setLaneError(errText(err));
     }
   }, []);
 
+  const dropLane = useCallback((laneId: string) => {
+    bump(laneGen.current, laneId);
+    bump(laneMetaGen.current, laneId);
+    setLanes((prev) => prev.filter((l) => l.id !== laneId));
+    setPreviews((prev) => {
+      if (!(laneId in prev)) return prev;
+      const { [laneId]: _gone, ...rest } = prev;
+      return rest;
+    });
+  }, []);
+
+  /** One lane changed (or appeared): fetch it and its preview, nothing else. */
+  const refreshLane = useCallback(
+    async (laneId: string) => {
+      const gen = bump(laneMetaGen.current, laneId);
+      const epoch = laneEpoch.current;
+      try {
+        const lane = await getLane(laneId);
+        if (laneMetaGen.current.get(laneId) !== gen || laneEpoch.current !== epoch) return;
+        if (lane.status !== 'open') {
+          dropLane(laneId);
+          return;
+        }
+        setLanes((prev) => [...prev.filter((l) => l.id !== laneId), lane].sort(byCreated));
+        setLaneError(null);
+        await refreshPreview(laneId);
+      } catch (err) {
+        if (laneMetaGen.current.get(laneId) !== gen) return;
+        setLaneError(errText(err));
+      }
+    },
+    [dropLane, refreshPreview],
+  );
+
   const reloadLanes = useCallback(async () => {
+    const epoch = ++laneEpoch.current;
     try {
-      const open = (await getLanes()).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      const open = (await getLanes()).sort(byCreated);
+      if (laneEpoch.current !== epoch) return;
       setLanes(open);
       setLaneError(null);
       const ids = new Set(open.map((l) => l.id));
       setPreviews((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => ids.has(id))));
       await Promise.all(open.map((l) => refreshPreview(l.id)));
     } catch (err) {
-      setLaneError(err instanceof Error ? err.message : String(err));
+      if (laneEpoch.current !== epoch) return;
+      setLaneError(errText(err));
     }
   }, [refreshPreview]);
 
@@ -120,22 +189,55 @@ export function Main() {
     try {
       const [deck, versions] = await Promise.all([getDeck(), getVersions()]);
       if (gen !== generation.current) return;
-      pending.current.clear();
+      const stamp = (id: SlideId): string => JSON.stringify(deck.slides[id] ?? null);
+      const before = shownSlides.current;
+      const awaited = new Set(pending.current.values());
+      // New or changed slides, plus any whose thumb never arrived and is not on its way (e.g. a request
+      // dropped by an earlier, superseded reload). The others keep their URL.
+      const stale = deck.order.filter((id) => before[id] !== stamp(id) || (thumbsRef.current[id] === undefined && !awaited.has(id)));
+      const staleSet = new Set(stale);
+      const onMain = new Set(deck.order);
+      for (const [hash, id] of pending.current) if (!onMain.has(id) || staleSet.has(id)) pending.current.delete(hash);
+      shownSlides.current = Object.fromEntries(deck.order.map((id) => [id, stamp(id)]));
+      shownVersion.current = deck.state.version;
       mainOrder.current = deck.order;
       setContext((c) => (anchorColumns(c, deck.order) ? c : { kind: 'arc' }));
       setLoad({ status: 'ready', deck, versions });
       setThumbs((prev) => Object.fromEntries(deck.order.map((id) => [id, prev[id]])));
+      setFailed((prev) => ([...prev].every((id) => onMain.has(id)) ? prev : new Set([...prev].filter((id) => onMain.has(id)))));
       // Sequential on purpose: the server renders one thumb at a time, so asking in deck order
       // makes thumbs appear left to right.
-      for (const id of deck.order) {
+      for (const id of stale) {
         if (gen !== generation.current) return;
         await refreshThumb(id, gen);
       }
     } catch (err) {
       if (gen !== generation.current) return;
-      setLoad({ status: 'error', message: err instanceof Error ? err.message : String(err) });
+      setLoad({ status: 'error', message: errText(err) });
     }
   }, [refreshThumb]);
+
+  const flush = useCallback(() => {
+    timer.current = null;
+    const q = queued.current;
+    queued.current = emptyQueue();
+    if (q.deck) void reload();
+    // A deck change rebases every open lane: the full list covers the per-lane events of the burst.
+    if (q.lanes) {
+      void reloadLanes();
+      return;
+    }
+    for (const id of q.closed) dropLane(id);
+    for (const id of q.refresh) if (!q.closed.has(id)) void refreshLane(id);
+  }, [reload, reloadLanes, dropLane, refreshLane]);
+
+  const schedule = useCallback(
+    (update: (q: Queued) => void) => {
+      update(queued.current);
+      timer.current ??= setTimeout(flush, COALESCE_MS);
+    },
+    [flush],
+  );
 
   useEffect(() => {
     void reload();
@@ -143,18 +245,39 @@ export function Main() {
     void reloadRemarks();
     // The selection is now in state; a later reload should not re-apply a stale query.
     if (location.search) history.replaceState(null, '', location.pathname);
+    let opens = 0;
     const onEvent = (e: BusEvent): void => {
       for (const h of listeners.current) h(e);
-      if (e.type === 'deck.changed') {
-        // Accepting a change rebases every open lane: all previews are stale.
-        void reload();
-        void reloadLanes();
+      if (e.type === 'hello') {
+        // Events sent while the socket was down are lost: resync after a reconnect, or when the server
+        // reports a version other than the one on screen.
+        const reconnect = e.version === null && ++opens > 1;
+        const drifted = e.version !== null && shownVersion.current !== undefined && e.version !== shownVersion.current;
+        if (reconnect || drifted) {
+          schedule((q) => {
+            q.deck = true;
+            q.lanes = true;
+          });
+        }
+      } else if (e.type === 'deck.changed') {
+        schedule((q) => {
+          q.deck = true;
+          q.lanes = true;
+        });
         void reloadRemarks();
       } else if (e.type === 'remarks.changed') {
         void reloadRemarks();
-      } else if (isLaneEvent(e)) {
-        void reloadLanes();
+      } else if (e.type === 'lane.created' || e.type === 'lane.updated') {
+        schedule((q) => q.refresh.add(e.laneId));
+      } else if (e.type === 'lane.closed') {
+        schedule((q) => q.closed.add(e.laneId));
       } else if (e.type === 'thumb.ready') {
+        setFailedLaneThumbs((prev) => {
+          if (!prev.has(e.hash)) return prev;
+          const next = new Set(prev);
+          next.delete(e.hash);
+          return next;
+        });
         // Lane preview thumbs carry the preview slide id, which may also be a main id with other content: match by hash first.
         setPreviews((prev) => {
           let hit = false;
@@ -175,15 +298,24 @@ export function Main() {
         const id = pending.current.get(e.hash) ?? (e.slideId && mainOrder.current.includes(e.slideId) ? e.slideId : undefined);
         if (id) refreshThumb(id, generation.current).catch((err: unknown) => console.warn('deckstudio: thumb refresh failed', err));
       } else if (e.type === 'thumb.failed') {
-        const id = e.slideId ?? pending.current.get(e.hash);
+        // Same hash-first matching as thumb.ready: a lane preview slide id may also be a main id.
+        const laneHit = Object.values(previewsRef.current).some((p) => Object.values(p.thumbs).some((t) => t.hash === e.hash));
+        if (laneHit) setFailedLaneThumbs((prev) => (prev.has(e.hash) ? prev : new Set(prev).add(e.hash)));
+        const id = pending.current.get(e.hash) ?? (!laneHit && e.slideId && mainOrder.current.includes(e.slideId) ? e.slideId : undefined);
+        console.warn(`deckstudio: thumbnail render failed for ${id ?? e.slideId ?? e.hash}: ${e.message}`);
         if (!id) return;
         pending.current.delete(e.hash);
-        console.warn(`deckstudio: thumbnail render failed for ${id}: ${e.message}`);
         setFailed((prev) => new Set(prev).add(id));
       }
     };
-    return subscribe(onEvent);
-  }, [reload, reloadLanes, reloadRemarks, refreshThumb]);
+    const off = subscribe(onEvent);
+    return () => {
+      off();
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = null;
+      queued.current = emptyQueue();
+    };
+  }, [reload, reloadLanes, reloadRemarks, refreshThumb, schedule]);
 
   useEffect(() => {
     if (load.status !== 'ready' || !scrollTo.current) return;
@@ -303,7 +435,18 @@ export function Main() {
                   No open lanes. Ask the co-author in the thread; its proposals appear here, under the slides they touch.
                 </p>
               ) : (
-                lanes.map((l) => <LaneRow key={l.id} lane={l} preview={previews[l.id]} mainOrder={deck.order} mainThumbs={shownThumbs} api={laneApi} />)
+                lanes.map((l) => (
+                  <LaneRow
+                    key={l.id}
+                    lane={l}
+                    preview={previews[l.id]}
+                    mainOrder={deck.order}
+                    mainThumbs={shownThumbs}
+                    api={laneApi}
+                    failedThumbs={failedLaneThumbs}
+                    onRetryThumbs={(id) => void refreshPreview(id)}
+                  />
+                ))
               )}
             </div>
           )}

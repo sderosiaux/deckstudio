@@ -76,6 +76,13 @@ export function Thread({ threadKey, context, order, slides, api, subscribe, onCl
     setStreaming('');
     void load();
     return subscribe((e) => {
+      if (e.type === 'hello') {
+        // The socket (re)opened: deltas or the done event may have been lost while it was down.
+        setTool(null);
+        setStreaming('');
+        void load();
+        return;
+      }
       if (!('thread' in e) || e.thread !== threadKey) return;
       if (e.type === 'assistant.delta') {
         setStreaming((s) => s + e.text);
