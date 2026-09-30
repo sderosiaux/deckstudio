@@ -21,7 +21,15 @@ export interface Placed {
   width: number;
   /** 0-based stacking row: cards whose columns overlap go on separate rows. */
   row: number;
+  /** The card starts on a column a moved hairline runs down: it starts MOVE_CLEAR px into that column instead. */
+  inset: boolean;
 }
+
+/**
+ * Room a card leaves beside a moved hairline, which runs 4px inside its column's left edge: a card starting on that
+ * column starts 12px right of the line; a card ending before it ends one 8px gap plus the 4px short of it.
+ */
+export const MOVE_CLEAR = 16;
 
 /**
  * Places cards on `columns` deck columns: selected ones first, then left to right. Each starts at its anchor column
@@ -29,22 +37,30 @@ export interface Placed {
  * placed. Cards that would need more than `maxRows` rows are left out.
  * With a `view` (the columns in sight of a scrolling canvas), cards anchored outside it are left out and the others
  * stay inside it: a card never runs past the visible right edge.
+ * `avoid` lists the columns a moved hairline runs down: a card never covers one, except by starting on it (inset
+ * past the line), so the line reads unbroken from main's thumb to its lane slot. Such a card may come out narrower.
  */
 export function placeCards(
   items: readonly { id: string; col: number; span: number; selected?: boolean }[],
   columns: number,
   maxRows = Infinity,
   view?: { first: number; end: number },
+  avoid: ReadonlySet<number> = new Set(),
 ): Placed[] {
   const lo = view ? Math.max(0, view.first) : 0;
   const hi = view ? Math.min(columns, view.end) : columns;
   const rows: Array<Array<[number, number]>> = [];
+  const lines = [...avoid];
   return [...items]
     .filter((it) => it.col >= lo && it.col < hi)
     .sort((a, b) => Number(Boolean(b.selected)) - Number(Boolean(a.selected)) || a.col - b.col)
     .flatMap((it) => {
-      const width = Math.min(Math.max(it.span, MIN_CARD_COLS), Math.max(hi - lo, 1));
-      const start = Math.max(lo, Math.min(it.col, hi - width));
+      // The stretch around the anchor that no line crosses: from the last line at or left of it (the card may start
+      // there, inset) to the first line right of it.
+      const from = Math.max(lo, ...lines.filter((c) => c <= it.col));
+      const to = Math.min(hi, ...lines.filter((c) => c > it.col));
+      const width = Math.min(Math.max(it.span, MIN_CARD_COLS), Math.max(to - from, 1));
+      const start = Math.max(from, Math.min(it.col, to - width));
       const end = start + width;
       let row = rows.findIndex((taken) => taken.every(([s, e]) => end <= s || start >= e));
       if (row < 0) {
@@ -52,7 +68,7 @@ export function placeCards(
         row = rows.push([]) - 1;
       }
       rows[row]!.push([start, end]);
-      return [{ id: it.id, start, width, row }];
+      return [{ id: it.id, start, width, row, inset: avoid.has(start) }];
     });
 }
 
@@ -68,14 +84,17 @@ export function RemarkRow({
   testId,
   maxRows,
   view,
+  avoid,
 }: {
   items: readonly Pinned[];
   columns: number;
   testId: string;
   maxRows?: number;
   view?: { first: number; end: number };
+  /** Columns a moved hairline runs down: cards keep clear of them (see placeCards). */
+  avoid?: ReadonlySet<number>;
 }) {
-  const placed = new Map(placeCards(items, columns, maxRows, view).map((p) => [p.id, p]));
+  const placed = new Map(placeCards(items, columns, maxRows, view, avoid).map((p) => [p.id, p]));
   const pins = [...new Set(items.map((i) => i.col))];
   return (
     <div
@@ -105,14 +124,15 @@ export function RemarkRow({
             data-col={it.col}
             data-span={it.span}
             data-slide={it.slide}
-            style={{ position: 'relative', gridColumn: `${p.start + 1} / span ${p.width}`, gridRow: p.row + 2 }}
+            data-inset={p.inset ? 'true' : undefined}
+            style={{ position: 'relative', gridColumn: `${p.start + 1} / span ${p.width}`, gridRow: p.row + 2, marginLeft: p.inset ? MOVE_CLEAR : 0 }}
           >
             <span
               aria-hidden
               style={{
                 position: 'absolute',
                 bottom: '100%',
-                left: colOffset(it.col - p.start),
+                left: p.inset ? `calc(${colOffset(it.col - p.start)} - ${MOVE_CLEAR}px)` : colOffset(it.col - p.start),
                 height: 2000,
                 borderLeft: `1px solid ${it.selected ? 'var(--accent)' : 'var(--grey-2)'}`,
               }}

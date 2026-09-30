@@ -26,7 +26,7 @@ import {
 } from '../api.js';
 import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { FAILED_THUMB, LaneRow, MoveRisers, anchorColumns, laneLetter } from '../components/LaneRow.js';
+import { FAILED_THUMB, LaneRow, MoveRisers, anchorColumns, laneLetter, movedColumns } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
 import { RemarkRow, placeCards, type Pinned } from '../components/RemarkRow.js';
 import { ScreenHeader } from '../components/ScreenHeader.js';
@@ -476,8 +476,12 @@ export function Main() {
       },
     ];
   });
+  // Moved hairlines run from main's thumbs down to their lane: the remark cards they pass keep clear of their columns.
+  const movedByLane = lanes.map((l) => movedColumns(l, previews[l.id], deck.order));
+  const movedBelow = (i: number): ReadonlySet<number> => new Set(movedByLane.slice(i).flat());
+  const mainAvoid = movedBelow(0);
   // Main keeps its lanes in view: one row of cards, the selection's own remarks first; the pins still mark every slide.
-  const hiddenRemarks = pinned.length - placeCards(pinned, deck.order.length, REMARK_ROWS, view).length;
+  const hiddenRemarks = pinned.length - placeCards(pinned, deck.order.length, REMARK_ROWS, view, mainAvoid).length;
   const warnCount = mainRemarks.filter((r) => r.severity === 'warn').length;
   const rangeCols = context.kind === 'range' ? selectedCols : null;
   const onSelect = (id: SlideId): void => {
@@ -495,7 +499,7 @@ export function Main() {
   return (
     <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-        <ScreenHeader onMain>
+        <ScreenHeader>
           <h1 className="screen-title">{deck.brief.title || deck.state.name}</h1>
           <span className="meta">v{deck.state.version}</span>
           <span className="meta">{deck.order.length} slides</span>
@@ -515,7 +519,7 @@ export function Main() {
         </ScreenHeader>
         {/* Sized to its rows (scrolling past the window height): the versions rail follows 48px under the lowest lane element. */}
         <div style={{ position: 'relative', flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <main ref={canvas} data-testid="canvas" className="fit-columns" onClick={clearOnEmpty} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '8px 32px 24px 24px' }}>
+          <main ref={canvas} data-testid="canvas" className="fit-columns" onClick={clearOnEmpty} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '8px 24px 24px 24px' }}>
             {deck.order.length === 0 ? (
               <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
             ) : (
@@ -547,7 +551,7 @@ export function Main() {
                           </span>
                         ) : null}
                       </div>
-                      <RemarkRow testId="post-its" items={pinned} columns={deck.order.length} maxRows={REMARK_ROWS} view={view} />
+                      <RemarkRow testId="post-its" items={pinned} columns={deck.order.length} maxRows={REMARK_ROWS} view={view} avoid={mainAvoid} />
                     </div>
                   ) : null}
                   {remarkError ? (
@@ -580,6 +584,7 @@ export function Main() {
                       remarks={openRemarks.filter((r) => r.sourceLaneId === l.id)}
                       remarkApi={trackedRemarkApi}
                       view={view}
+                      avoid={movedBelow(i + 1)}
                     />
                   ))
                 )}

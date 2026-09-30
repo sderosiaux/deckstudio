@@ -6,7 +6,8 @@
   --radius: 6px; --shadow: 0 4px 12px rgba(23, 23, 26, .08);
   /* One column grid for the filmstrip and the lanes; .fit-columns sizes the columns to its own width. */
   /* Thumbs are 16:9 like the slides, so a render scales into its card whole: --thumb-h always follows --thumb-w. */
-  --gutter: 120px; --thumb-w: 96px; --thumb-h: calc(var(--thumb-w) * 9 / 16); --col-gap: 4px; --fit-cols: 10;
+  /* One 8px gap between thumbs on every strip; a strip that runs on ends on a 48px "+N" slot. */
+  --gutter: 120px; --thumb-w: 96px; --thumb-h: calc(var(--thumb-w) * 9 / 16); --col-gap: 8px; --fit-cols: 9; --end-slot: 48px;
   /* Type scale: meta, body, row labels, screen title. */
   --fs-meta: 12px; --fs-body: 13px; --fs-row: 15px; --fs-title: 20px;
 }
@@ -45,20 +46,20 @@ button { font: inherit; }
 .fit-columns .gutter { box-shadow: -24px 0 0 var(--paper); }
 
 /*
- * A scrolling canvas whose deck columns fit its width: --fit-cols columns between the gutter and the right edge
- * (the 12px are the rows' 6px side padding), never below 80px nor above 128px: ten 16:9 columns keep a slide
- * readable as a whole slide, the rest runs on behind the fade and its count. The column width is set on the
- * canvas's children so that 100cqw resolves against the canvas itself; the height is redeclared there so it follows.
+ * A scrolling canvas whose deck columns fit its width: --fit-cols whole columns between the gutter (plus the rows'
+ * 6px left padding) and the 48px "+N" slot that ends on the canvas's content edge, never below 80px nor above 128px.
+ * Nine 16:9 columns keep a slide readable as a whole slide; the rest runs on behind the slot. The column width is set
+ * on the canvas's children so that 100cqw resolves against the canvas itself; the height is redeclared so it follows.
  */
 .fit-columns { container-type: inline-size; }
 .fit-columns > * {
-  --thumb-w: clamp(80px, calc((100cqw - var(--gutter) - 12px - (var(--fit-cols) - 1) * var(--col-gap)) / var(--fit-cols)), 128px);
+  --thumb-w: clamp(80px, calc((100cqw - var(--gutter) - 6px - var(--end-slot) - var(--fit-cols) * var(--col-gap)) / var(--fit-cols)), 128px);
   --thumb-h: calc(var(--thumb-w) * 9 / 16);
 }
 
-/* Every screen header: the screen's way back ("main") in the 120px gutter, the title on the column start (x = 144). */
+/* Every screen header: an empty 120px gutter, the title on the column start (x = 144). */
 .screen-header { display: flex; align-items: baseline; gap: 12px; padding: 18px 24px 14px; }
-.screen-header > .gutter { position: static; margin-right: -12px; font-size: var(--fs-body); font-weight: 500; color: var(--grey); }
+.screen-header > .gutter { position: static; margin-right: -12px; }
 
 /* A thumb's title: one 12px line under its number, shown on hover or selection only, never cut. */
 .thumb-title {

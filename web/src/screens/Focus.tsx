@@ -13,7 +13,7 @@ import {
   type ThumbStatus,
 } from '../api.js';
 import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
-import { ScreenHeader } from '../components/ScreenHeader.js';
+import { BackToMain, ScreenHeader } from '../components/ScreenHeader.js';
 import { Filmstrip } from '../components/Filmstrip.js';
 import { anchorColumns, shortLabel } from '../components/LaneRow.js';
 import { SlidePreview, type SlidePreviewProps } from '../components/SlidePreview.js';
@@ -75,23 +75,27 @@ export function textChanges(change: Change, before: Slide | undefined): { field:
 
 /*
  * Before/after side by side from 1280px, stacked below. SlidePreview has a fixed reading width; inside the pair it
- * scales to its column (16:9 kept), so both slides fit next to the thread instead of the second one falling under the fold.
+ * takes its column's width (its frame keeps the slide 16:9), so both fit next to the thread instead of one falling under the fold.
  */
 const FOCUS_CSS = `
 .focus-pair { display: grid; grid-template-columns: minmax(0, 450px); justify-content: start; gap: 24px; }
 @media (min-width: 1280px) { .focus-pair { grid-template-columns: repeat(2, minmax(0, 450px)); } }
-.focus-pair > [data-testid="slide-preview"] { width: 100% !important; height: auto !important; aspect-ratio: 16 / 9; flex: none !important; }
+.focus-pair > [data-testid="slide-preview"] { width: 100% !important; flex: none !important; }
 `;
 
 const navBtn: CSSProperties = { padding: '8px 0' };
 
-function RangeUnderline({ count, cols }: { count: number; cols: { start: number; span: number } | null }) {
+/** The accent line under the columns a strip's lane covers, named by a 12px grey line at its left end. */
+function RangeUnderline({ count, cols, label }: { count: number; cols: { start: number; span: number } | null; label: string }) {
   if (!cols) return null;
   return (
     <div style={{ display: 'flex' }}>
       <div className="gutter" />
       <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(count, 1)}, var(--thumb-w))`, columnGap: 'var(--col-gap)', padding: '0 6px' }}>
-        <div data-testid="range-underline" style={{ gridColumn: `${cols.start + 1} / span ${cols.span}`, height: 2, borderRadius: 1, background: 'var(--accent)' }} />
+        <div data-testid="range-underline" style={{ gridColumn: `${cols.start + 1} / span ${cols.span}`, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ height: 2, borderRadius: 1, background: 'var(--accent)' }} />
+          <span data-testid="range-label" className="meta" style={{ lineHeight: '16px', whiteSpace: 'nowrap' }}>{label}</span>
+        </div>
       </div>
     </div>
   );
@@ -277,10 +281,11 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         {/* The top sizes to the pair, the story and the actions; the filmstrips below take the rest of the height. */}
         <div style={{ flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <ScreenHeader navigate={navigate}>
+          <ScreenHeader>
             <h1 data-testid="focus-crumb" className="screen-title" title={lane.label}>
               {short}, change {change ? index + 1 : '–'} of {n}
             </h1>
+            <BackToMain navigate={navigate} />
           </ScreenHeader>
           {/* One left edge: the body starts on the title's column (24px padding + the 120px gutter), as the strips below. */}
           <main style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 24px 0 calc(24px + var(--gutter))', display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -344,15 +349,15 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
           </main>
         </div>
         <div style={{ position: 'relative', flex: '1 0 auto', minHeight: 200, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--line)' }}>
-          <footer ref={strips} className="fit-columns" style={{ flex: 1, minHeight: 0, background: 'var(--paper)', overflow: 'auto', padding: '14px 32px 14px 24px' }}>
+          <footer ref={strips} className="fit-columns" style={{ flex: 1, minHeight: 0, background: 'var(--paper)', overflow: 'auto', padding: '14px 24px 14px 24px' }}>
             <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div>
                 <Filmstrip order={deck.order} slides={deck.slides} thumbs={mainThumbUrls} selected={target ?? undefined} onSelect={openSlide} label="main" />
-                <RangeUnderline count={deck.order.length} cols={anchorColumns(lane.anchor, deck.order)} />
+                <RangeUnderline count={deck.order.length} cols={anchorColumns(lane.anchor, deck.order)} label="this lane's slides on main" />
               </div>
               <div>
                 <Filmstrip order={preview.order} slides={preview.slides} thumbs={laneThumbUrls} selected={target ?? undefined} onSelect={openSlide} label={short} fullLabel={lane.label} />
-                <RangeUnderline count={preview.order.length} cols={laneColumns(lane, preview, deck.order)} />
+                <RangeUnderline count={preview.order.length} cols={laneColumns(lane, preview, deck.order)} label="changed in this lane" />
               </div>
             </div>
           </footer>

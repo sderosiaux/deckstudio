@@ -66,7 +66,7 @@ describe('LaneRow', () => {
       's4:removed:3',
       'n1:inserted:4',
     ]);
-    expect(cells.every((c) => c.style.gridRow === '1')).toBe(true);
+    expect(cells.every((c) => c.style.gridRow === '1 / span 2')).toBe(true);
     expect(within(cells[3]!).getByTestId('insert-badge').textContent).toBe('+');
     expect(within(cells[1]!).getByTestId('modified-dot')).toBeTruthy();
     expect(within(cells[2]!).getByTestId('removed-slot')).toBeTruthy();
@@ -178,7 +178,7 @@ describe('LaneRow', () => {
     // the inserted slide takes the column after s3; s4, unchanged, yields it (main already shows s4)
     expect(at('n1').getAttribute('data-col')).toBe('3');
     expect(screen.getAllByTestId('lane-cell').some((c) => c.getAttribute('data-slide') === 's4')).toBe(false);
-    expect(screen.getAllByTestId('lane-cell').every((c) => c.style.gridRow === '1')).toBe(true);
+    expect(screen.getAllByTestId('lane-cell').every((c) => c.style.gridRow === '1 / span 2')).toBe(true);
     // the thumb numbers follow the main columns
     expect(within(at('s5')).getByTestId('thumb').getAttribute('aria-label')).toBe('Slide 5: New s5');
   });
@@ -313,10 +313,10 @@ describe('placeCards', () => {
       { id: 'd', col: 5, span: 1, selected: true },
     ];
     expect(placeCards(items, 10)).toEqual([
-      { id: 'd', start: 5, width: 4, row: 0 },
-      { id: 'a', start: 0, width: 4, row: 0 },
-      { id: 'b', start: 1, width: 4, row: 1 },
-      { id: 'c', start: 6, width: 4, row: 1 },
+      { id: 'd', start: 5, width: 4, row: 0, inset: false },
+      { id: 'a', start: 0, width: 4, row: 0, inset: false },
+      { id: 'b', start: 1, width: 4, row: 1, inset: false },
+      { id: 'c', start: 6, width: 4, row: 1, inset: false },
     ]);
     expect(placeCards(items, 10, 1).map((p) => p.id)).toEqual(['d', 'a']);
   });
@@ -327,6 +327,21 @@ describe('placeCards', () => {
       { id: 'b', col: 6, span: 1 },
       { id: 'c', col: 9, span: 1 },
     ];
-    expect(placeCards(items, 12, Infinity, { first: 2, end: 8 })).toEqual([{ id: 'b', start: 4, width: 4, row: 0 }]);
+    expect(placeCards(items, 12, Infinity, { first: 2, end: 8 })).toEqual([{ id: 'b', start: 4, width: 4, row: 0, inset: false }]);
+  });
+
+  it('keeps cards clear of the columns a moved hairline runs down: ends before one, or starts on it inset', () => {
+    // Lines at columns 4 and 5 (main's slides 5 and 6 moved): the card on slide 2 ends before column 4 (pulled
+    // left to keep four columns), the card on slide 6 starts on its own line's column, inset past the line.
+    const items = [
+      { id: 'a', col: 1, span: 1 },
+      { id: 'b', col: 5, span: 1 },
+    ];
+    expect(placeCards(items, 12, Infinity, undefined, new Set([4, 5]))).toEqual([
+      { id: 'a', start: 0, width: 4, row: 0, inset: false },
+      { id: 'b', start: 5, width: 4, row: 0, inset: true },
+    ]);
+    // Squeezed between two lines, a card comes out narrower rather than cover one.
+    expect(placeCards([{ id: 'c', col: 2, span: 1 }], 12, Infinity, undefined, new Set([1, 4]))).toEqual([{ id: 'c', start: 1, width: 3, row: 0, inset: true }]);
   });
 });

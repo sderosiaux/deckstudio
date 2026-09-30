@@ -7,12 +7,13 @@ import { Thumb } from './Thumb.js';
  * Pixel geometry of one column; set as CSS variables on the root so the Thumbs and the connectors agree.
  * 16:9 like the slides, large enough that a whole slide shows what differs; the columns past the edge scroll on behind a fade.
  */
-const THUMB_W = 160;
-const THUMB_H = 90;
-const GAP = 12;
+const THUMB_W = 176;
+const THUMB_H = 99;
+/** The one gap between thumbs on every strip (--col-gap). */
+const GAP = 8;
 const COL = THUMB_W + GAP;
-/** Height of the link band: with the numbers under v<a>, about 100px between the two rows. */
-const CONNECTOR_H = 72;
+/** Height of the link band: with the numbers under v<a>, about 140px between the two rows. */
+const CONNECTOR_H = 112;
 const PAD = 6;
 /** The row-name gutter, as on main. */
 const GUTTER = 120;
@@ -111,7 +112,7 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
 
   return (
     <div style={{ position: 'relative', flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <div ref={scroller} data-testid="diff-filmstrips" style={{ '--thumb-w': `${THUMB_W}px`, '--thumb-h': `${THUMB_H}px`, flex: '0 1 auto', minHeight: 0, overflow: 'auto', padding: '4px 32px 12px 0', display: 'flex', flexDirection: 'column' } as CSSProperties}>
+      <div ref={scroller} data-testid="diff-filmstrips" style={{ '--thumb-w': `${THUMB_W}px`, '--thumb-h': `${THUMB_H}px`, flex: '0 1 auto', minHeight: 0, overflow: 'auto', padding: '4px 0 12px 0', display: 'flex', flexDirection: 'column' } as CSSProperties}>
         {/* The pair sits at the top of the band, a fixed link band between the rows. */}
         <div style={{ width, minWidth: '100%', flex: '0 0 auto', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'stretch' }}>

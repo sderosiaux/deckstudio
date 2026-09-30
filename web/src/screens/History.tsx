@@ -14,7 +14,7 @@ import {
   type ThumbStatus,
 } from '../api.js';
 import { DiffFilmstrips } from '../components/DiffFilmstrips.js';
-import { ScreenHeader } from '../components/ScreenHeader.js';
+import { BackToMain, ScreenHeader } from '../components/ScreenHeader.js';
 import { VersionLine, type VersionPair } from '../components/VersionLine.js';
 
 export interface HistoryProps {
@@ -287,6 +287,7 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
           <span className="meta" data-testid="history-deck">{deck.state.name}</span>
           <span className="meta" data-testid="history-version">v{deck.state.version}</span>
           {actionError ? <span role="alert" style={{ color: 'var(--warn)', fontSize: 13 }}>{actionError}</span> : null}
+          <BackToMain navigate={navigate} />
           {pair ? (
             <button
               type="button"
@@ -294,7 +295,7 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
               onClick={openAsLane}
               disabled={openDisabled}
               title={aIsMain ? `main already has v${pair.a}'s slides` : `Propose the changes that bring main back to v${pair.a}`}
-              style={{ marginLeft: 'auto', alignSelf: 'center' }}
+              style={{ marginLeft: 8, alignSelf: 'center' }}
             >
               Open v{pair.a} as a lane
             </button>
@@ -351,7 +352,7 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
                   <span className="mono" style={{ ...chip, borderColor: focused === e.slide ? 'var(--ink)' : 'var(--line)' }}>{d.where}</span>
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.35 }}>
                     <span style={{ display: 'block' }}>{d.what}</span>
-                    <span className="muted" style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.title}>{d.title}</span>
+                    <span className="muted" data-testid="diff-entry-title" style={{ marginTop: 2, fontSize: 'var(--fs-meta)', lineHeight: '16px', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden' }} title={d.title}>{d.title}</span>
                   </span>
                   <button
                     type="button"

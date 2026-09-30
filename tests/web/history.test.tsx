@@ -86,6 +86,15 @@ describe('History', () => {
     expect(selected.map((v) => `${v.getAttribute('data-version')}${v.getAttribute('data-selected')}`)).toEqual(['2a', '3b']);
   });
 
+  it('wraps an entry\'s slide title (two lines at most) instead of cutting it to one, under an empty header gutter', async () => {
+    render(<History api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('diff-entry').length > 0);
+    const title = screen.getAllByTestId('diff-entry-title')[0]!;
+    expect(title.style.whiteSpace).not.toBe('nowrap');
+    expect(title.style.webkitLineClamp).toBe('2');
+    expect(document.querySelector('.screen-header > .gutter')!.textContent).toBe('');
+  });
+
   it('selecting v1 and v3 fetches their diff and renders one marker per entry', async () => {
     const api = stubApi();
     render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);

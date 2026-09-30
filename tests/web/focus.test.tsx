@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { Focus } from '../../web/src/screens/Focus.js';
 import type { BusEvent, DeckPayload, FocusApi, LanePreviewPayload } from '../../web/src/api.js';
 import type { Change, Lane, Slide, SlideId, Version } from '../../src/model/types.js';
@@ -145,6 +145,19 @@ describe('Focus', () => {
     expect(navigate).toHaveBeenCalledWith('/');
   });
 
+  it('labels each card on its own line above an inset slide frame, and keeps the header gutter empty', async () => {
+    const navigate = vi.fn();
+    render(<Focus laneId="l1" changeId="c1" api={stubApi()} subscribe={noEvents} navigate={navigate} />);
+    await waitFor(() => screen.queryAllByTestId('slide-preview').length === 2);
+    for (const card of screen.getAllByTestId('slide-preview')) {
+      const frame = within(card).getByTestId('slide-frame');
+      expect(frame.contains(card.querySelector('figcaption'))).toBe(false);
+    }
+    expect(document.querySelector('.screen-header > .gutter')!.textContent).toBe('');
+    fireEvent.click(screen.getByTestId('header-main'));
+    expect(navigate).toHaveBeenCalledWith('/');
+  });
+
   it('underlines the anchor range in both filmstrips and opens the lane thread', async () => {
     const api = stubApi();
     render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
@@ -154,6 +167,8 @@ describe('Focus', () => {
     expect(mainLine!.style.gridColumn).toBe('2 / span 3');
     // lane preview: s2, n1, s3 (s4 removed) = columns 2..4
     expect(laneLine!.style.gridColumn).toBe('2 / span 3');
+    // Each underline says what it marks, at its left end.
+    expect(screen.getAllByTestId('range-label').map((l) => l.textContent)).toEqual(["this lane's slides on main", 'changed in this lane']);
     expect(screen.getByTestId('thread').getAttribute('data-thread')).toBe('lane:l1');
   });
 });

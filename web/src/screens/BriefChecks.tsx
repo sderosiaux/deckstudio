@@ -16,7 +16,7 @@ import {
 import { anchorColumns } from '../components/LaneRow.js';
 import { RemarkCard } from '../components/Remark.js';
 import { Thumb } from '../components/Thumb.js';
-import { ScreenHeader } from '../components/ScreenHeader.js';
+import { BackToMain, ScreenHeader } from '../components/ScreenHeader.js';
 
 export interface BriefChecksProps {
   api?: BriefChecksApi;
@@ -334,7 +334,8 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
         <span className="meta">{deck.state.name}</span>
         <span className="meta">v{deck.state.version}</span>
         {runError ? <span style={{ color: 'var(--warn)', fontSize: 13 }}>{runError}</span> : null}
-        <button type="button" className="btn-primary" onClick={run} disabled={running.size === CHECK_ROWS.length} style={{ marginLeft: 'auto', alignSelf: 'center' }}>
+        <BackToMain navigate={navigate} />
+        <button type="button" className="btn-primary" onClick={run} disabled={running.size === CHECK_ROWS.length} style={{ marginLeft: 8, alignSelf: 'center' }}>
           {running.size > 0 ? 'Checks running…' : 'Run checks'}
         </button>
       </ScreenHeader>

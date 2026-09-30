@@ -27,6 +27,8 @@ export interface LaneRowProps {
   letter?: string;
   /** Deck columns in sight on main: the lane's remark cards stay inside them. */
   view?: { first: number; end: number };
+  /** Columns the moved hairlines of lanes below run down: the lane's remark cards keep clear of them. */
+  avoid?: ReadonlySet<number>;
 }
 
 // Shown in the thumb slot when the server reports a failed render; clicking that thumb re-requests it.
@@ -142,6 +144,13 @@ export function laneCells(lane: Lane, preview: LanePreviewPayload, mainOrder: Sl
   return [...fixed.filter((c) => !taken.has(c.col)), ...placed].sort((a, b) => a.col - b.col);
 }
 
+/** Main columns a lane's moved hairlines run down (each moved slot's own column); none while the preview loads. */
+export function movedColumns(lane: Lane, preview: LanePreviewPayload | undefined, mainOrder: SlideId[]): number[] {
+  if (!preview) return [];
+  const cols = anchorColumns(lane.anchor, mainOrder) ?? { start: 0, span: Math.max(mainOrder.length, 1) };
+  return laneCells(lane, preview, mainOrder, cols).flatMap((c) => (c.dest ? [c.col] : []));
+}
+
 /** The columns the lane region covers: the anchor, widened to every cell's column. */
 export function regionColumns(cols: { start: number; span: number }, cells: readonly Cell[]): { start: number; span: number } {
   const start = Math.min(cols.start, ...cells.map((c) => c.col));
@@ -193,6 +202,7 @@ export function LaneRow({
   remarkApi = defaultRemarkApi,
   letter,
   view,
+  avoid,
 }: LaneRowProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -276,7 +286,8 @@ export function LaneRow({
               <p className="meta" style={{ margin: 0, width: 'max-content' }}>Loading lane preview…</p>
             ) : (
               // Same column widths and gap as the filmstrip: a cell's grid column is its main column.
-              <div data-testid="lane-cells" data-edge-row style={{ display: 'grid', gridTemplateColumns: `repeat(${region.span}, var(--thumb-w))`, gridAutoColumns: 'var(--thumb-w)', columnGap: 'var(--col-gap)' }}>
+              // Two rows shared by every cell (subgrid): the cards, as tall as the tallest moved slot, then the ✓ ✗ pairs on one line.
+              <div data-testid="lane-cells" data-edge-row style={{ display: 'grid', gridTemplateColumns: `repeat(${region.span}, var(--thumb-w))`, gridTemplateRows: 'auto auto', gridAutoColumns: 'var(--thumb-w)', columnGap: 'var(--col-gap)', rowGap: 12 }}>
                 {cells.map((cell) => (
                   <div
                     key={`${cell.mark}:${cell.id}`}
@@ -286,8 +297,8 @@ export function LaneRow({
                     data-col={cell.col}
                     data-thumb-failed={thumbFailed(cell.id) ? 'true' : undefined}
                     data-edge-item
-                    // No numbers under lane cells (main's row above numbers the columns): every ✓ ✗ pair sits 12px under the 80px card.
-                    style={{ position: 'relative', gridColumn: `${cell.col - region.start + 1}`, gridRow: 1, display: 'flex', flexDirection: 'column', gap: 12 }}
+                    // No numbers under lane cells (main's row above numbers the columns): every ✓ ✗ pair sits 12px under the cards.
+                    style={{ position: 'relative', gridColumn: `${cell.col - region.start + 1}`, gridRow: '1 / span 2', display: 'grid', gridTemplateRows: 'subgrid', alignItems: 'start' }}
                   >
                     {cell.slot ? (
                       <a
@@ -334,9 +345,11 @@ export function LaneRow({
                         {cell.mark === 'modified' ? <div data-testid="modified-dot" style={{ ...overlay, width: 7, height: 7, top: 4, left: 'calc(var(--thumb-w) - 11px)', borderRadius: 999, background: 'var(--accent)' }} /> : null}
                       </>
                     )}
-                    {cell.changes.map((c) => (
-                      <ChangeButtons key={c.id} change={c} disabled={busy} onAccept={accept} onRefuse={refuse} />
-                    ))}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      {cell.changes.map((c) => (
+                        <ChangeButtons key={c.id} change={c} disabled={busy} onAccept={accept} onRefuse={refuse} />
+                      ))}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -353,7 +366,7 @@ export function LaneRow({
             ) : null}
           </section>
         </div>
-        {preview && pinned.length > 0 ? <RemarkRow testId="lane-remarks" items={pinned} columns={n} view={view} /> : null}
+        {preview && pinned.length > 0 ? <RemarkRow testId="lane-remarks" items={pinned} columns={n} view={view} avoid={avoid} /> : null}
       </div>
     </div>
   );
@@ -367,7 +380,7 @@ const MOVE_END = 8;
 const slotBox: CSSProperties = {
   position: 'relative',
   width: 'var(--thumb-w)',
-  height: 'var(--thumb-h)',
+  minHeight: 'var(--thumb-h)',
   borderRadius: 4,
   display: 'flex',
   flexDirection: 'column',
@@ -378,13 +391,14 @@ const slotBox: CSSProperties = {
   textDecoration: 'none',
 };
 /** The dashed outline means "removed", and only that. */
-const removedStyle: CSSProperties = { ...slotBox, border: '1px dashed var(--accent)' };
+const removedStyle: CSSProperties = { ...slotBox, height: 'var(--thumb-h)', border: '1px dashed var(--accent)' };
 /** A moved slide's old column: no outline; the hairline from main's thumb comes down its left edge, the words beside it. */
 const movedStyle: CSSProperties = { ...slotBox, alignItems: 'stretch', justifyContent: 'flex-start', paddingLeft: MOVE_X + 7 };
 
 /**
  * A moved slide's slot: the end of the accent hairline that leaves the slide's thumb on main (drawn by MoveRisers
- * down to the slot's top), then "moved to 24" beside it and the slide's title under that, so the slot names what moves.
+ * down to the slot's top), then "moved to 24" beside it and the slide's whole title under that, wrapped on as many
+ * lines as it takes (the slot grows; the lane's ✓ ✗ row follows), so the slot names what moves.
  */
 function MoveMark({ title, at }: { title: string; at: number }) {
   return (
@@ -394,7 +408,7 @@ function MoveMark({ title, at }: { title: string; at: number }) {
       <span style={{ lineHeight: '16px', whiteSpace: 'nowrap' }}>moved to {at}</span>
       <span
         data-testid="moved-title"
-        style={{ fontWeight: 500, lineHeight: '16px', color: 'var(--ink)', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden', overflowWrap: 'anywhere' }}
+        style={{ fontWeight: 500, lineHeight: '16px', color: 'var(--ink)', overflowWrap: 'break-word' }}
       >
         {title}
       </span>
@@ -411,8 +425,9 @@ interface Riser {
 
 /**
  * The vertical part of every moved mark under `root`: a 1px accent hairline from the bottom of the slide's thumb on
- * main down to its slot in the lane row. Drawn behind the rows (remark cards cover it where they cross), measured
- * from the laid out strip, so it follows the column width and whatever sits between main and the lane.
+ * main down to its slot in the lane row. Drawn behind the rows, measured
+ * from the laid out strip, so it follows the column width and whatever sits between main and the lane. The remark
+ * cards in between keep clear of its column (placeCards' avoid), so the line reads unbroken.
  * `root` must be positioned and form a stacking context (z-index 0) so the hairlines can sit under its rows.
  */
 export function MoveRisers({ root, deps }: { root: RefObject<HTMLElement | null>; deps: readonly unknown[] }) {
