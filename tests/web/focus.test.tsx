@@ -125,7 +125,7 @@ describe('Focus', () => {
     const navigate = vi.fn();
     render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={navigate} />);
     await waitFor(() => crumb().includes('change 1 of 3'));
-    fireEvent.click(screen.getByRole('button', { name: 'Accept' }));
+    fireEvent.click(screen.getByRole('button', { name: 'accept' }));
     await waitFor(() => navigate.mock.calls.length === 1);
     expect(api.acceptChange).toHaveBeenCalledWith('l1', 'c1');
     expect(api.refuseChange).not.toHaveBeenCalled();
@@ -203,7 +203,7 @@ describe('Focus text diff and layout', () => {
     const bar = screen.getByTestId('decide-bar');
     expect(bar.style.position).toBe('sticky');
     expect(bar.style.bottom).toBe('0px');
-    expect(bar.contains(screen.getByRole('button', { name: 'Accept' }))).toBe(true);
+    expect(bar.contains(screen.getByRole('button', { name: 'accept' }))).toBe(true);
   });
 });
 

@@ -302,11 +302,7 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
             </button>
           ) : null}
         </header>
-        <div style={{ padding: '6px 24px 0' }}>
-          <VersionLine versions={versions} current={deck.state.version} selection={pair ?? undefined} onSelect={select} />
-          <p className="meta" style={{ margin: '10px 0 0 calc(var(--gutter) + 6px)' }}>click a version to compare from it, shift-click to compare to it</p>
-        </div>
-        <section aria-label="compared versions" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '28px 24px 24px' }}>
+        <section aria-label="compared versions" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: '8px 24px 8px' }}>
           {diffError ? (
             <p style={{ color: 'var(--warn)' }}>Could not compare: {diffError}</p>
           ) : !pair ? (
@@ -323,6 +319,11 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
             />
           )}
         </section>
+        {/* The version line is the rail at the bottom, as on main. */}
+        <div style={{ padding: '14px 24px 16px' }}>
+          <p className="meta" style={{ margin: '0 0 10px calc(var(--gutter) + 6px)' }}>click a version to compare from it, shift-click to compare to it</p>
+          <VersionLine versions={versions} current={deck.state.version} selection={pair ?? undefined} onSelect={select} />
+        </div>
       </div>
       <aside aria-label="what changed" style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', padding: '18px 20px', overflowY: 'auto' }}>
         <h2 className="screen-title" style={{ marginBottom: 14 }}>What changed</h2>

@@ -4,8 +4,8 @@
   --ok: #2E8B57; --warn: #E4572E;
   --font: 'Archivo', system-ui, sans-serif; --mono: 'IBM Plex Mono', ui-monospace, monospace;
   --radius: 6px; --shadow: 0 4px 12px rgba(23, 23, 26, .08);
-  /* One column grid for the filmstrip and the lanes: 14 columns fit next to the gutter at 1440px. */
-  --gutter: 120px; --thumb-w: 60px; --thumb-h: 80px; --col-gap: 6px;
+  /* One column grid for the filmstrip and the lanes; .fit-columns sizes the columns to its own width. */
+  --gutter: 120px; --thumb-w: 60px; --thumb-h: 80px; --col-gap: 6px; --fit-cols: 14;
   /* Type scale: meta, body, row labels, screen title. */
   --fs-meta: 12px; --fs-body: 13px; --fs-row: 15px; --fs-title: 20px;
 }
@@ -40,3 +40,13 @@ button { font: inherit; }
 
 /* The row-name margin of the ledger: stays put while the canvas scrolls sideways. */
 .gutter { position: sticky; left: 0; z-index: 3; width: var(--gutter); flex: 0 0 var(--gutter); padding-right: 12px; background: var(--paper); }
+/* Sticky stops at the canvas's 24px padding: a paper shadow masks that strip so scrolled slides never show left of the row names. */
+.fit-columns .gutter { box-shadow: -24px 0 0 var(--paper); }
+
+/*
+ * A scrolling canvas whose deck columns fit its width: --fit-cols columns between the gutter and the right edge
+ * (the 12px are the rows' 6px side padding), never below 52px nor above 72px. The column width is set on the
+ * canvas's children so that 100cqw resolves against the canvas itself.
+ */
+.fit-columns { container-type: inline-size; }
+.fit-columns > * { --thumb-w: clamp(52px, calc((100cqw - var(--gutter) - 12px - (var(--fit-cols) - 1) * var(--col-gap)) / var(--fit-cols)), 72px); }

@@ -27,14 +27,24 @@ export interface Placed {
  * Places cards on `columns` deck columns: selected ones first, then left to right. Each starts at its anchor column
  * (pulled left when it would run past the last column) and takes the first row where it overlaps no card already
  * placed. Cards that would need more than `maxRows` rows are left out.
+ * With a `view` (the columns in sight of a scrolling canvas), cards anchored outside it are left out and the others
+ * stay inside it: a card never runs past the visible right edge.
  */
-export function placeCards(items: readonly { id: string; col: number; span: number; selected?: boolean }[], columns: number, maxRows = Infinity): Placed[] {
+export function placeCards(
+  items: readonly { id: string; col: number; span: number; selected?: boolean }[],
+  columns: number,
+  maxRows = Infinity,
+  view?: { first: number; end: number },
+): Placed[] {
+  const lo = view ? Math.max(0, view.first) : 0;
+  const hi = view ? Math.min(columns, view.end) : columns;
   const rows: Array<Array<[number, number]>> = [];
   return [...items]
+    .filter((it) => it.col >= lo && it.col < hi)
     .sort((a, b) => Number(Boolean(b.selected)) - Number(Boolean(a.selected)) || a.col - b.col)
     .flatMap((it) => {
-      const width = Math.min(Math.max(it.span, MIN_CARD_COLS), Math.max(columns, 1));
-      const start = Math.max(0, Math.min(it.col, columns - width));
+      const width = Math.min(Math.max(it.span, MIN_CARD_COLS), Math.max(hi - lo, 1));
+      const start = Math.max(lo, Math.min(it.col, hi - width));
       const end = start + width;
       let row = rows.findIndex((taken) => taken.every(([s, e]) => end <= s || start >= e));
       if (row < 0) {
@@ -52,8 +62,20 @@ const colOffset = (n: number): string => `calc(${n} * (var(--thumb-w) + var(--co
  * Remark cards laid on the deck grid under the slides they point at. A pin (small dot) marks the slide's column and a
  * hairline runs from it down to the card; lines pass behind the cards of upper rows.
  */
-export function RemarkRow({ items, columns, testId, maxRows }: { items: readonly Pinned[]; columns: number; testId: string; maxRows?: number }) {
-  const placed = new Map(placeCards(items, columns, maxRows).map((p) => [p.id, p]));
+export function RemarkRow({
+  items,
+  columns,
+  testId,
+  maxRows,
+  view,
+}: {
+  items: readonly Pinned[];
+  columns: number;
+  testId: string;
+  maxRows?: number;
+  view?: { first: number; end: number };
+}) {
+  const placed = new Map(placeCards(items, columns, maxRows, view).map((p) => [p.id, p]));
   const pins = [...new Set(items.map((i) => i.col))];
   return (
     <div

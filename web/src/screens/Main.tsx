@@ -24,6 +24,7 @@ import {
   type DeckPayload,
   type LanePreviewPayload,
 } from '../api.js';
+import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
 import { Filmstrip } from '../components/Filmstrip.js';
 import { FAILED_THUMB, LaneRow, anchorColumns, laneLetter } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
@@ -382,6 +383,10 @@ export function Main() {
   }, [reloadAll, reloadRemarks, refreshThumb, schedule]);
 
   const canvas = useRef<HTMLElement>(null);
+  const deckLength = load.status === 'ready' ? load.deck.order.length : 0;
+  // Columns of main in sight: the strip ends on a fade and a count, and no remark card runs past the edge.
+  const visible = useVisibleColumns(canvas, '[data-strip="main"] [data-testid="thumb"]', [load.status, deckLength, lanes.length]);
+  const view = visible ? { first: visible.first, end: visible.end } : undefined;
   // The canvas opens at its origin (main's first slide, top left); only a `?select=` or `#lane=` moves it, and only
   // by the least that brings its target into view.
   useLayoutEffect(() => {
@@ -470,7 +475,7 @@ export function Main() {
     ];
   });
   // Main keeps its lanes in view: one row of cards, the selection's own remarks first; the pins still mark every slide.
-  const hiddenRemarks = pinned.length - placeCards(pinned, deck.order.length, REMARK_ROWS).length;
+  const hiddenRemarks = pinned.length - placeCards(pinned, deck.order.length, REMARK_ROWS, view).length;
   const warnCount = mainRemarks.filter((r) => r.severity === 'warn').length;
   const rangeCols = context.kind === 'range' ? selectedCols : null;
   const onSelect = (id: SlideId): void => {
@@ -506,74 +511,78 @@ export function Main() {
           </a>
           <a href="/api/present" className="btn-primary" style={{ alignSelf: 'center' }}>Present</a>
         </header>
-        <main ref={canvas} data-testid="canvas" onClick={clearOnEmpty} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '8px 24px 24px' }}>
-          {deck.order.length === 0 ? (
-            <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
-          ) : (
-            // max-content: the filmstrip and the lane rows scroll together, so lane columns stay under main's.
-            <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 24 }}>
-              <div
-                onClickCapture={(e) => {
-                  shift.current = e.shiftKey;
-                }}
-              >
-                <Filmstrip
-                  order={deck.order}
-                  slides={deck.slides}
-                  thumbs={shownThumbs}
-                  selected={context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : undefined}
-                  onSelect={onSelect}
-                />
-                {rangeCols
-                  ? gridRow(<div data-testid="range-selection" style={{ gridColumn: `${rangeCols.start + 1} / span ${rangeCols.span}`, height: 2, borderRadius: 1, background: 'var(--accent)' }} />)
-                  : null}
-                {pinned.length > 0 ? (
-                  <div style={{ display: 'flex', marginTop: 2 }}>
-                    <div className="gutter" style={{ paddingTop: 14 }}>
-                      {hiddenRemarks > 0 ? (
-                        <span className="meta" data-testid="remarks-more" style={{ display: 'block' }}>
-                          {hiddenRemarks} more {hiddenRemarks === 1 ? 'remark' : 'remarks'}: select a slide to see its own
-                        </span>
-                      ) : null}
-                    </div>
-                    <RemarkRow testId="post-its" items={pinned} columns={deck.order.length} maxRows={REMARK_ROWS} />
-                  </div>
-                ) : null}
-                {remarkError ? (
-                  <p style={{ margin: '6px 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>
-                    <span>Remarks: {remarkError}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
-                  </p>
-                ) : null}
-              </div>
-              {laneError && !lanesFailed ? <p style={{ margin: '0 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>Lanes: {laneError}</p> : null}
-              {lanesFailed ? (
-                <p role="alert" style={{ margin: '0 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 13 }}>
-                  <span>Lanes: {lanesFailed}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
-                </p>
-              ) : lanes.length === 0 ? (
-                <p className="muted" style={{ margin: '0 0 0 var(--gutter)', fontSize: 13, maxWidth: 520 }}>
-                  No open lanes. Ask the co-author in the thread; its proposals appear here, under the slides they touch.
-                </p>
-              ) : (
-                lanes.map((l, i) => (
-                  <LaneRow
-                    key={l.id}
-                    lane={l}
-                    letter={laneLetter(i)}
-                    preview={previews[l.id]}
-                    mainOrder={deck.order}
-                    mainThumbs={shownThumbs}
-                    api={laneApi}
-                    failedThumbs={failedLaneThumbs}
-                    onRetryThumbs={(id) => void refreshPreview(id)}
-                    remarks={openRemarks.filter((r) => r.sourceLaneId === l.id)}
-                    remarkApi={trackedRemarkApi}
+        <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <main ref={canvas} data-testid="canvas" className="fit-columns" onClick={clearOnEmpty} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '8px 24px 24px' }}>
+            {deck.order.length === 0 ? (
+              <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
+            ) : (
+              // max-content: the filmstrip and the lane rows scroll together, so lane columns stay under main's.
+              <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 24 }}>
+                <div
+                  onClickCapture={(e) => {
+                    shift.current = e.shiftKey;
+                  }}
+                >
+                  <Filmstrip
+                    order={deck.order}
+                    slides={deck.slides}
+                    thumbs={shownThumbs}
+                    selected={context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : undefined}
+                    onSelect={onSelect}
                   />
-                ))
-              )}
-            </div>
-          )}
-        </main>
+                  {rangeCols
+                    ? gridRow(<div data-testid="range-selection" style={{ gridColumn: `${rangeCols.start + 1} / span ${rangeCols.span}`, height: 2, borderRadius: 1, background: 'var(--accent)' }} />)
+                    : null}
+                  {pinned.length > 0 ? (
+                    <div style={{ display: 'flex', marginTop: 2 }}>
+                      <div className="gutter" style={{ paddingTop: 14 }}>
+                        {hiddenRemarks > 0 ? (
+                          <span className="meta" data-testid="remarks-more" style={{ display: 'block' }}>
+                            {hiddenRemarks} more {hiddenRemarks === 1 ? 'remark' : 'remarks'}: select a slide to see its own
+                          </span>
+                        ) : null}
+                      </div>
+                      <RemarkRow testId="post-its" items={pinned} columns={deck.order.length} maxRows={REMARK_ROWS} view={view} />
+                    </div>
+                  ) : null}
+                  {remarkError ? (
+                    <p style={{ margin: '6px 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>
+                      <span>Remarks: {remarkError}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
+                    </p>
+                  ) : null}
+                </div>
+                {laneError && !lanesFailed ? <p style={{ margin: '0 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>Lanes: {laneError}</p> : null}
+                {lanesFailed ? (
+                  <p role="alert" style={{ margin: '0 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 13 }}>
+                    <span>Lanes: {lanesFailed}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
+                  </p>
+                ) : lanes.length === 0 ? (
+                  <p className="muted" style={{ margin: '0 0 0 var(--gutter)', fontSize: 13, maxWidth: 520 }}>
+                    No open lanes. Ask the co-author in the thread; its proposals appear here, under the slides they touch.
+                  </p>
+                ) : (
+                  lanes.map((l, i) => (
+                    <LaneRow
+                      key={l.id}
+                      lane={l}
+                      letter={laneLetter(i)}
+                      preview={previews[l.id]}
+                      mainOrder={deck.order}
+                      mainThumbs={shownThumbs}
+                      api={laneApi}
+                      failedThumbs={failedLaneThumbs}
+                      onRetryThumbs={(id) => void refreshPreview(id)}
+                      remarks={openRemarks.filter((r) => r.sourceLaneId === l.id)}
+                      remarkApi={trackedRemarkApi}
+                      view={view}
+                    />
+                  ))
+                )}
+              </div>
+            )}
+          </main>
+          <EdgeFade visible={visible} />
+        </div>
         <div style={{ padding: '14px 24px 16px' }}>
           <VersionLine versions={versions} current={deck.state.version} />
         </div>

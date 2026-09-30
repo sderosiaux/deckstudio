@@ -16,11 +16,11 @@ export interface FilmstripProps {
 /** A row of slide thumbnails in deck order, its name in the gutter. The canvas around it scrolls, not the row. */
 export function Filmstrip({ order, slides, thumbs, selected, onSelect, label = 'main', fullLabel }: FilmstripProps) {
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+    <div style={{ display: 'flex', alignItems: 'stretch' }}>
       <div className="gutter row-label" title={fullLabel} style={{ paddingTop: 8 }}>
         {label}
       </div>
-      <div role="list" style={{ display: 'flex', gap: 'var(--col-gap)', padding: '6px 6px 4px' }}>
+      <div role="list" data-strip={label} style={{ display: 'flex', gap: 'var(--col-gap)', padding: '6px 6px 4px' }}>
         {order.map((id, i) => {
           const slide = slides[id];
           return (

@@ -46,26 +46,36 @@ const stubApi = (): LaneApi & { [K in keyof LaneApi]: ReturnType<typeof vi.fn> }
 afterEach(() => cleanup());
 
 describe('LaneRow', () => {
-  it('spans the anchor columns: s2..s4 in a 5-slide deck starts at column 1 and is 3 columns wide', () => {
+  it('spans the anchor columns, widened to the inserted slide: s2..s4 plus n1 starts at column 1 and is 4 columns wide', () => {
     render(<LaneRow lane={lane()} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
     const grid = screen.getByTestId('lane-grid');
     expect(grid.style.gridTemplateColumns).toBe('repeat(5, var(--thumb-w))');
     const region = screen.getByTestId('lane-region');
-    expect(region.style.gridColumn).toBe('2 / span 3');
+    expect(region.style.gridColumn).toBe('2 / span 4');
     expect(region.getAttribute('data-col-start')).toBe('1');
-    expect(region.getAttribute('data-col-span')).toBe('3');
+    expect(region.getAttribute('data-col-span')).toBe('4');
   });
 
-  it('marks inserted, modified and removed slides, with buttons only under changed ones', () => {
+  it('lays every cell in one row, marks inserted, modified and removed slides, with buttons under every changed one', () => {
     render(<LaneRow lane={lane()} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
     const cells = screen.getAllByTestId('lane-cell');
-    expect(cells.map((c) => `${c.getAttribute('data-slide')}:${c.getAttribute('data-mark')}`)).toEqual(['s2:none', 'n1:inserted', 's3:modified', 's4:removed']);
-    expect(within(cells[1]!).getByTestId('insert-badge').textContent).toBe('+');
-    expect(within(cells[2]!).getByTestId('modified-dot')).toBeTruthy();
-    expect(within(cells[3]!).getByTestId('removed-slot')).toBeTruthy();
+    // n1 would go right after s2, but s3 (modified) and the removed s4 hold their columns: it takes the next free one.
+    expect(cells.map((c) => `${c.getAttribute('data-slide')}:${c.getAttribute('data-mark')}:${c.getAttribute('data-col')}`)).toEqual([
+      's2:none:1',
+      's3:modified:2',
+      's4:removed:3',
+      'n1:inserted:4',
+    ]);
+    expect(cells.every((c) => c.style.gridRow === '1')).toBe(true);
+    expect(within(cells[3]!).getByTestId('insert-badge').textContent).toBe('+');
+    expect(within(cells[1]!).getByTestId('modified-dot')).toBeTruthy();
+    expect(within(cells[2]!).getByTestId('removed-slot')).toBeTruthy();
+    // the removed slot carries its own accept / refuse pair
+    expect(within(cells[2]!).getByRole('button', { name: 'accept change c3' })).toBeTruthy();
+    expect(within(cells[2]!).getByRole('button', { name: 'refuse change c3' })).toBeTruthy();
     expect(within(cells[0]!).queryByRole('button', { name: /accept/ })).toBeNull();
     // the inserted slide shows its ready preview thumb
-    expect((within(cells[1]!).getByTestId('thumb-image') as HTMLImageElement).getAttribute('src')).toBe('/api/thumbs/hn1.png');
+    expect((within(cells[3]!).getByTestId('thumb-image') as HTMLImageElement).getAttribute('src')).toBe('/api/thumbs/hn1.png');
   });
 
   it('clicking ✓ accepts that change id, ✗ refuses it, discard closes the lane', async () => {
@@ -96,10 +106,10 @@ describe('LaneRow', () => {
   it('tags a lane from a check as unsolicited; an arc lane starts at the first slide it touches', () => {
     render(<LaneRow lane={lane({ origin: 'check:order', anchor: { kind: 'arc' } })} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
     expect(screen.getByText('unsolicited, from check: order')).toBeTruthy();
-    // n1 is inserted after s2 (column 1), s3 modified (column 2), s4 removed (column 3): untouched s1 and s5 stay on main.
+    // s3 modified (column 2), s4 removed (column 3), n1 inserted in the next free column (4): untouched s1 and s2 stay on main.
     const region = screen.getByTestId('lane-region');
-    expect(region.style.gridColumn).toBe('2 / span 3');
-    expect(screen.getAllByTestId('lane-cell').map((c) => c.getAttribute('data-slide'))).toEqual(['n1', 's3', 's4']);
+    expect(region.style.gridColumn).toBe('3 / span 3');
+    expect(screen.getAllByTestId('lane-cell').map((c) => c.getAttribute('data-slide'))).toEqual(['s3', 's4', 'n1']);
   });
 
   it('names the lane in the gutter with its letter and a short label, the full name as tooltip', () => {
@@ -115,17 +125,30 @@ describe('LaneRow', () => {
     expect(screen.getByTestId('lane-region').style.gridColumn).toBe('3 / span 1');
   });
 
-  it('draws a connector from a moved slide to its main column', () => {
+  it('leaves a dashed slot with its buttons at a moved slide\'s own column; a far move says where it goes, no line', () => {
     const move: Change = { id: 'c9', kind: 'move', slide: 's4', after: 's1', reason: 'earlier', status: 'pending' };
     const moved: LanePreviewPayload = { order: ['s1', 's4', 's2', 's3', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
     render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
     const cells = screen.getAllByTestId('lane-cell');
-    expect(cells.map((c) => c.getAttribute('data-slide'))).toEqual(['s4', 's2', 's3']);
-    // s4 now goes after s1, so it sits under main column 0 and was at column 3: three columns right.
-    // The region widens to include column 0.
-    expect(cells.map((c) => c.getAttribute('data-col'))).toEqual(['0', '1', '2']);
-    expect(within(cells[0]!).getByTestId('move-connector').getAttribute('data-delta')).toBe('3');
-    expect(screen.getByTestId('lane-region').style.gridColumn).toBe('1 / span 4');
+    expect(cells.map((c) => `${c.getAttribute('data-slide')}:${c.getAttribute('data-col')}`)).toEqual(['s2:1', 's3:2', 's4:3']);
+    const slot = within(cells[2]!).getByTestId('moved-slot');
+    // s4 lands before column 1, two and a half columns left of its slot: past the arc limit.
+    expect(slot.textContent).toBe('movedto 2');
+    expect(screen.queryByTestId('move-connector')).toBeNull();
+    expect(within(cells[2]!).getByRole('button', { name: 'accept change c9' })).toBeTruthy();
+    expect(screen.getByTestId('lane-region').style.gridColumn).toBe('2 / span 3');
+  });
+
+  it('joins a near move with one short arc from its slot to where it lands', () => {
+    const move: Change = { id: 'c9', kind: 'move', slide: 's2', after: 's3', reason: 'swap', status: 'pending' };
+    const moved: LanePreviewPayload = { order: ['s1', 's3', 's2', 's4', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
+    render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    const cell = screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === 's2')!;
+    expect(cell.getAttribute('data-col')).toBe('1');
+    // lands before column 3 (after s3): one and a half columns right of the slot's centre
+    expect(within(cell).getByTestId('move-connector').getAttribute('data-distance')).toBe('1.5');
+    expect(within(cell).getByTestId('move-tick')).toBeTruthy();
+    expect(within(cell).getByTestId('moved-slot').textContent).toBe('movedto 3');
   });
 
   it('gives buttons to a pending change on a slide outside the anchor range', () => {
@@ -138,7 +161,7 @@ describe('LaneRow', () => {
     expect(cell.getAttribute('data-col')).toBe('4');
   });
 
-  it('places every cell under its own main column, inserts stacked in the column they follow', () => {
+  it('places every cell under its own main column, an insert right after the slide it follows, in the same row', () => {
     const insertAfterS3: Change = { id: 'c2', kind: 'insert', after: 's3', slide: slide('n1', 'Hook'), reason: 'hook', status: 'pending' };
     const modifyS5: Change = { id: 'c5', kind: 'modify', slide: 's5', patch: { title: 'New s5' }, reason: 'r', status: 'pending' };
     const p: LanePreviewPayload = {
@@ -154,12 +177,10 @@ describe('LaneRow', () => {
     // modify on s5 sits under deck column 5 (0-based 4), both by attribute and by its grid placement in the region
     expect(at('s5').getAttribute('data-col')).toBe('4');
     expect(Number(at('s5').style.gridColumn) + start).toBe(5);
-    expect(at('s4').getAttribute('data-col')).toBe('3');
-    // the inserted slide sits in s3's column, on the row below s3
-    expect(at('n1').getAttribute('data-col')).toBe('2');
-    expect(at('s3').style.gridColumn).toBe(at('n1').style.gridColumn);
-    expect(at('s3').style.gridRow).toBe('1');
-    expect(at('n1').style.gridRow).toBe('2');
+    // the inserted slide takes the column after s3; s4, unchanged, yields it (main already shows s4)
+    expect(at('n1').getAttribute('data-col')).toBe('3');
+    expect(screen.getAllByTestId('lane-cell').some((c) => c.getAttribute('data-slide') === 's4')).toBe(false);
+    expect(screen.getAllByTestId('lane-cell').every((c) => c.style.gridRow === '1')).toBe(true);
     // the thumb numbers follow the main columns
     expect(within(at('s5')).getByTestId('thumb').getAttribute('aria-label')).toBe('Slide 5: New s5');
   });
@@ -192,9 +213,9 @@ describe('LaneRow', () => {
     );
     const slots = within(screen.getByTestId('lane-remarks')).getAllByTestId('post-it-slot');
     const at = (id: string) => slots.find((s) => within(s).getByTestId('post-it').getAttribute('data-remark') === id)!;
-    // n1 sits under column 1 (inserted after s2), stacked under s2's own cell
+    // n1 sits in column 4, the first one s3 (modified) and the removed s4 leave free after s2
     expect(at('r_n1').getAttribute('data-slide')).toBe('n1');
-    expect(at('r_n1').getAttribute('data-col')).toBe('1');
+    expect(at('r_n1').getAttribute('data-col')).toBe('4');
     // a range goes under whichever end comes first in the lane: s2 before s3
     expect(at('r_range').getAttribute('data-slide')).toBe('s2');
     expect(at('r_arc').getAttribute('data-slide')).toBeNull();
@@ -300,5 +321,14 @@ describe('placeCards', () => {
       { id: 'c', start: 7, width: 3, row: 1 },
     ]);
     expect(placeCards(items, 10, 1).map((p) => p.id)).toEqual(['d', 'a']);
+  });
+
+  it('keeps cards inside the columns in view: those anchored outside are left out, the others end at the edge', () => {
+    const items = [
+      { id: 'a', col: 1, span: 1 },
+      { id: 'b', col: 6, span: 1 },
+      { id: 'c', col: 9, span: 1 },
+    ];
+    expect(placeCards(items, 12, Infinity, { first: 2, end: 8 })).toEqual([{ id: 'b', start: 5, width: 3, row: 0 }]);
   });
 });

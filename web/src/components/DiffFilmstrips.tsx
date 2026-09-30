@@ -1,12 +1,17 @@
-import type { CSSProperties } from 'react';
+import { useRef, type CSSProperties } from 'react';
 import type { DiffEntry, SlideId, Snapshot } from '../../../src/model/types.js';
+import { EdgeFade, useVisibleColumns } from './EdgeFade.js';
 import { Thumb } from './Thumb.js';
 
-/** Pixel geometry of one column; set as CSS variables on the root so the Thumbs and the connectors agree. */
-const THUMB_W = 96;
-const THUMB_H = 96;
-const GAP = 14;
+/**
+ * Pixel geometry of one column; set as CSS variables on the root so the Thumbs and the connectors agree.
+ * About 1.25x main's thumbs so the compare fills the band; the columns past the edge scroll on behind a fade.
+ */
+const THUMB_W = 120;
+const THUMB_H = 132;
+const GAP = 12;
 const COL = THUMB_W + GAP;
+/** Height of the link band in path units; the band itself stretches to fill the screen (strokes keep 1px). */
 const CONNECTOR_H = 64;
 const PAD = 6;
 /** The row-name gutter, as on main. */
@@ -74,6 +79,8 @@ const slot: CSSProperties = {
  * old position, modified = accent dot in b, moved = a connector from its column in a to its column in b.
  */
 export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstripsProps) {
+  const scroller = useRef<HTMLDivElement>(null);
+  const visible = useVisibleColumns(scroller, '[data-testid="row-b"] > [role="listitem"]', [a.n, b.n, entries.length]);
   const cells = bRowCells(b.snapshot.order, entries);
   const aCells = aRowCells(a.snapshot.order, entries);
   const colInB = new Map(cells.flatMap((c, i) => (c.kind === 'slide' ? [[c.id, i] as const] : [])));
@@ -88,90 +95,109 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
     const to = colInB.get(id);
     return to === undefined || moved.some((m) => m.slide === id) ? [] : [{ id, from, to }];
   });
+  // A moved slide curves from its old column to its new one; a slide that kept its place is a straight hairline.
   const curve = (from: number, to: number): string => {
     const x1 = centerX(from);
     const x2 = centerX(to);
     return `M ${x1} 0 C ${x1} ${CONNECTOR_H / 2}, ${x2} ${CONNECTOR_H / 2}, ${x2} ${CONNECTOR_H}`;
   };
+  const straight = (from: number, to: number): string => `M ${centerX(from)} 0 L ${centerX(to)} ${CONNECTOR_H}`;
   const label = (n: number) => (
-    <div className="gutter row-label" style={{ fontWeight: 700, alignSelf: 'center' }}>
+    <div className="gutter row-label" style={{ fontWeight: 700, display: 'flex', alignItems: 'center' }}>
       v{n}
     </div>
   );
   const title = (side: DiffSide, id: SlideId): string => side.snapshot.slides[id]?.title ?? id;
 
   return (
-    <div data-testid="diff-filmstrips" style={{ '--thumb-w': `${THUMB_W}px`, '--thumb-h': `${THUMB_H}px`, overflowX: 'auto', padding: '4px 0 12px' } as CSSProperties}>
-      <div style={{ width, minWidth: '100%' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-          {label(a.n)}
-          <div role="list" aria-label={`slides in v${a.n}`} data-testid="row-a" style={row}>
-            {aCells.map((c) =>
-              c.kind === 'ghost' ? (
-                <div role="listitem" key={`ghost:${c.id}`} style={cellStyle}>
-                  <div data-testid={`ghost-${c.id}`} title={`"${title(b, c.id)}" is slide ${c.at + 1} in v${b.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--line)' }} />
-                  <div className="meta" style={{ paddingTop: 4, textAlign: 'center' }}>not in v{a.n}</div>
-                </div>
-              ) : (
-                <div role="listitem" key={c.id} style={cellStyle}>
-                  <Thumb slideId={c.id} n={c.n} title={title(a, c.id)} url={a.thumbs[c.id]} selected={c.id === focused} ring="ink" onClick={() => onFocus(c.id)} />
-                </div>
-              ),
-            )}
-          </div>
-        </div>
-        <svg width={width} height={CONNECTOR_H} aria-hidden="true" style={{ display: 'block', margin: '4px 0' }}>
-          {matched.map((m) => (
-            <path
-              key={`same:${m.id}`}
-              data-testid="diff-link"
-              data-slide={m.id}
-              d={curve(m.from, m.to)}
-              fill="none"
-              stroke={m.id === focused ? 'var(--ink)' : changedIds.has(m.id) ? 'var(--accent)' : 'var(--line)'}
-              strokeWidth={m.id === focused ? 1.5 : 1}
-            />
-          ))}
-          {moved.map((m) => {
-            const to = colInB.get(m.slide);
-            const from = colInA.get(m.slide);
-            if (to === undefined || from === undefined) return null;
-            return (
-              <path
-                key={m.slide}
-                data-testid="diff-marker"
-                data-kind="moved"
-                data-slide={m.slide}
-                d={curve(from, to)}
-                fill="none"
-                stroke={m.slide === focused ? 'var(--ink)' : 'var(--accent)'}
-                strokeWidth={m.slide === focused ? 1.5 : 1}
-              />
-            );
-          })}
-        </svg>
-        <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-          {label(b.n)}
-          <div role="list" aria-label={`slides in v${b.n}`} data-testid="row-b" style={row}>
-            {cells.map((c) =>
-              c.kind === 'gone' ? (
-                <div role="listitem" key={`gone:${c.id}`} style={cellStyle}>
-                  <div data-testid="diff-marker" data-kind="removed" data-slide={c.id} title={`"${title(a, c.id)}" was slide ${c.wasAt + 1} in v${a.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--accent)' }}>
-                    {title(a, c.id)}
+    <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <div ref={scroller} data-testid="diff-filmstrips" style={{ '--thumb-w': `${THUMB_W}px`, '--thumb-h': `${THUMB_H}px`, flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 0 12px', display: 'flex', flexDirection: 'column' } as CSSProperties}>
+        {/* The link band grows first (up to 3x); what is left centres the pair in the screen. */}
+        <div style={{ width, minWidth: '100%', flex: '1 0 auto', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'stretch' }}>
+            {label(a.n)}
+            <div role="list" aria-label={`slides in v${a.n}`} data-testid="row-a" style={row}>
+              {aCells.map((c) =>
+                c.kind === 'ghost' ? (
+                  <div role="listitem" key={`ghost:${c.id}`} style={cellStyle}>
+                    <div data-testid={`ghost-${c.id}`} title={`"${title(b, c.id)}" is slide ${c.at + 1} in v${b.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--line)' }} />
+                    <div className="meta" style={{ paddingTop: 4, textAlign: 'center' }}>not in v{a.n}</div>
                   </div>
-                  <div className="meta" style={{ paddingTop: 4, textAlign: 'center' }}>removed</div>
-                </div>
-              ) : (
-                <div role="listitem" key={c.id} style={cellStyle}>
-                  <Thumb slideId={c.id} n={c.n} title={title(b, c.id)} url={b.thumbs[c.id]} selected={c.id === focused} ring="ink" onClick={() => onFocus(c.id)} />
-                  {added.has(c.id) ? <div data-testid="diff-marker" data-kind="added" data-slide={c.id} className="diff-changed" style={outline} /> : null}
-                  {modified.has(c.id) ? <div data-testid="diff-marker" data-kind="modified" data-slide={c.id} className="diff-changed" title="modified" style={dot} /> : null}
-                </div>
-              ),
-            )}
+                ) : (
+                  <div role="listitem" key={c.id} style={cellStyle}>
+                    <Thumb slideId={c.id} n={c.n} title={title(a, c.id)} url={a.thumbs[c.id]} selected={c.id === focused} ring="ink" onClick={() => onFocus(c.id)} />
+                  </div>
+                ),
+              )}
+            </div>
+          </div>
+          {/* The band has the rows' sticky gutter too, so scrolled links pass under the row names like the slides do. */}
+          <div style={{ display: 'flex', flex: '1 1 auto', minHeight: CONNECTOR_H, maxHeight: CONNECTOR_H * 3, margin: '4px 0' }}>
+          <div className="gutter" />
+          <svg
+            width={width - GUTTER}
+            height={CONNECTOR_H}
+            viewBox={`${GUTTER} 0 ${width - GUTTER} ${CONNECTOR_H}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+            style={{ display: 'block', height: 'auto', alignSelf: 'stretch', flex: '0 0 auto' }}
+          >
+            {matched.map((m) => (
+              <path
+                key={`same:${m.id}`}
+                data-testid="diff-link"
+                data-slide={m.id}
+                d={straight(m.from, m.to)}
+                fill="none"
+                vectorEffect="non-scaling-stroke"
+                stroke={m.id === focused ? 'var(--ink)' : changedIds.has(m.id) ? 'var(--accent)' : 'var(--line)'}
+                strokeWidth={m.id === focused ? 1.5 : 1}
+              />
+            ))}
+            {moved.map((m) => {
+              const to = colInB.get(m.slide);
+              const from = colInA.get(m.slide);
+              if (to === undefined || from === undefined) return null;
+              return (
+                <path
+                  key={m.slide}
+                  data-testid="diff-marker"
+                  data-kind="moved"
+                  data-slide={m.slide}
+                  d={curve(from, to)}
+                  fill="none"
+                  vectorEffect="non-scaling-stroke"
+                  stroke={m.slide === focused ? 'var(--ink)' : 'var(--accent)'}
+                  strokeWidth={m.slide === focused ? 1.5 : 1}
+                />
+              );
+            })}
+          </svg>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'stretch' }}>
+            {label(b.n)}
+            <div role="list" aria-label={`slides in v${b.n}`} data-testid="row-b" style={row}>
+              {cells.map((c) =>
+                c.kind === 'gone' ? (
+                  <div role="listitem" key={`gone:${c.id}`} style={cellStyle}>
+                    <div data-testid="diff-marker" data-kind="removed" data-slide={c.id} title={`"${title(a, c.id)}" was slide ${c.wasAt + 1} in v${a.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--accent)' }}>
+                      {title(a, c.id)}
+                    </div>
+                    <div className="meta" style={{ paddingTop: 4, textAlign: 'center' }}>removed</div>
+                  </div>
+                ) : (
+                  <div role="listitem" key={c.id} style={cellStyle}>
+                    <Thumb slideId={c.id} n={c.n} title={title(b, c.id)} url={b.thumbs[c.id]} selected={c.id === focused} ring="ink" onClick={() => onFocus(c.id)} />
+                    {added.has(c.id) ? <div data-testid="diff-marker" data-kind="added" data-slide={c.id} className="diff-changed" style={outline} /> : null}
+                    {modified.has(c.id) ? <div data-testid="diff-marker" data-kind="modified" data-slide={c.id} className="diff-changed" title="modified" style={dot} /> : null}
+                  </div>
+                ),
+              )}
+            </div>
           </div>
         </div>
       </div>
+      <EdgeFade visible={visible} />
     </div>
   );
 }

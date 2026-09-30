@@ -25,6 +25,8 @@ export interface LaneRowProps {
   remarkApi?: RemarkApi;
   /** The lane's letter on main (A, B…), shown before its name in the gutter. */
   letter?: string;
+  /** Deck columns in sight on main: the lane's remark cards stay inside them. */
+  view?: { first: number; end: number };
 }
 
 // Shown in the thumb slot when the server reports a failed render; clicking that thumb re-requests it.
@@ -66,21 +68,23 @@ export interface Cell {
   title: string;
   mark: Mark;
   changes: Change[];
-  /** 0-based main (deck) column the cell sits under. */
+  /** 0-based main (deck) column the cell sits under. Every cell of a lane shares one row. */
   col: number;
-  /** 1-based row inside the lane: in-place slides take row 1, inserted/moved ones stack below in their column. */
-  row: number;
+  /** A dashed slot instead of a thumbnail: a removed slide, or the column a moved slide leaves. */
+  slot: boolean;
+  /** Moved slot only: the main column boundary the slide lands before (0 = before the first slide), and its 1-based position in the lane. */
+  dest?: { boundary: number; at: number };
 }
 
 const targetOf = (c: Change): SlideId => (c.kind === 'insert' ? c.slide.id : c.slide);
 
 /**
- * The lane's slides that belong in the row, each pinned to a main column:
- * - slides of the anchor range and any slide with a live change (even outside the range);
- * - an unchanged, modified or removed slide sits under its own main column (removed ones as empty slots);
- * - an inserted or moved slide sits under the column of the main slide it goes after, stacked below that
- *   column's own slide (a slide inserted at the very start goes under column 0).
- * Cells come sorted by column, then row.
+ * The lane's slides laid in one row, each pinned to a main column:
+ * - slides of the anchor range and any slide with a live change (even outside the range) sit under their own column;
+ * - a removed slide, and a moved one, leave a dashed slot at their own column (a moved slot knows where the slide lands);
+ * - an inserted slide takes the column right after the main slide it follows, or the next one a changed cell or slot
+ *   does not hold (an unchanged context cell in the way yields: main already shows that slide).
+ * Cells come sorted by column.
  */
 export function laneCells(lane: Lane, preview: LanePreviewPayload, mainOrder: SlideId[], cols: { start: number; span: number }): Cell[] {
   const skipped = new Set(preview.skipped);
@@ -93,46 +97,49 @@ export function laneCells(lane: Lane, preview: LanePreviewPayload, mainOrder: Sl
 
   const range = new Set(mainOrder.slice(cols.start, cols.start + cols.span));
   const markOf = (id: SlideId): Mark => (has(id, 'insert') ? 'inserted' : has(id, 'move') ? 'moved' : has(id, 'modify') ? 'modified' : 'none');
+  const titleOf = (id: SlideId): string => preview.slides[id]?.title ?? id;
 
-  // Column of a displaced slide: its change's `after` when that is on main, else the nearest preceding
-  // in-place slide of the preview (e.g. after another inserted slide), else column 0.
-  const displacedCol = (id: SlideId, pos: number): number => {
+  // Boundary a displaced slide lands before: right after its change's `after` when that is in place on main, else
+  // after the nearest preceding in-place slide of the preview (e.g. after another inserted slide), else the start.
+  const boundaryOf = (id: SlideId, pos: number): number => {
     const c = (byTarget.get(id) ?? []).find((x) => x.kind === 'insert' || x.kind === 'move');
     const after = c && (c.kind === 'insert' || c.kind === 'move') ? c.after : undefined;
     if (after === null) return 0;
-    if (after !== undefined && mainIndex.has(after) && !displaced(after)) return mainIndex.get(after)!;
+    if (after !== undefined && mainIndex.has(after) && !displaced(after)) return mainIndex.get(after)! + 1;
     for (let j = pos - 1; j >= 0; j--) {
       const prev = preview.order[j]!;
-      if (!displaced(prev)) return mainIndex.get(prev)!;
+      if (!displaced(prev)) return mainIndex.get(prev)! + 1;
     }
     return 0;
   };
 
-  const placed: Array<Omit<Cell, 'row'> & { inPlace: boolean; seq: number }> = [];
+  const fixed: Cell[] = [];
+  const floating: Array<{ id: SlideId; boundary: number }> = [];
   preview.order.forEach((id, pos) => {
     if (!range.has(id) && !byTarget.has(id)) return;
-    const inPlace = !displaced(id);
-    const col = inPlace ? mainIndex.get(id)! : displacedCol(id, pos);
-    placed.push({ id, title: preview.slides[id]?.title ?? id, mark: markOf(id), changes: byTarget.get(id) ?? [], col, inPlace, seq: pos });
+    const base = { id, title: titleOf(id), mark: markOf(id), changes: byTarget.get(id) ?? [] };
+    if (!displaced(id)) fixed.push({ ...base, col: mainIndex.get(id)!, slot: false });
+    else if (has(id, 'move') && mainIndex.has(id) && !has(id, 'insert')) {
+      fixed.push({ ...base, col: mainIndex.get(id)!, slot: true, dest: { boundary: boundaryOf(id, pos), at: pos + 1 } });
+    } else floating.push({ id, boundary: boundaryOf(id, pos) });
   });
   const inPreview = new Set(preview.order);
   for (const [i, id] of mainOrder.entries()) {
     if (inPreview.has(id) || !has(id, 'remove')) continue;
-    placed.push({ id, title: preview.slides[id]?.title ?? id, mark: 'removed', changes: byTarget.get(id) ?? [], col: i, inPlace: true, seq: -1 });
+    fixed.push({ id, title: titleOf(id), mark: 'removed', changes: byTarget.get(id) ?? [], col: i, slot: true });
   }
 
-  const inPlaceCols = new Set(placed.filter((c) => c.inPlace).map((c) => c.col));
-  const stacked = new Map<number, number>();
-  const cells: Cell[] = placed
-    .sort((a, b) => a.col - b.col || Number(b.inPlace) - Number(a.inPlace) || a.seq - b.seq)
-    .map((p) => {
-      const cell = { id: p.id, title: p.title, mark: p.mark, changes: p.changes, col: p.col };
-      if (p.inPlace) return { ...cell, row: 1 };
-      const k = stacked.get(p.col) ?? 0;
-      stacked.set(p.col, k + 1);
-      return { ...cell, row: (inPlaceCols.has(p.col) ? 2 : 1) + k };
-    });
-  return cells;
+  // Changed cells and slots hold their column; an unchanged context cell gives way to an inserted slide.
+  const held = new Set(fixed.filter((c) => c.slot || c.mark !== 'none').map((c) => c.col));
+  const placed: Cell[] = [];
+  for (const f of floating) {
+    let col = f.boundary;
+    while (held.has(col)) col++;
+    held.add(col);
+    placed.push({ id: f.id, title: titleOf(f.id), mark: markOf(f.id), changes: byTarget.get(f.id) ?? [], col, slot: false });
+  }
+  const taken = new Set(placed.map((c) => c.col));
+  return [...fixed.filter((c) => !taken.has(c.col)), ...placed].sort((a, b) => a.col - b.col);
 }
 
 /** The columns the lane region covers: the anchor, widened to every cell's column. */
@@ -141,9 +148,6 @@ export function regionColumns(cols: { start: number; span: number }, cells: read
   const end = Math.max(cols.start + cols.span - 1, ...cells.map((c) => c.col));
   return { start, span: end - start + 1 };
 }
-
-/** Width of `n` deck columns, matching the filmstrip's thumb width + gap. */
-const columns = (n: number): string => `calc(${n} * (var(--thumb-w) + var(--col-gap)))`;
 
 const overlay: CSSProperties = { position: 'absolute', top: 0, left: 0, width: 'var(--thumb-w)', height: 'var(--thumb-h)', pointerEvents: 'none', borderRadius: 4 };
 
@@ -188,6 +192,7 @@ export function LaneRow({
   remarks = NO_REMARKS,
   remarkApi = defaultRemarkApi,
   letter,
+  view,
 }: LaneRowProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -241,7 +246,7 @@ export function LaneRow({
   };
 
   return (
-    <div id={`lane-row-${lane.id}`} data-testid="lane-row" data-lane={lane.id} style={{ display: 'flex', alignItems: 'flex-start' }}>
+    <div id={`lane-row-${lane.id}`} data-testid="lane-row" data-lane={lane.id} style={{ display: 'flex', alignItems: 'stretch' }}>
       <div className="gutter" style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 8 }}>
         <span className="row-label" title={lane.label} data-testid="lane-name">
           {letter ? <strong style={{ fontWeight: 700, marginRight: 6 }}>{letter}</strong> : null}
@@ -253,14 +258,14 @@ export function LaneRow({
           discard lane
         </button>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <div data-testid="lane-grid" style={{ display: 'grid', gridTemplateColumns: `repeat(${n}, var(--thumb-w))`, columnGap: 'var(--col-gap)', padding: '0 6px' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div data-testid="lane-grid" style={{ display: 'grid', gridTemplateColumns: `repeat(${n}, var(--thumb-w))`, gridAutoColumns: 'var(--thumb-w)', columnGap: 'var(--col-gap)', padding: '0 6px' }}>
           <section
             data-testid="lane-region"
             data-col-start={region.start}
             data-col-span={region.span}
             aria-label={`lane ${lane.label}`}
-            style={{ gridColumn: `${region.start + 1} / span ${region.span}`, minWidth: 0, paddingTop: 6 }}
+            style={{ gridColumn: `${region.start + 1} / span ${region.span}`, minWidth: 0, paddingTop: 18 }}
           >
             {error ? (
               <p role="alert" style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--warn)', width: 'max-content', maxWidth: 480 }}>
@@ -271,7 +276,7 @@ export function LaneRow({
               <p className="meta" style={{ margin: 0, width: 'max-content' }}>Loading lane preview…</p>
             ) : (
               // Same column widths and gap as the filmstrip: a cell's grid column is its main column.
-              <div data-testid="lane-cells" style={{ display: 'grid', gridTemplateColumns: `repeat(${region.span}, var(--thumb-w))`, columnGap: 'var(--col-gap)', rowGap: 12 }}>
+              <div data-testid="lane-cells" style={{ display: 'grid', gridTemplateColumns: `repeat(${region.span}, var(--thumb-w))`, gridAutoColumns: 'var(--thumb-w)', columnGap: 'var(--col-gap)' }}>
                 {cells.map((cell) => (
                   <div
                     key={`${cell.mark}:${cell.id}`}
@@ -279,29 +284,26 @@ export function LaneRow({
                     data-slide={cell.id}
                     data-mark={cell.mark}
                     data-col={cell.col}
-                    data-row={cell.row}
                     data-thumb-failed={thumbFailed(cell.id) ? 'true' : undefined}
-                    style={{ position: 'relative', gridColumn: `${cell.col - region.start + 1}`, gridRow: `${cell.row}`, display: 'flex', flexDirection: 'column', gap: 6 }}
+                    style={{ position: 'relative', gridColumn: `${cell.col - region.start + 1}`, gridRow: 1, display: 'flex', flexDirection: 'column', gap: 6 }}
                   >
-                    {cell.mark === 'removed' ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <a
-                          data-testid="removed-slot"
-                          href={cell.changes[0] ? focusPath(lane.id, cell.changes[0].id) : undefined}
-                          onClick={(e) => {
-                            const first = cell.changes[0];
-                            if (!first || e.metaKey || e.ctrlKey || e.shiftKey) return;
-                            e.preventDefault();
-                            onOpenChange(lane.id, first.id);
-                          }}
-                          title={`removed: ${cell.title}`}
-                          aria-label={`removed: ${cell.title}`}
-                          style={{ width: 'var(--thumb-w)', height: 'var(--thumb-h)', borderRadius: 4, border: '1px dashed var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--grey)', fontSize: 12, textDecoration: 'none' }}
-                        >
-                          removed
-                        </a>
-                        <span className="meta" style={{ textAlign: 'center' }}>{cell.col + 1}</span>
-                      </div>
+                    {cell.slot ? (
+                      <a
+                        data-testid={cell.mark === 'removed' ? 'removed-slot' : 'moved-slot'}
+                        href={cell.changes[0] ? focusPath(lane.id, cell.changes[0].id) : undefined}
+                        onClick={(e) => {
+                          const first = cell.changes[0];
+                          if (!first || e.metaKey || e.ctrlKey || e.shiftKey) return;
+                          e.preventDefault();
+                          onOpenChange(lane.id, first.id);
+                        }}
+                        title={cell.dest ? `moved: ${cell.title}, now slide ${cell.dest.at}` : `removed: ${cell.title}`}
+                        aria-label={cell.dest ? `moved: ${cell.title}, now slide ${cell.dest.at}` : `removed: ${cell.title}`}
+                        style={slotStyle(cell.mark)}
+                      >
+                        <span>{cell.dest ? 'moved' : 'removed'}</span>
+                        {cell.dest ? <span>to {cell.dest.at}</span> : null}
+                      </a>
                     ) : (
                       <>
                         <Thumb
@@ -327,9 +329,9 @@ export function LaneRow({
                           </>
                         ) : null}
                         {cell.mark === 'modified' ? <div data-testid="modified-dot" style={{ ...overlay, width: 7, height: 7, top: 4, left: 'calc(var(--thumb-w) - 11px)', borderRadius: 999, background: 'var(--accent)' }} /> : null}
-                        {cell.mark === 'moved' ? <MoveConnector delta={mainOrder.indexOf(cell.id) - cell.col} from={mainOrder.indexOf(cell.id)} /> : null}
                       </>
                     )}
+                    {cell.dest ? <MoveMark col={cell.col} boundary={cell.dest.boundary} /> : null}
                     {cell.changes.map((c) => (
                       <ChangeButtons key={c.id} change={c} disabled={busy} onAccept={accept} onRefuse={refuse} />
                     ))}
@@ -349,62 +351,59 @@ export function LaneRow({
             ) : null}
           </section>
         </div>
-        {preview && pinned.length > 0 ? <RemarkRow testId="lane-remarks" items={pinned} columns={n} /> : null}
+        {preview && pinned.length > 0 ? <RemarkRow testId="lane-remarks" items={pinned} columns={n} view={view} /> : null}
       </div>
     </div>
   );
 }
 
+/** Longest move, in columns, that gets an arc; a farther one only says where it goes ("to 24") so no line runs off the row. */
+export const ARC_MAX_COLS = 2;
+
+/** Columns between a slot's centre and the gap before `boundary`, signed (negative = the slide goes left). */
+export const moveDistance = (col: number, boundary: number): number => boundary - col - 0.5;
+
+const slotStyle = (mark: Mark): CSSProperties => ({
+  width: 'var(--thumb-w)',
+  height: 'var(--thumb-h)',
+  borderRadius: 4,
+  // Removed is the diff; a moved slot is only the old place, the arc or the "to" line carries the move.
+  border: `1px dashed ${mark === 'removed' ? 'var(--accent)' : 'var(--grey-2)'}`,
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 2,
+  color: 'var(--grey)',
+  fontSize: 'var(--fs-meta)',
+  textDecoration: 'none',
+});
+
 /**
- * A moved slide's two ends: a dashed slot at the column it leaves on main (`delta` columns away, signed) and a hairline
- * joining the tops of the slot and the slide, so the move reads from either end.
+ * Where a moved slide lands: a short accent tick in the gap before `boundary`, and, when that gap is at most
+ * ARC_MAX_COLS columns away, one curved hairline from the top of the slot to the tick.
  */
-function MoveConnector({ delta, from }: { delta: number; from: number }) {
-  if (delta === 0) return <span data-testid="move-connector" data-delta="0" hidden />;
-  const far = columns(Math.abs(delta));
-  const line: CSSProperties = delta > 0 ? { left: 'calc(var(--thumb-w) / 2)' } : { right: 'calc(var(--thumb-w) / 2)' };
-  const slot: CSSProperties = delta > 0 ? { left: far } : { right: far };
+function MoveMark({ col, boundary }: { col: number; boundary: number }) {
+  const d = moveDistance(col, boundary);
+  // Tick: centred in the column gap before `boundary`, measured from the slot's left edge.
+  const tickLeft = `calc(${boundary - col} * (var(--thumb-w) + var(--col-gap)) - var(--col-gap) / 2 - 1px)`;
+  const near = Math.abs(d) <= ARC_MAX_COLS;
+  const span = `calc(${Math.abs(d)} * (var(--thumb-w) + var(--col-gap)))`;
+  const arcLeft = d >= 0 ? 'calc(var(--thumb-w) / 2)' : `calc(var(--thumb-w) / 2 - ${span})`;
+  if (!near) return null;
   return (
     <>
-      <div
+      <div data-testid="move-tick" aria-hidden style={{ position: 'absolute', top: 0, left: tickLeft, width: 2, height: 'var(--thumb-h)', borderRadius: 1, background: 'var(--accent)', pointerEvents: 'none' }} />
+      <svg
         data-testid="move-connector"
-        data-delta={delta}
+        data-distance={d}
         aria-hidden
-        style={{
-          position: 'absolute',
-          top: -6,
-          height: 6,
-          width: far,
-          ...line,
-          borderTop: '1px solid var(--accent)',
-          borderLeft: '1px solid var(--accent)',
-          borderRight: '1px solid var(--accent)',
-          pointerEvents: 'none',
-        }}
-      />
-      <div
-        data-testid="move-origin"
-        aria-hidden
-        style={{
-          position: 'absolute',
-          top: 0,
-          ...slot,
-          width: 'var(--thumb-w)',
-          height: 'var(--thumb-h)',
-          borderRadius: 4,
-          border: '1px dashed var(--grey-2)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: 12,
-          color: 'var(--grey)',
-          pointerEvents: 'none',
-        }}
+        viewBox="0 0 100 16"
+        preserveAspectRatio="none"
+        style={{ position: 'absolute', top: -16, left: arcLeft, width: span, height: 16, overflow: 'visible', pointerEvents: 'none' }}
       >
-        <span>was</span>
-        <span>{from + 1}</span>
-      </div>
+        <path d="M 0 16 C 0 0, 100 0, 100 16" fill="none" stroke="var(--accent)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+      </svg>
     </>
   );
 }

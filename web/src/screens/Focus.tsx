@@ -12,6 +12,7 @@ import {
   type LanePreviewPayload,
   type ThumbStatus,
 } from '../api.js';
+import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
 import { Filmstrip } from '../components/Filmstrip.js';
 import { anchorColumns, shortLabel } from '../components/LaneRow.js';
 import { SlidePreview, type SlidePreviewProps } from '../components/SlidePreview.js';
@@ -171,6 +172,9 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
 
   useEffect(() => setActionError(null), [changeId]);
 
+  const strips = useRef<HTMLElement>(null);
+  const visible = useVisibleColumns(strips, '[data-strip="main"] [data-testid="thumb"]', [load.status]);
+
   const go = (path: string) => (e?: MouseEvent) => {
     e?.preventDefault();
     navigate(path);
@@ -268,11 +272,15 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
   const context: Anchor = target && deck.order.includes(target) ? { kind: 'slide', slide: target } : lane.anchor;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-          <header style={{ display: 'flex', alignItems: 'baseline', gap: 16, padding: '18px 24px 14px' }}>
-            <a href="/" onClick={go('/')} className="link">main</a>
+    <div style={{ display: 'flex', height: '100%' }}>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        {/* The top sizes to the pair, the story and the actions; the filmstrips below take the rest of the height. */}
+        <div style={{ flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {/* "main" in the 120px gutter, above the main row label of the filmstrips below. */}
+          <header style={{ display: 'flex', alignItems: 'baseline', padding: '18px 24px 14px' }}>
+            <div className="gutter" style={{ position: 'static' }}>
+              <a href="/" onClick={go('/')} className="link">main</a>
+            </div>
             <h1 data-testid="focus-crumb" className="screen-title" title={lane.label}>
               {short}, change {change ? index + 1 : '–'} of {n}
             </h1>
@@ -316,14 +324,14 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
                 ) : null}
                 <div
                   data-testid="decide-bar"
-                  style={{ position: 'sticky', bottom: 0, marginTop: 'auto', zIndex: 2, display: 'flex', alignItems: 'center', gap: 20, padding: '12px 0 14px', background: 'var(--paper)' }}
+                  style={{ position: 'sticky', bottom: 0, marginTop: 8, zIndex: 2, display: 'flex', alignItems: 'center', gap: 20, padding: '0 0 14px', background: 'var(--paper)' }}
                 >
                   <button type="button" className="link" style={navBtn} disabled={!prev || n <= 1} onClick={() => prev && navigate(prev)}>
                     previous change
                   </button>
                   <div style={{ display: 'flex', gap: 10 }}>
                     <button type="button" className="btn-primary" disabled={busy} onClick={accept}>
-                      Accept
+                      accept
                     </button>
                     <button type="button" className="btn" disabled={busy} onClick={refuse}>
                       refuse
@@ -337,22 +345,28 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
             )}
           </main>
         </div>
-        <aside style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0 }}>
-          <Thread threadKey={`lane:${lane.id}`} subtitle={`lane ${short}`} context={context} order={deck.order} slides={deck.slides} api={api} subscribe={fanout} />
-        </aside>
-      </div>
-      <footer style={{ borderTop: '1px solid var(--line)', background: 'var(--paper)', overflow: 'auto', maxHeight: '40%', padding: '14px 24px' }}>
-        <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <Filmstrip order={deck.order} slides={deck.slides} thumbs={mainThumbUrls} selected={target ?? undefined} onSelect={openSlide} label="main" />
-            <RangeUnderline count={deck.order.length} cols={anchorColumns(lane.anchor, deck.order)} />
-          </div>
-          <div>
-            <Filmstrip order={preview.order} slides={preview.slides} thumbs={laneThumbUrls} selected={target ?? undefined} onSelect={openSlide} label={short} fullLabel={lane.label} />
-            <RangeUnderline count={preview.order.length} cols={laneColumns(lane, preview, deck.order)} />
-          </div>
+        <div style={{ position: 'relative', flex: '1 0 auto', minHeight: 200, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--line)' }}>
+          <footer ref={strips} className="fit-columns" style={{ flex: 1, minHeight: 0, background: 'var(--paper)', overflow: 'auto', padding: '14px 24px' }}>
+            <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <Filmstrip order={deck.order} slides={deck.slides} thumbs={mainThumbUrls} selected={target ?? undefined} onSelect={openSlide} label="main" />
+                <RangeUnderline count={deck.order.length} cols={anchorColumns(lane.anchor, deck.order)} />
+              </div>
+              <div>
+                <Filmstrip order={preview.order} slides={preview.slides} thumbs={laneThumbUrls} selected={target ?? undefined} onSelect={openSlide} label={short} fullLabel={lane.label} />
+                <RangeUnderline count={preview.order.length} cols={laneColumns(lane, preview, deck.order)} />
+              </div>
+            </div>
+          </footer>
+          <EdgeFade visible={visible} />
         </div>
-      </footer>
+      </div>
+      {/* The thread runs the full height, as on main. */}
+      <aside style={{ position: 'relative', width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0 }}>
+        <div style={{ position: 'absolute', inset: 0 }}>
+          <Thread threadKey={`lane:${lane.id}`} subtitle={`lane ${short}`} context={context} order={deck.order} slides={deck.slides} api={api} subscribe={fanout} />
+        </div>
+      </aside>
     </div>
   );
 }
