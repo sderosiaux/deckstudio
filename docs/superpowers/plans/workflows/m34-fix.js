@@ -1,0 +1,31 @@
+export const meta = {
+  name: 'deckstudio-m34-fix',
+  description: 'M3+M4 fixes: two Opus agents apply the confirmed review findings (check runner/status/session; web remarks and focus) in parallel worktrees with regression tests',
+  phases: [{ title: 'Fix', detail: 'checks+session / web' }],
+}
+const REPO = '/Users/sderosiaux/code/personal/deckstudio'
+const WT = '/Users/sderosiaux/code/personal/deckstudio-wt/'
+const FINDINGS = `${REPO}/docs/superpowers/plans/review-m34.json`
+const COMMON = `
+You fix confirmed review findings of the deckstudio repo inside a dedicated git worktree at WORKTREE (absolute path below). ALWAYS work there (cd WORKTREE && <command>); never touch ${REPO}. node_modules is symlinked.
+Read first: ${FINDINGS} ("confirmed" array: claim, evidence, fix_hint; several entries repeat the same finding from different lenses; only those in YOUR SCOPE are yours), then the files you will change and their tests. Contracts in src/model/types.ts and schema.ts already contain Remark.sourceLaneId (optional, nullable): use it, do not change contracts otherwise.
+Rules: for each finding, add a regression test that fails, then fix, then run it and the full suite (pnpm typecheck && pnpm test). TypeScript ESM (.js suffixes), strict, no fixed sleeps, no placeholders. Only touch files in your scope (plus their tests). Do not edit package.json. Throwaway repro files go under /tmp, never in the repo.
+When done: git add <files> && git commit -m "M3+M4 fixes: <scope>" (plain commit, no Co-Authored-By). Return the structured result.
+`
+const SCOPES = [
+  { key: 'fixF-checks', scope: `CHECKS + SESSION + LANES (src/agent/checks/runner.ts, src/agent/checks/index.ts, src/server/routes/checks.ts, src/server/laneService.ts, src/agent/session.ts, src/server/app.ts if wiring changes, tests/agent/checks/runner.test.ts, tests/server/remarks.test.ts, tests/server/lanes.test.ts, tests/agent/session.test.ts):
+1. CheckRunner is the single owner of check status: it tracks queued + running checks and lastRun (stamped in execute's finally), exposes status(): { running: CheckName[], lastRun: Record<CheckName, string|null> }, dedupes run(name) against a queued or in-flight run of the same name, emits checks.status on every transition. GET /api/checks/status returns runner.status(); POST /api/checks/run delegates and returns the names actually started; both answer 503 when no runner. Update the ChecksRunner interface accordingly and the remarks tests' fake runner. Regression: an auto run (deck.changed → scheduleAfterAccept with debounceMs 10) shows in GET status while in flight; POST during it starts nothing twice.
+2. scheduleAfterAccept: if a deck batch is queued or running, set a dirty flag and run one more batch after it finishes instead of enqueuing duplicates. Regression: three deck.changed during a running batch → exactly two batches total.
+3. dispose(): no retry after an abort, no persist after dispose (evaluate returns after the first aborted ask; execute checks disposed before persist and throws 'check runner stopped'). Regression: dispose during the first query → queryImpl called once, remarks unchanged.
+4. Failure path keeps existing remarks: when a run ends not ok, keep the check's previous remarks and lanes and only add/replace its single failure remark. Regression: a good run then a twice-invalid run → the good remarks are still there plus one failure remark.
+5. Lane-scoped render remarks: persist them with sourceLaneId = the scanned lane id (laneId stays null unless the creator links a lane), and owned() only claims lane-scoped remarks through sourceLaneId. LaneService.closeLane and accept (when the lane closes) resolve open remarks whose sourceLaneId is that lane. Regression: scheduleAfterLane('l1') → remark has sourceLaneId 'l1' and laneId null; closing l1 resolves it.
+6. session.ts: persist m.session_id for every result that is not the stale-session case (error_max_turns, other error_during_execution), not only success. Regression with a fake queryImpl yielding error_max_turns → sessionId saved.` },
+  { key: 'fixG-web', scope: `WEB (web/src/screens/Main.tsx, web/src/screens/BriefChecks.tsx, web/src/screens/Focus.tsx, web/src/components/LaneRow.tsx, web/src/components/Remark.tsx, web/src/api.ts, tests/web/main.test.tsx, tests/web/briefChecks.test.tsx, tests/web/focus.test.tsx, tests/web/laneRow.test.tsx):
+1. Remarks with a non-null sourceLaneId (lane-scoped check results) are excluded from Main's post-its and header warn badge and from BriefChecks' per-check red dot; instead LaneRow shows them as small post-its under the lane cell they anchor to (match by slide id in the lane preview). Regression: a remark {anchor slide s3, sourceLaneId 'l1'} renders no post-it under main s3 and one under lane l1's s3 cell; the header badge stays 0.
+2. main.test.tsx: the api mock gets getRemarks (default []); add a test that an open slide remark renders a post-it at gridColumn = anchor index + 1 and that a range remark spans its columns.
+3. Focus.reload: only re-request thumbFor for slides whose content changed or that have no thumb yet (per-slide content stamp like Main's shownSlides); on deck.changed for an unrelated slide, no refetch of the focused slide's thumb. Regression: two reloads without content change → thumbFor called once per slide.
+4. BriefChecks: use the status payload's running list from the checks.status event directly (no refetch storm): update state from the event, refetch status only on mount and on 'hello'. Regression: three checks.status events → one initial status fetch.` },
+]
+const RESULT = { type: 'object', properties: { scope: { type: 'string' }, branch: { type: 'string' }, fixed: { type: 'array', items: { type: 'string' } }, not_fixed: { type: 'array', items: { type: 'string' } }, tests_run: { type: 'number' }, tests_passed: { type: 'number' }, typecheck_ok: { type: 'boolean' }, notes: { type: 'string' } }, required: ['scope', 'branch', 'fixed', 'not_fixed', 'tests_run', 'tests_passed', 'typecheck_ok'] }
+phase('Fix')
+return await parallel(SCOPES.map(s => () => agent(`${COMMON.replace(/WORKTREE/g, WT + s.key)}\nWORKTREE = ${WT}${s.key} (branch wt/${s.key}).\nYOUR SCOPE: ${s.scope}`, { label: s.key, phase: 'Fix', schema: RESULT, model: 'opus' })))
