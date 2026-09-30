@@ -20,3 +20,5 @@
 ## M4
 - Tasks 14, 15 merged (CheckRunner + arc/order/gaps/render, remarks + checks routes, brief/checks screen, post-its on main). Architect: `checks` injectable through buildApp (null in tests so no real SDK query starts on accept). Verified: 218 → 236 tests green after the M2 review fixes merged (host/origin guard 403, interrupt generation counter + await on close, stale session retry, thumb.failed for lane previews, lane cells on explicit columns, coalesced events, reconnect resync).
 - Running: M5 implementation, M3+M4 review, M4 persona, real e2e (smoke + checks).
+## M5
+- Tasks 16, 17 merged (history diff/restore/open-as-lane, history screen). Verified: 252 tests green (excluding a verifier's stray throwaway test), `DECKSTUDIO_E2E=1 pnpm e2e` green (smoke + gaps check on the SF deck).
