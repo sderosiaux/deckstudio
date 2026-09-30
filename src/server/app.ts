@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { CheckRunner } from '../agent/checks/runner.js';
 import { makeImageGen } from '../agent/imageGen.js';
 import { AgentSession } from '../agent/session.js';
 import { makeDeckTools } from '../agent/tools.js';
@@ -35,16 +36,13 @@ export interface BuildAppOptions {
   agent?: AgentSession;
 }
 
-function defaultAgent(store: DeckStore, thumbs: ThumbService, bus: Bus, model: string): AgentSession {
+function defaultAgent(store: DeckStore, thumbs: ThumbService, bus: Bus, model: string, checks: CheckRunner): AgentSession {
   const tools = makeDeckTools({
     store,
     thumbs,
     bus,
     imageGen: makeImageGen(join(store.dir, 'assets')),
-    // Wired by the check runner (Task 14).
-    runCheck: async (name) => {
-      throw new Error(`checks are not available yet in this deckstudio build (asked for "${name}")`);
-    },
+    runCheck: async (name) => checks.trigger(name),
   });
   return new AgentSession({ store, tools, bus, model, deckDir: store.dir });
 }
@@ -69,6 +67,13 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   thumbRoutes(app, store, opts.thumbs, bus);
   presentRoutes(app, store);
   laneRoutes(app, store, new LaneService(store, bus), opts.thumbs, bus);
-  threadRoutes(app, store, opts.agent ?? defaultAgent(store, opts.thumbs, bus, (await store.state()).model));
+  const model = (await store.state()).model;
+  const checks = new CheckRunner({ store, thumbs: opts.thumbs, bus, model });
+  bus.on('deck.changed', () => checks.scheduleAfterAccept());
+  bus.on('lane.created', (e) => {
+    if (e.type === 'lane.created') checks.scheduleAfterLane(e.laneId);
+  });
+  app.addHook('onClose', async () => checks.dispose());
+  threadRoutes(app, store, opts.agent ?? defaultAgent(store, opts.thumbs, bus, model, checks));
   return app;
 }
