@@ -1,4 +1,4 @@
-import type { Anchor, Brief, DeckState, Lane, Remark, Slide, SlideId, ThreadKey, ThreadMessage, Version } from '../../src/model/types.js';
+import type { Anchor, Brief, DeckState, DiffEntry, Lane, Remark, Slide, SlideId, Snapshot, ThreadKey, ThreadMessage, Version } from '../../src/model/types.js';
 import type { BusEvent as ServerBusEvent } from '../../src/server/bus.js';
 import type { CheckName, ChecksStatus } from '../../src/server/routes/checks.js';
 
@@ -172,6 +172,33 @@ export function getChecksStatus(): Promise<ChecksStatus> {
   return getJson<ChecksStatus>('/api/checks/status');
 }
 
+/** What `GET /api/history/diff` answers: the entries that turn version `a` into version `b`. */
+export interface HistoryDiff {
+  a: number;
+  b: number;
+  entries: DiffEntry[];
+}
+
+/** Main as it was at version `n`. */
+export function getVersionSnapshot(n: number): Promise<Snapshot> {
+  return getJson<Snapshot>(`/api/versions/${n}`);
+}
+
+export function getHistoryDiff(a: number, b: number): Promise<HistoryDiff> {
+  return getJson<HistoryDiff>(`/api/history/diff?a=${a}&b=${b}`);
+}
+
+/** Undoes one entry of the diff from version `from` onto current main; the server records a `restore` version. */
+export async function restoreEntry(from: number, entry: DiffEntry): Promise<void> {
+  await send('POST', '/api/history/restore', { from, entry });
+}
+
+/** Proposes, as a user lane, the changes that bring current main back to version `n`. */
+export async function openVersionAsLane(n: number): Promise<Lane> {
+  const res = await send('POST', '/api/history/open-as-lane', { n });
+  return (await res.json()) as Lane;
+}
+
 /** The lane-related calls, grouped so components can take them as an injectable dependency. */
 export interface LaneApi {
   acceptChange(laneId: string, changeId: string): Promise<unknown>;
@@ -213,11 +240,23 @@ export interface BriefChecksApi {
   thumbFor(slideId: SlideId): Promise<ThumbStatus>;
 }
 
+/** Everything the history screen reads and writes, injectable for tests. */
+export interface HistoryApi {
+  getDeck(): Promise<DeckPayload>;
+  getVersions(): Promise<Version[]>;
+  getVersionSnapshot(n: number): Promise<Snapshot>;
+  getHistoryDiff(a: number, b: number): Promise<HistoryDiff>;
+  restoreEntry(from: number, entry: DiffEntry): Promise<void>;
+  openVersionAsLane(n: number): Promise<Lane>;
+  thumbFor(slideId: SlideId): Promise<ThumbStatus>;
+}
+
 export const laneApi: LaneApi = { acceptChange, refuseChange, discardLane };
 export const threadApi: ThreadApi = { getThread, postMessage };
 export const focusApi: FocusApi = { getDeck, getLane, getLanePreview, thumbFor, acceptChange, refuseChange, getThread, postMessage };
 export const remarkApi: RemarkApi = { proposeRemark, resolveRemark };
 export const briefChecksApi: BriefChecksApi = { getDeck, getBrief, putBrief, getRemarks, proposeRemark, runChecks, getChecksStatus, getLanes, thumbFor };
+export const historyApi: HistoryApi = { getDeck, getVersions, getVersionSnapshot, getHistoryDiff, restoreEntry, openVersionAsLane, thumbFor };
 
 /** Client-side routes. The server answers index.html for any non-API path, so these also work on reload. */
 export function focusPath(laneId: string, changeId: string): string {
@@ -241,6 +280,7 @@ export function selectionFromSearch(search: string): Anchor | null {
 }
 
 export const BRIEF_PATH = '/brief';
+export const HISTORY_PATH = '/history';
 
 /** Changes the screen without a page load; App listens to popstate. */
 export function navigate(path: string): void {
