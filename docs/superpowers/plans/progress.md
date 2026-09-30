@@ -30,3 +30,6 @@
 - README written. Running: M5 persona.
 - M5 persona (history): 10 frictions (findings.md); six fixed (one Retry path for deck+lanes+remarks with no false empty state; restore verbs per entry kind and the empty-version guard; open-as-lane disabled when main already equals vA; "back to vN" lanes scrolled into view from history; ghost slots in the older row + ink selection ring; version chips link to /history?a&b). Verified: 319 tests green.
 - M5 complete.
+## M6
+- Deck-loop on the tool screens: targets from the three mockups, rounds 1–5 fixed on main (commits "M6 round N"), scores 2.5 → 4.5 → 5.5 → 6.5 → 7.2; a fresh judge on the round-5 captures gave 7.6 then 8.0 → exit. Ledger layout (gutter, shared column grid, +N row ends, white pinned remark cards, inset focus frames, history pair + rail). Verified: 328 tests green, app rebuilt and serving the SF deck.
+- M6 complete. All six milestones merged on main; worktrees pruned.
