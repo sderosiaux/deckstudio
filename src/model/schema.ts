@@ -51,6 +51,7 @@ export const RemarkSchema = z.object({
   severity: z.enum(['info', 'warn']),
   status: z.enum(['open', 'resolved']),
   laneId: z.string().nullable(),
+  sourceLaneId: z.string().nullable().optional(),
   createdAt: z.string(),
 });
 export const VersionCauseSchema = z.discriminatedUnion('kind', [

@@ -62,7 +62,10 @@ export interface Remark {
   origin: Origin;
   severity: 'info' | 'warn';
   status: 'open' | 'resolved';
+  /** Lane the creator asked to propose from this remark (link_remark_lane), if any. */
   laneId: string | null;
+  /** Set when the remark was produced by a lane-scoped check run: it describes the lane's preview, not main. */
+  sourceLaneId?: string | null;
   createdAt: string;
 }
 
