@@ -17,3 +17,6 @@
 ## M3
 - Tasks 12, 13 merged (focus screen, local thread routing). Verified: 191 tests green.
 - Persona M2 (real UI via agent-browser): scenario completed. Top frictions fixed: (1) proposed slide unreadable → focus screen from M3; (2) version chips with internal ids → human labels from /api/versions; (3) co-author replied in French to English, raw markdown, pixel jargon → reply rules in SYSTEM_APPEND, inline markdown + plain tool names in the thread. Remaining minor frictions logged in review-m2-persona (see findings.md).
+## M4
+- Tasks 14, 15 merged (CheckRunner + arc/order/gaps/render, remarks + checks routes, brief/checks screen, post-its on main). Architect: `checks` injectable through buildApp (null in tests so no real SDK query starts on accept). Verified: 218 → 236 tests green after the M2 review fixes merged (host/origin guard 403, interrupt generation counter + await on close, stale session retry, thumb.failed for lane previews, lane cells on explicit columns, coalesced events, reconnect resync).
+- Running: M5 implementation, M3+M4 review, M4 persona, real e2e (smoke + checks).
