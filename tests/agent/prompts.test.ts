@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { contextHeader, SYSTEM_APPEND } from '../../src/agent/prompts.js';
 import type { Brief, Lane, Remark, Slide, Snapshot } from '../../src/model/types.js';
 
-const brief: Brief = { title: 'Deck', audience: 'devs', message: 'one log', pattern: 'solution-first', abstract: 'abs' };
+const brief: Brief = { title: 'Deck', audience: 'devs', message: 'one log', pattern: 'solution-first', abstract: 'abs', design: { rules: '', imageStyle: '' } };
 const slide = (id: string): Slide => ({ id, title: `Title ${id}`, story: `story of ${id}`, notes: '', body: `<p>${id}</p>`, assets: [], kind: 'text' });
 const five = ['s1', 's2', 's3', 's4', 's5'].map(slide);
 const snapshot: Snapshot = { order: five.map((s) => s.id), slides: Object.fromEntries(five.map((s) => [s.id, s])) };

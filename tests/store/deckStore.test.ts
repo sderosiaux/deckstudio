@@ -6,7 +6,7 @@ import { hashSlide } from '../../src/model/ids.js';
 import type { Brief, Lane, Remark, Slide, Snapshot, ThreadMessage, Version } from '../../src/model/types.js';
 import { tmpDir } from '../helpers/tmp.js';
 
-const brief: Brief = { title: 'T', audience: 'devs', message: 'm', pattern: 'problem-driven', abstract: 'a' };
+const brief: Brief = { title: 'T', audience: 'devs', message: 'm', pattern: 'problem-driven', abstract: 'a', design: { rules: '', imageStyle: '' } };
 const slide = (id: string, title = id): Slide => ({ id, title, story: '', notes: '', body: `<p>${title}</p>`, assets: [], kind: 'text' });
 const snap = (...slides: Slide[]): Snapshot => ({ order: slides.map((s) => s.id), slides: Object.fromEntries(slides.map((s) => [s.id, s])) });
 const exists = (p: string) => access(p).then(() => true, () => false);

@@ -20,7 +20,7 @@ const order: SlideId[] = ['s1', 's2', 's3', 's4', 's5'];
 const slides: Record<SlideId, Slide> = Object.fromEntries(order.map((id) => [id, slide(id)]));
 const deckOf = (s: Record<SlideId, Slide> = slides, version = 3): DeckPayload => ({
   state: { name: 'd', order, version, sessionId: null, model: 'm' },
-  brief: { title: 'Deck', audience: '', message: '', pattern: 'problem-driven', abstract: '' },
+  brief: { title: 'Deck', audience: '', message: '', pattern: 'problem-driven', abstract: '', design: { rules: '', imageStyle: '' } },
   order,
   slides: s,
 });

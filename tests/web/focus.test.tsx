@@ -29,7 +29,7 @@ const lane = (changes: Change[] = [c1, c2, c3, c4, c5]): Lane => ({
 
 const deck: DeckPayload = {
   state: { name: 'd', order, version: 3, sessionId: null, model: 'm' },
-  brief: { title: 'Deck', audience: '', message: '', pattern: 'problem-driven', abstract: '' },
+  brief: { title: 'Deck', audience: '', message: '', pattern: 'problem-driven', abstract: '', design: { rules: '', imageStyle: '' } },
   order,
   slides: mainSlides,
 };

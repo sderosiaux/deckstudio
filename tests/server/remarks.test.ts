@@ -16,7 +16,7 @@ import { tmpDir } from '../helpers/tmp.js';
 import { waitFor } from '../helpers/waitFor.js';
 import { themeCss } from '../render/themeCss.js';
 
-const brief: Brief = { title: 'Deck', audience: 'devs', message: 'one log', pattern: 'solution-first', abstract: 'abs' };
+const brief: Brief = { title: 'Deck', audience: 'devs', message: 'one log', pattern: 'solution-first', abstract: 'abs', design: { rules: '', imageStyle: '' } };
 const slide = (id: string): Slide => ({ id, title: `Title ${id}`, story: '', notes: '', body: `<p>body ${id}</p>`, assets: [], kind: 'text' });
 const five = ['s1', 's2', 's3', 's4', 's5'].map(slide);
 const snap = (slides: Slide[]): Snapshot => ({ order: slides.map((s) => s.id), slides: Object.fromEntries(slides.map((s) => [s.id, s])) });

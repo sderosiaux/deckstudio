@@ -19,6 +19,15 @@ export interface Brief {
   message: string;
   pattern: 'solution-first' | 'problem-driven';
   abstract: string;
+  /** The creator's design rules: what every slide the co-author creates or modifies must respect. */
+  design: DesignRules;
+}
+
+export interface DesignRules {
+  /** Free text: typography, palette, layout, what is banned (bullet lists, sentences under visuals, ...). */
+  rules: string;
+  /** Prefix prepended to every image generation prompt; empty means the built-in flat keynote style. */
+  imageStyle: string;
 }
 
 export interface DeckState {

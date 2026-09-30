@@ -13,7 +13,7 @@ import { tmpDir } from '../helpers/tmp.js';
 import { waitFor } from '../helpers/waitFor.js';
 import { themeCss } from '../render/themeCss.js';
 
-const brief: Brief = { title: 'Deck', audience: 'devs', message: 'one log', pattern: 'solution-first', abstract: 'abs' };
+const brief: Brief = { title: 'Deck', audience: 'devs', message: 'one log', pattern: 'solution-first', abstract: 'abs', design: { rules: '', imageStyle: '' } };
 const slide = (id: string): Slide => ({ id, title: `Title ${id}`, story: `story of ${id}`, notes: `notes of ${id}`, body: `<p>body ${id}</p>`, assets: [], kind: 'text' });
 const three = ['s1', 's2', 's3'].map(slide);
 const snap: Snapshot = { order: three.map((s) => s.id), slides: Object.fromEntries(three.map((s) => [s.id, s])) };

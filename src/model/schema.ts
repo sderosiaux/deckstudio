@@ -18,6 +18,8 @@ export const BriefSchema = z.object({
   message: z.string(),
   pattern: z.enum(['solution-first', 'problem-driven']),
   abstract: z.string(),
+  // Defaulted so brief.json files written before design rules existed still load.
+  design: z.object({ rules: z.string().default(''), imageStyle: z.string().default('') }).default({ rules: '', imageStyle: '' }),
 });
 export const AnchorSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('slide'), slide: z.string().min(1) }),

@@ -29,7 +29,7 @@ const version = (n: number): Version & { label: string } => ({
 const latest = snaps[3]!;
 const deck: DeckPayload = {
   state: { name: 'demo', order: latest.order, version: 3, sessionId: null, model: 'm' },
-  brief: { title: 't', audience: 'a', message: 'm', pattern: 'solution-first', abstract: 'x' },
+  brief: { title: 't', audience: 'a', message: 'm', pattern: 'solution-first', abstract: 'x', design: { rules: '', imageStyle: '' } },
   order: latest.order,
   slides: latest.slides,
 };

@@ -53,7 +53,7 @@ const slide = (id: string, title = `Title ${id}`): Slide => ({ id, title, story:
 const order: SlideId[] = ['s1', 's2', 's3', 's4', 's5'];
 const deckV = (version: number, slides: Record<SlideId, Slide>): DeckPayload => ({
   state: { name: 'd', order, version, sessionId: null, model: 'm' },
-  brief: { title: 'Deck', audience: '', message: '', pattern: 'problem-driven', abstract: '' },
+  brief: { title: 'Deck', audience: '', message: '', pattern: 'problem-driven', abstract: '', design: { rules: '', imageStyle: '' } },
   order,
   slides,
 });

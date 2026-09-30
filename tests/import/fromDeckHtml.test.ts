@@ -9,7 +9,7 @@ import type { Brief, Snapshot, VersionCause } from '../../src/model/types.js';
 import { tmpDir } from '../helpers/tmp.js';
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
-const brief: Brief = { title: 'T', audience: 'A', message: 'M', pattern: 'solution-first', abstract: 'Abs' };
+const brief: Brief = { title: 'T', audience: 'A', message: 'M', pattern: 'solution-first', abstract: 'Abs', design: { rules: '', imageStyle: '' } };
 
 describe('importDeckHtml', () => {
   let out: { dir: string; cleanup: () => Promise<void> };

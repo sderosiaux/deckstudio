@@ -9,7 +9,7 @@ import { waitFor } from '../helpers/waitFor.js';
 
 const slide = (id: string): Slide => ({ id, title: `Title ${id}`, story: '', notes: '', body: '<p>x</p>', assets: [], kind: 'text' });
 const order: SlideId[] = ['s1', 's2', 's3', 's4', 's5', 's6'];
-const brief: Brief = { title: 'From Prompts to Products', audience: 'Product teams', message: 'AI can help.', pattern: 'solution-first', abstract: 'abs' };
+const brief: Brief = { title: 'From Prompts to Products', audience: 'Product teams', message: 'AI can help.', pattern: 'solution-first', abstract: 'abs', design: { rules: '', imageStyle: '' } };
 const deck: DeckPayload = {
   state: { name: 'demo', order, version: 2, sessionId: null, model: 'm' },
   brief,
