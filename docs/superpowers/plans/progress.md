@@ -12,3 +12,5 @@
 - Wave A (Tasks 8, 9): done, merged. Verified: 134 tests green. Notes: tools ctx has runCheck; link_remark_lane added; lane preview returns thumbs map for changed slides; orphan-only lanes get closed (open question for the UI).
 - M1 fixes: three agents (security / store+model / render) merged; one import conflict in theme.ts resolved. Verified: `pnpm typecheck && pnpm test` → 159 tests green; /fonts served; CSP on /api/present; thumbnails re-rendered with vendored fonts.
 - M1 complete.
+- Wave B (Tasks 10, 11): done, merged (conflicts in app.ts imports and Main.tsx resolved, failed-thumb retry kept). Verified: 178 tests green; `DECKSTUDIO_E2E=1 pnpm e2e` green (real SDK: lane proposed on slides 1–6, one insert accepted → v2, 30 slides, thumb rendered, 59 s).
+- Architect: allowedTools shadowing hole closed (Bash was auto-approved, bypassing the write guard); imageGen wired (src/agent/imageGen.ts).

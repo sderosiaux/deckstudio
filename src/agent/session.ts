@@ -22,8 +22,13 @@ export interface AgentSessionOptions {
   queryImpl?: typeof query;
 }
 
-/** Tools the co-author may use without a prompt, besides the deck tools. Writes stay gated by canUseTool. */
-const BUILTIN_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch'];
+/**
+ * Only the deck tools are pre-approved. Built-in tools (Read, Bash, Write...) are deliberately NOT in
+ * allowedTools: a bare allowedTools entry auto-approves the tool before canUseTool is consulted, which
+ * would bypass the deck-folder write guard. They fall through to canUseTool, which allows reads and
+ * denies writes under the deck folder.
+ */
+const BUILTIN_TOOLS: string[] = [];
 const MAX_TURNS = 40;
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));

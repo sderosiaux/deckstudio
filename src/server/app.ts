@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { makeImageGen } from '../agent/imageGen.js';
 import { AgentSession } from '../agent/session.js';
 import { makeDeckTools } from '../agent/tools.js';
 import { FONTS_DIR } from '../render/theme.js';
@@ -39,10 +40,7 @@ function defaultAgent(store: DeckStore, thumbs: ThumbService, bus: Bus, model: s
     store,
     thumbs,
     bus,
-    // Not wired yet: the tool returns this message to the model instead of pretending an image exists.
-    imageGen: async () => {
-      throw new Error('image generation is not configured in this deckstudio build; compose the body in HTML instead');
-    },
+    imageGen: makeImageGen(join(store.dir, 'assets')),
     // Wired by the check runner (Task 14).
     runCheck: async (name) => {
       throw new Error(`checks are not available yet in this deckstudio build (asked for "${name}")`);

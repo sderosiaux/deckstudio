@@ -127,7 +127,10 @@ describe('AgentSession', () => {
     expect(opts.systemPrompt).toMatchObject({ type: 'preset', preset: 'claude_code' });
     expect(opts.settingSources).toEqual(['user', 'project']);
     expect(opts.mcpServers?.['deck']).toBe(tools.server);
-    expect(opts.allowedTools).toEqual(expect.arrayContaining([...tools.allowedTools, 'Read', 'Bash', 'WebSearch']));
+    // Only deck tools are pre-approved: a bare 'Bash' in allowedTools would skip canUseTool (SDK shadowing).
+    expect(opts.allowedTools).toEqual(tools.allowedTools);
+    expect(opts.allowedTools).not.toContain('Bash');
+    expect(typeof opts.canUseTool).toBe('function');
     expect(opts.includePartialMessages).toBe(true);
     expect(opts.abortController).toBeInstanceOf(AbortController);
 
