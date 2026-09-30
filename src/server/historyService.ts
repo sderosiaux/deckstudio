@@ -77,7 +77,7 @@ export class HistoryService {
       if (changes.length === 0) throw new HistoryError(409, `main already equals v${n}`);
       const lane: Lane = {
         id: newId('l'),
-        label: `v${n}`,
+        label: `back to v${n}`,
         anchor: { kind: 'arc' },
         origin: 'user',
         baseVersion: state.version,

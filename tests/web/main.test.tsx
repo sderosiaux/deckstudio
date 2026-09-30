@@ -199,6 +199,72 @@ describe('Main', () => {
   });
 });
 
+describe('Main load failures', () => {
+  const EMPTY = /No open lanes/;
+
+  it('a failed lanes fetch shows an error line instead of the empty state, and Retry fetches the lanes again', async () => {
+    m.getLanes.mockImplementation(async (status?: string) => {
+      if (status === undefined) throw new Error('GET /api/lanes failed: 500 boom');
+      return [];
+    });
+    render(<Main />);
+    const line = await waitFor(() => screen.queryByText(/Lanes: GET \/api\/lanes failed: 500 boom/));
+    expect(screen.queryByText(EMPTY)).toBeNull();
+    const before = openListCalls();
+    m.getLanes.mockImplementation(async (status?: string) => (status === undefined ? lanes : []));
+    fireEvent.click(within(line.parentElement!).getByRole('button', { name: 'Retry' }));
+    await waitFor(() => screen.queryAllByTestId('lane-row').length === 2);
+    expect(openListCalls()).toBe(before + 1);
+    expect(screen.queryByText(/Lanes:/)).toBeNull();
+  });
+
+  it('a failed remarks fetch shows its error line with a Retry that reloads deck, lanes and remarks', async () => {
+    m.getRemarks.mockRejectedValue(new Error('GET /api/remarks failed: 500 nope'));
+    render(<Main />);
+    const line = await waitFor(() => screen.queryByText(/Remarks: GET \/api\/remarks failed: 500 nope/));
+    const calls = { deck: m.getDeck.mock.calls.length, lanes: openListCalls(), remarks: m.getRemarks.mock.calls.length };
+    m.getRemarks.mockResolvedValue([]);
+    fireEvent.click(within(line.parentElement!).getByRole('button', { name: 'Retry' }));
+    await waitFor(() => screen.queryByText(/Remarks:/) === null);
+    expect(m.getDeck.mock.calls.length).toBe(calls.deck + 1);
+    expect(openListCalls()).toBe(calls.lanes + 1);
+    expect(m.getRemarks.mock.calls.length).toBe(calls.remarks + 1);
+  });
+
+  it('Retry after a failed deck load reloads deck, lanes and remarks', async () => {
+    m.getDeck.mockRejectedValueOnce(new Error('Failed to fetch'));
+    render(<Main />);
+    await waitFor(() => screen.queryByText('Could not load the deck.'));
+    const lanesBefore = openListCalls();
+    const remarksBefore = m.getRemarks.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => screen.queryAllByTestId('lane-row').length === 2);
+    expect(m.getDeck.mock.calls.length).toBe(2);
+    expect(openListCalls()).toBe(lanesBefore + 1);
+    expect(m.getRemarks.mock.calls.length).toBe(remarksBefore + 1);
+  });
+});
+
+describe('Main lane from history', () => {
+  afterEach(() => {
+    history.replaceState(null, '', '/');
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it('with #lane=<id>, scrolls that lane row into view once it is shown, then drops the hash', async () => {
+    history.replaceState(null, '', '/#lane=l2');
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    render(<Main />);
+    await waitFor(() => screen.queryAllByTestId('lane-row').length === 2);
+    await waitFor(() => scrolled.mock.calls.length > 0);
+    const target = scrolled.mock.contexts.find((el) => el instanceof HTMLElement && el.getAttribute('data-testid') === 'lane-row') as HTMLElement;
+    expect(target.getAttribute('data-lane')).toBe('l2');
+    expect(target.id).toBe('lane-row-l2');
+    expect(location.hash).toBe('');
+  });
+});
+
 describe('Main remarks', () => {
   it('an open slide remark sits under its column, a range remark spans its columns; resolved ones are gone after remarks.changed', async () => {
     m.getRemarks.mockResolvedValue([
