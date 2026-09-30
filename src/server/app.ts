@@ -5,8 +5,10 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { ThumbService } from '../render/thumbs.js';
 import { DeckStore } from '../store/deckStore.js';
 import { Bus } from './bus.js';
+import { LaneService } from './laneService.js';
 import { briefRoutes } from './routes/brief.js';
 import { deckRoutes } from './routes/deck.js';
+import { laneRoutes } from './routes/lanes.js';
 import { presentRoutes } from './routes/present.js';
 import { slideRoutes } from './routes/slides.js';
 import { thumbRoutes } from './routes/thumbs.js';
@@ -43,5 +45,6 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   briefRoutes(app, store);
   thumbRoutes(app, store, opts.thumbs, bus);
   presentRoutes(app, store);
+  laneRoutes(app, store, new LaneService(store, bus), opts.thumbs, bus);
   return app;
 }
