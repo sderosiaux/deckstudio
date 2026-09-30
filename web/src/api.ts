@@ -41,6 +41,19 @@ export interface LanePreviewPayload {
   thumbs: Record<SlideId, ThumbStatus>;
 }
 
+/** A non-2xx answer. `status` and the server's own `detail` let a screen word the error for a person. */
+export class ApiError extends Error {
+  constructor(
+    readonly method: string,
+    readonly path: string,
+    readonly status: number,
+    readonly detail: string,
+  ) {
+    super(`${method} ${path} failed: ${status} ${detail}`);
+    this.name = 'ApiError';
+  }
+}
+
 /** The server answers errors as `{ error }`; surface that message rather than the bare status. */
 async function failure(method: string, path: string, res: Response): Promise<Error> {
   let detail = res.statusText;
@@ -50,7 +63,7 @@ async function failure(method: string, path: string, res: Response): Promise<Err
   } catch {
     // body was not JSON: keep the status text
   }
-  return new Error(`${method} ${path} failed: ${res.status} ${detail}`);
+  return new ApiError(method, path, res.status, detail);
 }
 
 async function getJson<T>(path: string): Promise<T> {
@@ -289,6 +302,30 @@ export function selectionFromSearch(search: string): Anchor | null {
 
 export const BRIEF_PATH = '/brief';
 export const HISTORY_PATH = '/history';
+
+/** History comparing v<a> with v<b>; the history screen reads `?a=&b=` on mount. */
+export function historyPath(a: number, b: number): string {
+  return `${HISTORY_PATH}?a=${a}&b=${b}`;
+}
+
+/** Reads what `historyPath` wrote; null unless both are version numbers. */
+export function pairFromSearch(search: string): { a: number; b: number } | null {
+  const q = new URLSearchParams(search);
+  const a = q.get('a');
+  const b = q.get('b');
+  if (a === null || b === null || !/^\d+$/.test(a) || !/^\d+$/.test(b)) return null;
+  return { a: Number(a), b: Number(b) };
+}
+
+/** Main scrolled to one lane: `/#lane=<laneId>`. A hash, so main's `?select=` cleanup does not race it. */
+export function laneOnMainPath(laneId: string): string {
+  return `/#lane=${seg(laneId)}`;
+}
+
+/** Reads what `laneOnMainPath` wrote. */
+export function laneFromHash(hash: string): string | null {
+  return new URLSearchParams(hash.replace(/^#/, '')).get('lane') || null;
+}
 
 /** Changes the screen without a page load; App listens to popstate. */
 export function navigate(path: string): void {

@@ -164,7 +164,7 @@ describe('history API', () => {
     expect(res.statusCode).toBe(200);
     const { laneId } = res.json() as { laneId: string };
     const lane = (await store.lane(laneId)) as Lane;
-    expect(lane).toMatchObject({ label: 'v1', origin: 'user', anchor: { kind: 'arc' }, baseVersion: 3, status: 'open' });
+    expect(lane).toMatchObject({ label: 'back to v1', origin: 'user', anchor: { kind: 'arc' }, baseVersion: 3, status: 'open' });
     expect(lane.changes.map((c) => c.kind).sort()).toEqual(['insert', 'modify', 'move', 'remove']);
     expect(lane.changes.every((c) => c.status === 'pending')).toBe(true);
     expect(events).toContainEqual({ type: 'lane.created', laneId });
@@ -174,6 +174,9 @@ describe('history API', () => {
     const main = await store.snapshot();
     expect(contentOf(main)).toEqual(contentOf(await store.snapshotAt(1)));
     expect((await store.lane(laneId))!.status).toBe('closed');
+    // The version line names the lane as-is: "<what changed> · back to v1", not a bare "· v1".
+    const versions = (await app.inject({ method: 'GET', url: '/api/versions' })).json() as Array<{ label: string }>;
+    expect(versions[versions.length - 1]!.label).toMatch(/ · back to v1$/);
   });
 
   it('open-as-lane reproduces an arbitrary reshuffle through the HTTP accept route', async () => {

@@ -210,7 +210,7 @@ export function LaneRow({
   };
 
   return (
-    <div data-testid="lane-row" data-lane={lane.id} style={{ display: 'flex', alignItems: 'flex-start' }}>
+    <div id={`lane-row-${lane.id}`} data-testid="lane-row" data-lane={lane.id} style={{ display: 'flex', alignItems: 'flex-start' }}>
       <div style={{ width: 120, flex: '0 0 120px' }} />
       <div
         data-testid="lane-grid"

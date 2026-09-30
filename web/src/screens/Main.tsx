@@ -10,6 +10,7 @@ import {
   getRemarks,
   getVersions,
   laneApi,
+  laneFromHash,
   navigate,
   openLane,
   remarkApi,
@@ -96,6 +97,10 @@ export function Main() {
   // Lane preview thumb hashes the server failed to render.
   const [failedLaneThumbs, setFailedLaneThumbs] = useState<ReadonlySet<string>>(new Set());
   const [laneError, setLaneError] = useState<string | null>(null);
+  // The lane list itself could not be fetched: its error replaces the list (an empty state would claim "no lanes").
+  const [lanesFailed, setLanesFailed] = useState<string | null>(null);
+  // `/#lane=<id>` (a lane just opened from the history): scroll that row into view once it is on screen.
+  const scrollLane = useRef<string | null>(laneFromHash(location.hash));
   // Latest request per lane (preview, and lane metadata), so a slow response never overwrites a newer one
   // or resurrects a closed lane. `laneEpoch` does the same for the full list.
   const laneGen = useRef(new Map<string, number>());
@@ -186,12 +191,13 @@ export function Main() {
       setLanes(open);
       setDrafts(new Set(draft.map((l) => l.id)));
       setLaneError(null);
+      setLanesFailed(null);
       const ids = new Set(open.map((l) => l.id));
       setPreviews((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => ids.has(id))));
       await Promise.all(open.map((l) => refreshPreview(l.id)));
     } catch (err) {
       if (laneEpoch.current !== epoch) return;
-      setLaneError(errText(err));
+      setLanesFailed(errText(err));
     }
   }, [refreshPreview]);
 
@@ -255,6 +261,13 @@ export function Main() {
     }
   }, [refreshThumb]);
 
+  /** The one reload path behind every Retry: deck, lanes and remarks together. */
+  const reloadAll = useCallback(() => {
+    void reload();
+    void reloadLanes();
+    void reloadRemarks();
+  }, [reload, reloadLanes, reloadRemarks]);
+
   const flush = useCallback(() => {
     timer.current = null;
     const q = queued.current;
@@ -278,9 +291,7 @@ export function Main() {
   );
 
   useEffect(() => {
-    void reload();
-    void reloadLanes();
-    void reloadRemarks();
+    reloadAll();
     // The selection is now in state; a later reload should not re-apply a stale query.
     if (location.search) history.replaceState(null, '', location.pathname);
     let opens = 0;
@@ -364,7 +375,7 @@ export function Main() {
       timer.current = null;
       queued.current = emptyQueue();
     };
-  }, [reload, reloadLanes, reloadRemarks, refreshThumb, schedule]);
+  }, [reloadAll, reloadRemarks, refreshThumb, schedule]);
 
   useEffect(() => {
     if (load.status !== 'ready' || !scrollTo.current) return;
@@ -372,6 +383,15 @@ export function Main() {
     scrollTo.current = null;
     el?.scrollIntoView?.({ block: 'nearest', inline: 'center' });
   }, [load.status]);
+
+  useEffect(() => {
+    const id = scrollLane.current;
+    if (!id || !lanes.some((l) => l.id === id)) return;
+    scrollLane.current = null;
+    document.getElementById(`lane-row-${id}`)?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+    // Done with the hash: a reload of main should not jump back to that lane.
+    history.replaceState(null, '', location.pathname + location.search);
+  }, [lanes]);
 
   const select = useCallback((id: SlideId) => {
     const extend = shift.current;
@@ -399,7 +419,7 @@ export function Main() {
       <div style={{ padding: 32 }}>
         <p style={{ color: 'var(--warn)', fontWeight: 700 }}>Could not load the deck.</p>
         <p className="muted mono">{load.message}</p>
-        <button type="button" onClick={() => void reload()}>Retry</button>
+        <button type="button" onClick={reloadAll}>Retry</button>
       </div>
     );
   }
@@ -489,10 +509,18 @@ export function Main() {
                     </div>
                   </div>
                 ) : null}
-                {remarkError ? <p style={{ margin: '6px 0 0 126px', color: 'var(--warn)', fontSize: 12 }}>Remarks: {remarkError}</p> : null}
+                {remarkError ? (
+                  <p style={{ margin: '6px 0 0 126px', color: 'var(--warn)', fontSize: 12 }}>
+                    <span>Remarks: {remarkError}</span> <button type="button" onClick={reloadAll}>Retry</button>
+                  </p>
+                ) : null}
               </div>
-              {laneError ? <p style={{ margin: 0, color: 'var(--warn)', fontSize: 12 }}>Lanes: {laneError}</p> : null}
-              {lanes.length === 0 ? (
+              {laneError && !lanesFailed ? <p style={{ margin: 0, color: 'var(--warn)', fontSize: 12 }}>Lanes: {laneError}</p> : null}
+              {lanesFailed ? (
+                <p role="alert" style={{ margin: '0 0 0 126px', color: 'var(--warn)', fontSize: 13 }}>
+                  <span>Lanes: {lanesFailed}</span> <button type="button" onClick={reloadAll}>Retry</button>
+                </p>
+              ) : lanes.length === 0 ? (
                 <p className="muted" style={{ margin: '0 0 0 126px', fontSize: 13 }}>
                   No open lanes. Ask the co-author in the thread; its proposals appear here, under the slides they touch.
                 </p>

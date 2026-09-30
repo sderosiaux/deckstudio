@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { DiffEntry, Slide, SlideId, Snapshot, Version } from '../../../src/model/types.js';
 import {
+  ApiError,
   historyApi,
+  laneOnMainPath,
   navigate as defaultNavigate,
+  pairFromSearch,
   subscribe as defaultSubscribe,
   thumbUrl,
   type BusEvent,
@@ -17,6 +20,8 @@ export interface HistoryProps {
   api?: HistoryApi;
   subscribe?(handler: (e: BusEvent) => void): () => void;
   navigate?(path: string): void;
+  /** The pair to compare first, when the versions exist; defaults to `?a=&b=` of the page URL. */
+  initialPair?: VersionPair | null;
 }
 
 interface Compared {
@@ -35,6 +40,14 @@ function defaultPair(versions: Version[]): VersionPair | null {
   if (last === undefined) return null;
   return { a: ns[ns.length - 2] ?? last, b: last };
 }
+
+/** What restoring an entry does to main, as the button says it. */
+export const RESTORE_VERB: Record<DiffEntry['kind'], string> = {
+  added: 'remove from main',
+  removed: 'bring back',
+  modified: 'revert content',
+  moved: 'move back',
+};
 
 const latestOf = (versions: Version[]): number | undefined => versions.reduce<number | undefined>((m, v) => (m === undefined || v.n > m ? v.n : m), undefined);
 
@@ -69,7 +82,7 @@ const secondary: CSSProperties = { padding: '6px 14px', borderRadius: 8, border:
 const chip: CSSProperties = { flex: '0 0 auto', padding: '3px 8px', borderRadius: 6, background: 'var(--paper)', border: '1px solid var(--line)', fontSize: 12, whiteSpace: 'nowrap' };
 
 /** Compare two versions of main: version line on top, the two filmstrips with diff marks, and what changed with restore. */
-export function History({ api = historyApi, subscribe = defaultSubscribe, navigate = defaultNavigate }: HistoryProps) {
+export function History({ api = historyApi, subscribe = defaultSubscribe, navigate = defaultNavigate, initialPair = pairFromSearch(location.search) }: HistoryProps) {
   const [versions, setVersions] = useState<Version[] | null>(null);
   const [deck, setDeck] = useState<DeckPayload | null>(null);
   const [pair, setPair] = useState<VersionPair | null>(null);
@@ -81,6 +94,9 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
   const [focused, setFocused] = useState<SlideId | undefined>(undefined);
   const [mainThumbs, setMainThumbs] = useState<Record<SlideId, ThumbStatus>>({});
   const [reload, setReload] = useState(0);
+  /** Whether main already has v<n>'s slides, from diff(current, n), keyed `${current}:${n}`. */
+  const [mainHas, setMainHas] = useState<Record<string, boolean>>({});
+  const firstPair = useRef(initialPair);
   const latest = useRef<number | undefined>(undefined);
   /** Thumbnail requests per slide; the token lets an answer for since-invalidated content be ignored. */
   const requested = useRef(new Map<SlideId, object>());
@@ -116,7 +132,12 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
       setVersions(vs);
       setLoadError(null);
       setPair((prev) => {
-        if (!prev) return defaultPair(vs);
+        if (!prev) {
+          const asked = firstPair.current;
+          firstPair.current = null;
+          const known = new Set(vs.map((v) => v.n));
+          return asked && known.has(asked.a) && known.has(asked.b) ? asked : defaultPair(vs);
+        }
         if (after !== undefined && prev.b === before && after !== before) return { a: prev.a, b: after };
         return prev;
       });
@@ -160,6 +181,26 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
     };
   }, [api, pair, reload]);
 
+  // "open vA as a lane" needs to know whether main already has vA's slides. When b is main, the loaded diff answers;
+  // otherwise diff(current, a) is asked once per (current, a).
+  const current = deck?.state.version;
+  const hasKey = pair && current !== undefined ? `${current}:${pair.a}` : null;
+  const needsCheck = pair !== null && current !== undefined && pair.a !== current && pair.b !== current && hasKey !== null && !(hasKey in mainHas);
+  useEffect(() => {
+    if (!needsCheck || !pair || current === undefined || !hasKey) return;
+    let live = true;
+    api.getHistoryDiff(current, pair.a).then(
+      (d) => {
+        if (live) setMainHas((prev) => ({ ...prev, [hasKey]: d.entries.length === 0 }));
+      },
+      // Unknown: the button stays enabled and the server answers if main already has those slides.
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [api, needsCheck, hasKey, current, pair]);
+
   // Slides whose content equals main's can borrow main's thumbnail; the others keep the title card.
   useEffect(() => {
     if (!compared || !deck) return;
@@ -189,18 +230,26 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
     // No reload here: the server announces the new main with deck.changed, which refreshes the screen once.
     api.restoreEntry(compared.pair.a, e).then(
       () => undefined,
-      (err: unknown) => setActionError(message(err)),
+      // The server's own sentence ("entry no longer applies: …"), not the HTTP line.
+      (err: unknown) => setActionError(err instanceof ApiError ? err.detail : message(err)),
     ).finally(() => setBusy(null));
   };
 
   const openAsLane = (): void => {
     if (!pair) return;
+    const n = pair.a;
     setBusy('lane');
     setActionError(null);
-    api.openVersionAsLane(pair.a).then(
-      () => navigate('/'),
+    api.openVersionAsLane(n).then(
+      ({ laneId }) => navigate(laneOnMainPath(laneId)),
       (err: unknown) => {
-        setActionError(message(err));
+        if (err instanceof ApiError && err.status === 409 && current !== undefined) {
+          // Main moved to v<n>'s slides since the check: say so and disable the button.
+          setMainHas((prev) => ({ ...prev, [`${current}:${n}`]: true }));
+          setActionError(`main already has v${n}'s slides`);
+        } else {
+          setActionError(err instanceof ApiError ? err.detail : message(err));
+        }
         setBusy(null);
       },
     );
@@ -226,6 +275,11 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
       }),
     );
   const shown = compared && pair && compared.pair.a === pair.a && compared.pair.b === pair.b ? compared : null;
+  const aIsMain =
+    pair !== null &&
+    (pair.a === deck.state.version ||
+      (pair.b === deck.state.version ? shown !== null && shown.entries.length === 0 : mainHas[`${deck.state.version}:${pair.a}`] === true));
+  const openDisabled = busy !== null || aIsMain;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -239,9 +293,9 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
           <button
             type="button"
             onClick={openAsLane}
-            disabled={busy !== null || pair.a === deck.state.version}
-            title={pair.a === deck.state.version ? `v${pair.a} is main already` : `Propose the changes that bring main back to v${pair.a}`}
-            style={{ ...primary, marginLeft: 'auto', opacity: busy !== null || pair.a === deck.state.version ? 0.6 : 1 }}
+            disabled={openDisabled}
+            title={aIsMain ? `main already has v${pair.a}'s slides` : `Propose the changes that bring main back to v${pair.a}`}
+            style={{ ...primary, marginLeft: 'auto', opacity: openDisabled ? 0.6 : 1 }}
           >
             open v{pair.a} as a lane
           </button>
@@ -275,11 +329,15 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
             <p className="muted" style={{ fontSize: 13 }}>Both sides are v{shown.pair.a}. Click another version to compare from it, or shift-click to compare to it.</p>
           ) : shown.entries.length === 0 ? (
             <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} and v{shown.pair.b} have the same slides in the same order.</p>
+          ) : shown.a.order.length === 0 ? (
+            // Every row would be a "remove from main": no per-row buttons for a restore that empties the deck.
+            <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} is empty: restoring would remove every slide</p>
           ) : (
             <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
               {shown.entries.map((e) => {
                 const key = `${e.kind}:${e.slide}`;
                 const d = describeEntry(e, shown);
+                const verb = RESTORE_VERB[e.kind];
                 return (
                   <li
                     key={key}
@@ -298,11 +356,11 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
                       type="button"
                       onClick={() => restore(e, key)}
                       disabled={busy !== null}
-                      aria-label={`restore ${d.where} as in v${shown.pair.a}`}
+                      aria-label={`${verb}: ${d.where}, as in v${shown.pair.a}`}
                       title={`Undo this on main, back to v${shown.pair.a}`}
-                      style={{ ...secondary, opacity: busy !== null ? 0.6 : 1 }}
+                      style={{ ...secondary, opacity: busy !== null ? 0.6 : 1, whiteSpace: 'nowrap' }}
                     >
-                      {busy === key ? 'restoring…' : 'restore'}
+                      {busy === key ? 'restoring…' : verb}
                     </button>
                   </li>
                 );

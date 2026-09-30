@@ -1,6 +1,6 @@
 import type { MouseEvent } from 'react';
 import type { Version, VersionCause } from '../../../src/model/types.js';
-import { HISTORY_PATH, navigate as defaultNavigate } from '../api.js';
+import { HISTORY_PATH, historyPath, navigate as defaultNavigate } from '../api.js';
 
 /** The two versions compared on the history screen: `a` is the reference, `b` the one diffed against it. */
 export interface VersionPair {
@@ -11,7 +11,10 @@ export interface VersionPair {
 export interface VersionLineProps {
   versions: Version[];
   current: number;
-  /** When set, versions are selectable: click picks `a`, shift-click picks `b`. Without it, the line links to the history screen. */
+  /**
+   * When set, versions are selectable: click picks `a`, shift-click picks `b`. Without it, every version links to the
+   * history screen comparing it with the current one (the current one opens the default comparison).
+   */
   selection?: VersionPair;
   onSelect?(n: number, which: keyof VersionPair): void;
   navigate?(path: string): void;
@@ -34,10 +37,10 @@ const ring = '0 0 0 2px var(--paper), 0 0 0 4px var(--accent)';
 export function VersionLine({ versions, current, selection, onSelect, navigate = defaultNavigate }: VersionLineProps) {
   const sorted = [...versions].sort((a, b) => a.n - b.n);
   const selectable = onSelect !== undefined;
-  const openHistory = (e: MouseEvent<HTMLAnchorElement>): void => {
+  const openHistory = (path: string) => (e: MouseEvent<HTMLAnchorElement>): void => {
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
     e.preventDefault();
-    navigate(HISTORY_PATH);
+    navigate(path);
   };
   return (
     <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, gap: 12 }}>
@@ -94,7 +97,14 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
                     {content}
                   </button>
                 ) : (
-                  <span style={pill}>{content}</span>
+                  <a
+                    href={isCurrent ? HISTORY_PATH : historyPath(v.n, current)}
+                    onClick={openHistory(isCurrent ? HISTORY_PATH : historyPath(v.n, current))}
+                    aria-label={isCurrent ? `v${v.n}, current: open the history` : `compare v${v.n} with v${current}`}
+                    style={{ ...pill, color: 'inherit', textDecoration: 'none', cursor: 'pointer' }}
+                  >
+                    {content}
+                  </a>
                 )}
               </li>
             );
@@ -102,7 +112,7 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
         </ol>
       )}
       {!selectable && sorted.length > 1 ? (
-        <a href={HISTORY_PATH} onClick={openHistory} data-testid="history-link" style={{ flex: '0 0 auto', fontSize: 12, fontWeight: 600, color: 'var(--accent)', textDecoration: 'none' }}>
+        <a href={HISTORY_PATH} onClick={openHistory(HISTORY_PATH)} data-testid="history-link" style={{ flex: '0 0 auto', fontSize: 12, fontWeight: 600, color: 'var(--accent)', textDecoration: 'none' }}>
           compare versions →
         </a>
       ) : null}
