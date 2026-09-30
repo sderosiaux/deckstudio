@@ -15,6 +15,7 @@ const m = vi.hoisted(() => ({
   getLanePreview: vi.fn(),
   thumbFor: vi.fn(),
   getRemarks: vi.fn(),
+  openPlayer: vi.fn(),
   proposeRemark: vi.fn(),
   resolveRemark: vi.fn(),
   getThread: vi.fn(),
@@ -33,6 +34,7 @@ vi.mock('../../web/src/api.js', async (importOriginal) => {
     getLanePreview: m.getLanePreview,
     thumbFor: m.thumbFor,
     getRemarks: m.getRemarks,
+    openPlayer: m.openPlayer,
     remarkApi: { proposeRemark: m.proposeRemark, resolveRemark: m.resolveRemark },
     threadApi: { getThread: m.getThread, postMessage: m.postMessage },
     laneApi: { acceptChange: vi.fn(), refuseChange: vi.fn(), discardLane: vi.fn() },
@@ -100,6 +102,7 @@ beforeEach(() => {
   m.proposeRemark.mockReset().mockResolvedValue(undefined);
   m.resolveRemark.mockReset().mockResolvedValue(undefined);
   m.getThread.mockReset().mockResolvedValue([]);
+  m.openPlayer.mockReset();
   m.postMessage.mockReset().mockResolvedValue(undefined);
 });
 afterEach(() => cleanup());
@@ -137,6 +140,13 @@ describe('Main', () => {
     const thumb = screen.getAllByTestId('thumb').find((t) => t.closest('[data-strip="main"]') && t.getAttribute('data-slide') === 's3');
     fireEvent.click(thumb ?? screen.getAllByTestId('thumb')[2]!);
     await waitFor(() => present().getAttribute('href') === '/api/present#3');
+  });
+
+  it('double-clicking a main slide opens the player on that slide', async () => {
+    await mounted();
+    const thumb = screen.getAllByTestId('thumb').find((t) => t.closest('[data-strip="main"]') && t.getAttribute('data-slide') === 's3')!;
+    fireEvent.doubleClick(thumb);
+    expect(m.openPlayer.mock.calls).toEqual([['/api/present#3']]);
   });
 
   it('after a deck.changed that modifies one slide, re-requests only that slide thumb; the others keep their URL', async () => {

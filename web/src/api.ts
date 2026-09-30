@@ -327,6 +327,16 @@ export function laneFromHash(hash: string): string | null {
   return new URLSearchParams(hash.replace(/^#/, '')).get('lane') || null;
 }
 
+/** Hands the tab to the standalone player (a full page load, so the browser's back button returns here). */
+export function openPlayer(href: string): void {
+  location.assign(href);
+}
+
+/** The player URL, opened on slide `index` (0-based) when known. */
+export function playerHref(index: number): string {
+  return index >= 0 ? `/api/present#${index + 1}` : '/api/present';
+}
+
 /** Changes the screen without a page load; App listens to popstate. */
 export function navigate(path: string): void {
   history.pushState(null, '', path);

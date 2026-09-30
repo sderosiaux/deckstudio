@@ -14,6 +14,8 @@ import {
   laneFromHash,
   navigate,
   openLane,
+  openPlayer,
+  playerHref,
   remarkApi,
   selectionFromSearch,
   subscribe,
@@ -485,8 +487,9 @@ export function Main() {
   const warnCount = mainRemarks.filter((r) => r.severity === 'warn').length;
   // The player opens on the selected slide (last of a range); Escape in the player comes back here with it selected.
   const presentSlide = context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : null;
-  const presentIndex = presentSlide ? deck.order.indexOf(presentSlide) : -1;
-  const presentHref = presentIndex >= 0 ? `/api/present#${presentIndex + 1}` : '/api/present';
+  const presentHref = playerHref(presentSlide ? deck.order.indexOf(presentSlide) : -1);
+  // Double-click on a main slide: present from it.
+  const presentFrom = (id: SlideId): void => openPlayer(playerHref(deck.order.indexOf(id)));
   const rangeCols = context.kind === 'range' ? selectedCols : null;
   const onSelect = (id: SlideId): void => {
     select(id);
@@ -542,6 +545,7 @@ export function Main() {
                     thumbs={shownThumbs}
                     selected={context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : undefined}
                     onSelect={onSelect}
+                    onOpen={presentFrom}
                   />
                   {rangeCols
                     ? gridRow(<div data-testid="range-selection" style={{ gridColumn: `${rangeCols.start + 1} / span ${rangeCols.span}`, height: 2, borderRadius: 1, background: 'var(--accent)' }} />)

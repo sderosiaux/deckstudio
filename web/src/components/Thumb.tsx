@@ -11,6 +11,8 @@ export interface ThumbProps {
   /** The slide number under the card (default). Lanes leave it out: their cells sit under main's numbered columns. */
   numbered?: boolean;
   onClick(): void;
+  /** Double-click: open this slide somewhere else (main uses it for the player). */
+  onDoubleClick?(): void;
 }
 
 const RINGS = {
@@ -36,7 +38,7 @@ const picture: CSSProperties = { width: '100%', height: '100%', display: 'block'
  * One slide in a strip: the rendered slide (a grey block until the PNG is ready), its number under it unless
  * `numbered` is off, and its title as one line on hover or selection.
  */
-export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbered = true, onClick }: ThumbProps) {
+export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbered = true, onClick, onDoubleClick }: ThumbProps) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [url]);
   const showImage = url !== undefined && !failed;
@@ -49,6 +51,7 @@ export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbe
       aria-pressed={selected}
       aria-label={`Slide ${n}: ${title}`}
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
       style={{ all: 'unset', position: 'relative', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 6, width: 'var(--thumb-w)', flex: '0 0 auto' }}
     >
       <div className={selected ? 'thumb-selected edge-frame' : 'edge-frame'} style={frame(selected, ring)}>
