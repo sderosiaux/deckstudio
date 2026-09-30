@@ -22,3 +22,6 @@
 - Running: M5 implementation, M3+M4 review, M4 persona, real e2e (smoke + checks).
 ## M5
 - Tasks 16, 17 merged (history diff/restore/open-as-lane, history screen). Verified: 252 tests green (excluding a verifier's stray throwaway test), `DECKSTUDIO_E2E=1 pnpm e2e` green (smoke + gaps check on the SF deck).
+- M3+M4 review fixes merged (checks: runner owns status, dirty-flag batching, dispose stops retry/persist, failure keeps remarks, lane-scoped remarks via sourceLaneId resolved on lane close, session id kept on non-stale errors; web: lane-scoped remarks on lane rows, focus thumb stamps, brief status from events). Verified: 265 tests green.
+- Contracts: Lane.status gains 'draft' (check-proposed lanes hidden from main until opened) for the M4 persona fixes.
+- Running: M4 persona fix wave (fixH-server, fixI-web), M5 review.
