@@ -2,6 +2,8 @@ import { join } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { AgentSession } from '../agent/session.js';
+import { makeDeckTools } from '../agent/tools.js';
 import { FONTS_DIR } from '../render/theme.js';
 import type { ThumbService } from '../render/thumbs.js';
 import { DeckStore } from '../store/deckStore.js';
@@ -12,6 +14,7 @@ import { deckRoutes } from './routes/deck.js';
 import { laneRoutes } from './routes/lanes.js';
 import { presentRoutes } from './routes/present.js';
 import { slideRoutes } from './routes/slides.js';
+import { threadRoutes } from './routes/threads.js';
 import { thumbRoutes } from './routes/thumbs.js';
 import { versionRoutes } from './routes/versions.js';
 import { attachBus } from './ws.js';
@@ -27,6 +30,25 @@ export interface BuildAppOptions {
   deckDir: string;
   /** Owned by the caller: started before buildApp, stopped after app.close(). */
   thumbs: ThumbService;
+  /** Injected by tests; otherwise a real SDK session is built on the deck's model. */
+  agent?: AgentSession;
+}
+
+function defaultAgent(store: DeckStore, thumbs: ThumbService, bus: Bus, model: string): AgentSession {
+  const tools = makeDeckTools({
+    store,
+    thumbs,
+    bus,
+    // Not wired yet: the tool returns this message to the model instead of pretending an image exists.
+    imageGen: async () => {
+      throw new Error('image generation is not configured in this deckstudio build; compose the body in HTML instead');
+    },
+    // Wired by the check runner (Task 14).
+    runCheck: async (name) => {
+      throw new Error(`checks are not available yet in this deckstudio build (asked for "${name}")`);
+    },
+  });
+  return new AgentSession({ store, tools, bus, model, deckDir: store.dir });
 }
 
 export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> {
@@ -49,5 +71,6 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   thumbRoutes(app, store, opts.thumbs, bus);
   presentRoutes(app, store);
   laneRoutes(app, store, new LaneService(store, bus), opts.thumbs, bus);
+  threadRoutes(app, store, opts.agent ?? defaultAgent(store, opts.thumbs, bus, (await store.state()).model));
   return app;
 }
