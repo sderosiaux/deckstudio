@@ -197,6 +197,28 @@ describe('Focus text diff and layout', () => {
     expect(lines('story')).toEqual(['add:why now']);
   });
 
+  it('a modify that touches no rendered field says the slide looks the same, above the pair', async () => {
+    const story: Change = { id: 'c1', kind: 'modify', slide: 's3', patch: { story: 'why now' }, reason: 'r', status: 'pending' };
+    const notes: Change = { id: 'c6', kind: 'modify', slide: 's2', patch: { notes: 'say it slower' }, reason: 'r', status: 'pending' };
+    const both: Change = { id: 'c7', kind: 'modify', slide: 's5', patch: { story: 'a', notes: 'b' }, reason: 'r', status: 'pending' };
+    const api = stubApi(lane([story, notes, both, c3]));
+    const same = () => screen.queryByTestId('focus-same-render');
+    const { rerender } = render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => same());
+    expect(same()!.textContent).toBe('only the story changes; the slide looks the same');
+    expect(same()!.nextElementSibling).toBe(screen.getByTestId('focus-pair'));
+    rerender(<Focus laneId="l1" changeId="c6" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => crumb().includes('change 2 of 4'));
+    expect(same()!.textContent).toBe('only the notes change; the slide looks the same');
+    rerender(<Focus laneId="l1" changeId="c7" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => crumb().includes('change 3 of 4'));
+    expect(same()!.textContent).toBe('only the story and notes change; the slide looks the same');
+    // an insert, or a modify that touches the title, changes what the slide looks like
+    rerender(<Focus laneId="l1" changeId="c3" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => crumb().includes('change 4 of 4'));
+    expect(same()).toBeNull();
+  });
+
   it('no text diff for an insert, a remove, or a modify that only touches assets', async () => {
     const assetsOnly: Change = { id: 'c1', kind: 'modify', slide: 's3', patch: { assets: [] }, reason: 'r', status: 'pending' };
     const api = stubApi(lane([assetsOnly, c3, c5]));

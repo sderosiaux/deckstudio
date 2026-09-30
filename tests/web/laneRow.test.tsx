@@ -140,6 +140,38 @@ describe('LaneRow', () => {
     expect(screen.getByTestId('lane-region').style.gridColumn).toBe('2 / span 3');
   });
 
+  it('shows a moved slide\'s thumbnail in its slot, main\'s render since the content is unchanged, the title held to two lines', () => {
+    const move: Change = { id: 'c9', kind: 'move', slide: 's4', after: 's1', reason: 'earlier', status: 'pending' };
+    const moved: LanePreviewPayload = { order: ['s1', 's4', 's2', 's3', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
+    const open = vi.fn();
+    render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{ s4: '/api/thumbs/main-s4.png' }} api={stubApi()} onOpenChange={open} />);
+    const slot = screen.getByTestId('moved-slot');
+    const thumb = within(slot).getByTestId('thumb');
+    expect(thumb.getAttribute('data-slide')).toBe('s4');
+    expect((within(slot).getByTestId('thumb-image') as HTMLImageElement).getAttribute('src')).toBe('/api/thumbs/main-s4.png');
+    // the slot names what moves once, under the thumb: no hover title on top of it
+    expect(slot.querySelector('.thumb-title')).toBeNull();
+    const title = within(slot).getByTestId('moved-title');
+    expect(title.style.webkitLineClamp).toBe('2');
+    expect(title.getAttribute('title')).toBe(mainSlides.s4!.title);
+    fireEvent.click(thumb);
+    expect(open).toHaveBeenCalledWith('l1', 'c9');
+  });
+
+  it('a modify that only rewrites the story or the notes says so on its cell, next to the dot', () => {
+    const storyOnly: Change = { id: 'c1', kind: 'modify', slide: 's3', patch: { story: 'why now' }, reason: 'r', status: 'pending' };
+    const both: Change = { id: 'c6', kind: 'modify', slide: 's2', patch: { story: 'a', notes: 'b' }, reason: 'r', status: 'pending' };
+    const p: LanePreviewPayload = { order, slides: mainSlides, skipped: [], thumbs: {} };
+    render(<LaneRow lane={lane({ changes: [storyOnly, both, { ...modifyS3, id: 'c7', slide: 's4' }] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    const at = (id: string) => screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === id)!;
+    expect(within(at('s3')).getByTestId('modified-tag').textContent).toBe('story');
+    expect(within(at('s3')).getByTestId('modified-dot')).toBeTruthy();
+    expect(within(at('s2')).getByTestId('modified-tag').textContent).toBe('story, notes');
+    // a modify that touches the title changes the render: the plain dot only
+    expect(within(at('s4')).queryByTestId('modified-tag')).toBeNull();
+    expect(within(at('s4')).getByTestId('modified-dot')).toBeTruthy();
+  });
+
   it('names the new position of a slide moved further on', () => {
     const move: Change = { id: 'c9', kind: 'move', slide: 's2', after: 's3', reason: 'swap', status: 'pending' };
     const moved: LanePreviewPayload = { order: ['s1', 's3', 's2', 's4', 's5'], slides: mainSlides, skipped: [], thumbs: {} };

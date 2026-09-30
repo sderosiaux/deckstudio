@@ -15,7 +15,7 @@ import {
 import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
 import { BackToMain, ScreenHeader } from '../components/ScreenHeader.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { anchorColumns, shortLabel } from '../components/LaneRow.js';
+import { anchorColumns, offSlideFields, shortLabel, type OffSlideField } from '../components/LaneRow.js';
 import { SlidePreview, type SlidePreviewProps } from '../components/SlidePreview.js';
 import { TextDiff, plainText } from '../components/TextDiff.js';
 import { Thread } from '../components/Thread.js';
@@ -71,6 +71,13 @@ export function textChanges(change: Change, before: Slide | undefined): { field:
     const next = change.patch[field];
     return next === undefined ? [] : [{ field, before: lines(field, before[field]), after: lines(field, next) }];
   });
+}
+
+/** The line above the pair of a modify the render cannot show: "only the story changes; the slide looks the same". */
+export function sameRenderNote(fields: readonly OffSlideField[]): string | null {
+  if (fields.length === 0) return null;
+  const what = fields.length === 1 ? `the ${fields[0]} ${fields[0] === 'notes' ? 'change' : 'changes'}` : `the ${fields.join(' and ')} change`;
+  return `only ${what}; the slide looks the same`;
 }
 
 /*
@@ -274,6 +281,8 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
   // Only when main still has the slide: a skipped change has nothing to diff against.
   const texts = change && target && !skipped ? textChanges(change, deck.slides[target]) : [];
 
+  const sameRender = change && !skipped ? sameRenderNote(offSlideFields(change)) : null;
+
   const context: Anchor = target && deck.order.includes(target) ? { kind: 'slide', slide: target } : lane.anchor;
 
   return (
@@ -305,6 +314,11 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
             ) : (
               <>
                 <style>{FOCUS_CSS}</style>
+                {sameRender ? (
+                  <p data-testid="focus-same-render" className="meta" style={{ margin: '0 0 -8px' }}>
+                    {sameRender}
+                  </p>
+                ) : null}
                 <div data-testid="focus-pair" className="focus-pair">
                   {left ? <SlidePreview {...left} /> : null}
                   {right ? <SlidePreview {...right} /> : null}
