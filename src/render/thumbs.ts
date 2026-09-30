@@ -93,10 +93,21 @@ export class ThumbService {
     await browser.close();
   }
 
+  /** The public thumbnail id for a slide: render hash of its assembled HTML and asset bytes. */
+  async thumbHash(slide: Slide): Promise<string> {
+    const html = assembleSlideHtml(slide, { themeCss: this.themeCss, assetsBaseUrl: ASSET_BASE_URL });
+    return this.hashFor(html, slide.assets);
+  }
+
+  /** Where a thumbnail with this hash lives once rendered (may not exist yet). */
+  thumbPath(hash: string): string {
+    return join(this.thumbsDir, `${hash}.png`);
+  }
+
   async thumb(slide: Slide): Promise<ThumbResult> {
     const html = assembleSlideHtml(slide, { themeCss: this.themeCss, assetsBaseUrl: ASSET_BASE_URL });
     const hash = await this.hashFor(html, slide.assets);
-    const path = join(this.thumbsDir, `${hash}.png`);
+    const path = this.thumbPath(hash);
     if (await exists(path)) return { path, hash, cached: true };
     return this.enqueue(async () => {
       if (await exists(path)) return { path, hash, cached: true };

@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { loadThemeCss } from '../../render/defaultTheme.js';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type { Slide } from '../../model/types.js';
@@ -52,7 +53,7 @@ document.querySelectorAll('.strata').forEach(el=>{const thin=el.classList.contai
 export function presentRoutes(app: FastifyInstance, store: DeckStore): void {
   app.get('/api/present', async (_req, reply) => {
     const [themeCss, state, { order, slides }] = await Promise.all([
-      readFile(join(store.dir, 'theme.css'), 'utf8'),
+      loadThemeCss(store.dir),
       store.state(),
       store.snapshot(),
     ]);

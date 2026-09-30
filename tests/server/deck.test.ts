@@ -6,7 +6,6 @@ import { buildApp } from '../../src/server/app.js';
 import type { BusEvent } from '../../src/server/bus.js';
 import { DeckStore } from '../../src/store/deckStore.js';
 import { ThumbService } from '../../src/render/thumbs.js';
-import { hashSlide } from '../../src/model/ids.js';
 import type { Brief, Slide, Snapshot, Version } from '../../src/model/types.js';
 import { chromium } from 'playwright';
 import { tmpDir } from '../helpers/tmp.js';
@@ -148,7 +147,7 @@ describe('server core', () => {
   });
 
   it('GET /api/thumbs/for/:slideId enqueues a render, emits thumb.ready, then serves the PNG', async () => {
-    const hash = hashSlide(five[1]!);
+    const hash = await thumbs.thumbHash(five[1]!);
     const first = await app.inject({ method: 'GET', url: '/api/thumbs/for/s2' });
     expect(first.statusCode).toBe(200);
     expect(first.json()).toEqual({ hash, ready: false });
