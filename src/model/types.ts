@@ -82,7 +82,7 @@ export interface Version {
   createdAt: string;
 }
 
-export type ThreadKey = 'global' | `lane:${string}` | `remark:${string}`;
+export type ThreadKey = 'global' | `lane:${string}` | `remark:${string}` | `slide:${string}`;
 
 export interface ThreadMessage {
   id: string;

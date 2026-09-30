@@ -66,7 +66,7 @@ export const VersionSchema = z.object({
   cause: VersionCauseSchema,
   createdAt: z.string(),
 });
-export const ThreadKeySchema = z.union([z.literal('global'), z.templateLiteral(['lane:', z.string().min(1)]), z.templateLiteral(['remark:', z.string().min(1)])]);
+export const ThreadKeySchema = z.union([z.literal('global'), z.templateLiteral(['lane:', z.string().min(1)]), z.templateLiteral(['remark:', z.string().min(1)]), z.templateLiteral(['slide:', z.string().min(1)])]);
 export const ThreadMessageSchema = z.object({
   id: z.string().min(1),
   thread: ThreadKeySchema,
