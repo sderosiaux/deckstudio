@@ -4,12 +4,19 @@ import { getDeck, getVersions, subscribe, thumbFor, thumbUrl, type BusEvent, typ
 import { Filmstrip } from '../components/Filmstrip.js';
 import { VersionLine } from '../components/VersionLine.js';
 
+// Shown in the thumb slot when the server reports a failed render; clicking that thumb re-requests it.
+const FAILED_THUMB = `data:image/svg+xml,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><rect width="160" height="90" fill="#F3E3DD"/>' +
+    '<text x="80" y="50" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#B8432A">render failed · retry</text></svg>',
+)}`;
+
 type Load = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; deck: DeckPayload; versions: Version[] };
 
 export function Main() {
   const [load, setLoad] = useState<Load>({ status: 'loading' });
   const [thumbs, setThumbs] = useState<Record<SlideId, string | undefined>>({});
   const [selected, setSelected] = useState<SlideId | undefined>(undefined);
+  const [failed, setFailed] = useState<ReadonlySet<SlideId>>(new Set());
   // hash -> slide, for thumb.ready events that do not carry a slideId.
   const pending = useRef(new Map<string, SlideId>());
   const generation = useRef(0);
@@ -17,6 +24,12 @@ export function Main() {
   const refreshThumb = useCallback(async (id: SlideId, gen: number) => {
     const t = await thumbFor(id);
     if (gen !== generation.current) return;
+    setFailed((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
     if (t.ready) {
       pending.current.delete(t.hash);
       setThumbs((prev) => ({ ...prev, [id]: thumbUrl(t.hash) }));
@@ -54,6 +67,12 @@ export function Main() {
       } else if (e.type === 'thumb.ready') {
         const id = e.slideId ?? pending.current.get(e.hash);
         if (id) refreshThumb(id, generation.current).catch((err: unknown) => console.warn('deckstudio: thumb refresh failed', err));
+      } else if (e.type === 'thumb.failed') {
+        const id = e.slideId ?? pending.current.get(e.hash);
+        if (!id) return;
+        pending.current.delete(e.hash);
+        console.warn(`deckstudio: thumbnail render failed for ${id}: ${e.message}`);
+        setFailed((prev) => new Set(prev).add(id));
       }
     };
     return subscribe(onEvent);
@@ -71,6 +90,11 @@ export function Main() {
   }
 
   const { deck, versions } = load;
+  const shownThumbs = failed.size === 0 ? thumbs : Object.fromEntries(deck.order.map((id) => [id, failed.has(id) ? FAILED_THUMB : thumbs[id]]));
+  const onSelect = (id: SlideId): void => {
+    setSelected(id);
+    if (failed.has(id)) refreshThumb(id, generation.current).catch((err: unknown) => console.warn('deckstudio: thumb retry failed', err));
+  };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <header style={{ display: 'flex', alignItems: 'baseline', gap: 16, padding: '16px 24px', borderBottom: '1px solid var(--line)' }}>
@@ -82,7 +106,7 @@ export function Main() {
         {deck.order.length === 0 ? (
           <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
         ) : (
-          <Filmstrip order={deck.order} slides={deck.slides} thumbs={thumbs} selected={selected} onSelect={setSelected} />
+          <Filmstrip order={deck.order} slides={deck.slides} thumbs={shownThumbs} selected={selected} onSelect={onSelect} />
         )}
       </main>
       <footer style={{ borderTop: '1px solid var(--line)', padding: '10px 24px', background: 'var(--paper)' }}>

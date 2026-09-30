@@ -1,3 +1,5 @@
+import createDOMPurify from 'dompurify';
+import { JSDOM } from 'jsdom';
 import type { Slide } from '../model/types.js';
 
 /** Same web fonts as the original deck; rendering falls back to system fonts when offline. */
@@ -23,16 +25,22 @@ function trimSlash(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
-/** Removes script elements (closed or not) and inline event-handler attributes. */
+const purify = createDOMPurify(new JSDOM('').window);
+
+const SANITIZE_CONFIG = {
+  USE_PROFILES: { html: true, svg: true, svgFilters: true },
+  FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'base', 'meta', 'link', 'form'],
+  FORBID_ATTR: ['srcdoc'],
+  ADD_ATTR: ['data-kind'],
+};
+
+/**
+ * Allowlist sanitizer (DOMPurify over a real HTML parser): drops scripts, event handlers, javascript: URLs
+ * and embedding elements. The output is re-serialized, balanced markup, so a slide body cannot close
+ * elements outside itself when bodies are concatenated (present mode).
+ */
 export function sanitizeBody(body: string): string {
-  return body
-    .replace(/<script\b[\s\S]*?<\/script\s*>/gi, '')
-    .replace(/<script\b[\s\S]*$/gi, '')
-    .replace(/<\/script\s*>/gi, '')
-    .replace(/(<[a-zA-Z][^\s/>]*)((?:\s+[^\s=/>]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+))?)*)(\s*\/?>)/g, (_m, open: string, attrs: string, close: string) => {
-      const kept = attrs.replace(/\s+on[a-z0-9_-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+))?/gi, '');
-      return `${open}${kept}${close}`;
-    });
+  return purify.sanitize(body, SANITIZE_CONFIG);
 }
 
 /** Rewrites relative `assets/...` references (src attributes and CSS url()) to the given base URL. */

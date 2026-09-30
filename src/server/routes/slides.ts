@@ -1,10 +1,20 @@
 import type { FastifyInstance } from 'fastify';
-import { applyChange } from '../../model/ops.js';
+import { applyChange, validateBody } from '../../model/ops.js';
 import { SlidePatchSchema } from '../../model/schema.js';
 import type { DeckStore } from '../../store/deckStore.js';
 import type { Bus } from '../bus.js';
 
 const MANUAL = 'manual';
+// A slide asset is a single file of the deck's assets folder: a bare name or `assets/<name>`, never a path.
+const ASSET_NAME = /^(?:assets\/)?[A-Za-z0-9._-]+$/;
+
+function badAssetNames(assets: readonly string[]): string[] {
+  return assets.filter((a) => {
+    if (!ASSET_NAME.test(a)) return true;
+    const name = a.replace(/^assets\//, '');
+    return name === '.' || name === '..';
+  });
+}
 
 export function slideRoutes(app: FastifyInstance, store: DeckStore, bus: Bus): void {
   app.get<{ Params: { id: string } }>('/api/slides/:id', async (req, reply) => {
@@ -19,6 +29,18 @@ export function slideRoutes(app: FastifyInstance, store: DeckStore, bus: Bus): v
     if (!parsed.success) return reply.code(400).send({ error: `invalid slide patch: ${parsed.error.message}` });
     const patch = Object.fromEntries(Object.entries(parsed.data).filter(([, v]) => v !== undefined));
     if (Object.keys(patch).length === 0) return reply.code(400).send({ error: 'empty slide patch: send at least one of title, story, notes, body, assets, kind' });
+
+    const { body, assets } = parsed.data;
+    if (body !== undefined) {
+      const check = validateBody(body);
+      if (!check.ok) return reply.code(400).send({ error: 'invalid slide body', reasons: check.reasons });
+    }
+    if (assets !== undefined) {
+      const bad = badAssetNames(assets);
+      if (bad.length > 0) {
+        return reply.code(400).send({ error: 'invalid asset names: use a file name of the assets folder (name or assets/<name>)', reasons: bad });
+      }
+    }
 
     const id = req.params.id;
     const outcome = await store.withLock(async () => {

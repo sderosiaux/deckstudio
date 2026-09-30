@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { loadThemeCss } from '../../render/defaultTheme.js';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -50,6 +50,21 @@ const PLAYER = `
 document.querySelectorAll('.strata').forEach(el=>{const thin=el.classList.contains('thin');const h=thin?56:113;const n=6;const amp=thin?3:4;const gap=h/n;let svg='<svg width="1280" height="'+h+'" viewBox="0 0 1280 '+h+'" aria-hidden="true">';for(let i=0;i<n;i++){const y=gap/2+i*gap;let d='M0 '+y.toFixed(1);for(let x=20;x<=1280;x+=20){d+=' L'+x+' '+(y+amp*Math.sin(x/1280*Math.PI*3)).toFixed(1)}svg+='<path d="'+d+'" fill="none" stroke="'+(i===2?'#E4572E':'#D9D6CF')+'" stroke-width="2"/>'}svg+='</svg>';el.innerHTML=svg;el.style.height=h+'px'});
 `;
 
+/** Only the nonced player may run: slide bodies are sanitized, and the CSP is the second wall. */
+function contentSecurityPolicy(nonce: string): string {
+  return [
+    "default-src 'self'",
+    "img-src 'self' data:",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    `script-src 'nonce-${nonce}'`,
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-src 'none'",
+    "form-action 'none'",
+  ].join('; ');
+}
+
 export function presentRoutes(app: FastifyInstance, store: DeckStore): void {
   app.get('/api/present', async (_req, reply) => {
     const [themeCss, state, { order, slides }] = await Promise.all([
@@ -57,6 +72,7 @@ export function presentRoutes(app: FastifyInstance, store: DeckStore): void {
       store.state(),
       store.snapshot(),
     ]);
+    const nonce = randomBytes(16).toString('base64');
     const main = order.map((id) => slides[id]!);
     const meta = main.map((s) => ({ id: s.id, title: s.title, story: s.story, notes: s.notes }));
     const html = [
@@ -74,9 +90,12 @@ export function presentRoutes(app: FastifyInstance, store: DeckStore): void {
       '</div>',
       '<div id="hud"></div>',
       `<script type="application/json" id="deck-meta">${inlineJson(meta)}</script>`,
-      `<script>${PLAYER}</script>`,
+      `<script nonce="${nonce}">${PLAYER}</script>`,
       '</body></html>',
     ].join('\n');
-    return reply.type('text/html; charset=utf-8').send(html);
+    return reply
+      .type('text/html; charset=utf-8')
+      .header('content-security-policy', contentSecurityPolicy(nonce))
+      .send(html);
   });
 }

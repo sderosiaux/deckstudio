@@ -3,6 +3,7 @@ import type { ThreadKey } from '../model/types.js';
 export type BusEvent =
   | { type: 'deck.changed'; version: number }
   | { type: 'thumb.ready'; hash: string; slideId: string | null }
+  | { type: 'thumb.failed'; hash: string; slideId: string | null; message: string }
   | { type: 'lane.created'; laneId: string }
   | { type: 'lane.updated'; laneId: string }
   | { type: 'lane.closed'; laneId: string }
