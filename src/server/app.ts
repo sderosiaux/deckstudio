@@ -118,6 +118,10 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     bus.on('lane.created', (e) => {
       if (e.type === 'lane.created') checks.scheduleAfterLane(e.laneId);
     });
+    // A draft opened by the creator gets the same render check as a lane the co-author just proposed.
+    bus.on('lane.opened', (e) => {
+      if (e.type === 'lane.opened') checks.scheduleAfterLane(e.laneId);
+    });
     app.addHook('onClose', async () => checks.dispose());
   }
   const agent = opts.agent ?? defaultAgent(store, opts.thumbs, bus, model, checks);

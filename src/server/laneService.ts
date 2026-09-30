@@ -135,7 +135,10 @@ export class LaneService {
       await this.store.putLane(next);
       return { lane: next, changed: true };
     });
-    if (out.changed) this.bus.emit({ type: 'lane.updated', laneId });
+    if (out.changed) {
+      this.bus.emit({ type: 'lane.updated', laneId });
+      this.bus.emit({ type: 'lane.opened', laneId });
+    }
     return out.lane;
   }
 

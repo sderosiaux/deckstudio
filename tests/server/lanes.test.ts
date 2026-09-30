@@ -261,6 +261,7 @@ describe('lanes API', () => {
     expect(res.json()).toMatchObject({ id: 'l_draft', status: 'open', origin: 'check:arc' });
     expect((await getLane('l_draft')).status).toBe('open');
     expect(events).toContainEqual({ type: 'lane.updated', laneId: 'l_draft' });
+    expect(events).toContainEqual({ type: 'lane.opened', laneId: 'l_draft' });
     // Opening an open lane is a no-op that answers the lane.
     events.length = 0;
     const again = await app.inject({ method: 'POST', url: '/api/lanes/l_draft/open' });

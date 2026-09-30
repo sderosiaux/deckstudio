@@ -8,6 +8,8 @@ export type BusEvent =
   | { type: 'thumb.failed'; hash: string; slideId: string | null; message: string }
   | { type: 'lane.created'; laneId: string }
   | { type: 'lane.updated'; laneId: string }
+  /** A draft proposed by a check was opened by the creator (also emits lane.updated). */
+  | { type: 'lane.opened'; laneId: string }
   | { type: 'lane.closed'; laneId: string }
   | { type: 'remarks.changed' }
   | { type: 'checks.status'; running: string[] }
