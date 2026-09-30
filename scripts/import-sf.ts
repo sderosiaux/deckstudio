@@ -2,6 +2,8 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { importDeckHtmlFile } from '../src/import/fromDeckHtml.js';
+import { DeckStore } from '../src/store/deckStore.js';
+import { rm } from 'node:fs/promises';
 import type { Brief } from '../src/model/types.js';
 
 const source = join(homedir(), 'code/personal/data-streaming-summit-san-francisco-2026/deck.html');
@@ -19,5 +21,6 @@ const brief: Brief = {
     'This talk shows how to build a shared brain entirely on Kafka, with three tiers of memory: private topics per agent for scoped working memory, shared topics materialized into a queryable context store via Kafka Streams and Interactive Queries, and a vector DB for long-term semantic recall. MCP exposes that memory and the tools to the agents; share groups (Kafka queues) scale the slow, non-deterministic workers doing inference.',
 };
 
-const res = await importDeckHtmlFile(source, { outDir, name: 'dss-sf-2026', brief });
+await rm(outDir, { recursive: true, force: true });
+const res = await importDeckHtmlFile(source, { outDir, name: 'dss-sf-2026', brief, store: DeckStore });
 console.log(`imported ${res.slides} slides, ${res.assetsCopied} assets into ${res.dir}`);

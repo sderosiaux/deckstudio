@@ -1,0 +1,30 @@
+export const meta = {
+  name: 'deckstudio-m1-wave2',
+  description: 'Milestone 1 wave 2: server core and web filmstrip in parallel worktrees (TDD)',
+  phases: [{ title: 'Implement', detail: 'two Opus agents, pre-created worktrees, TDD' }],
+}
+const REPO = '/Users/sderosiaux/code/personal/deckstudio'
+const PLAN = `${REPO}/docs/superpowers/plans/2026-09-30-deckstudio.md`
+const WT = '/Users/sderosiaux/code/personal/deckstudio-wt/'
+const COMMON = `
+You are implementing ONE task of the deckstudio plan inside a dedicated git worktree at WORKTREE (absolute path given below). ALWAYS work there: run every command as: cd WORKTREE && <command>, or use absolute paths; never touch ${REPO} itself. node_modules is symlinked in the worktree.
+Read first: ${PLAN} (only "Global Constraints", "Review Focus", "File structure" and YOUR task section), then the contracts already merged on main and present in your worktree: src/model/types.ts, src/model/schema.ts, src/model/ops.ts, src/model/ids.ts, src/store/deckStore.ts, src/render/theme.ts, src/render/thumbs.ts, src/server/bus.ts, web/src/theme.css. Do not change contracts; report mismatches under deviations_from_contract. Helpers: tests/helpers/waitFor.ts, tests/helpers/tmp.ts. A 5-slide fixture deck folder can be built in tests with DeckStore.init + commit (see tests/store/deckStore.test.ts for the pattern) or reuse tests/fixtures if one exists.
+Rules: TypeScript ESM (NodeNext: relative imports end with .js), strict; TDD: write the failing test, run it, implement, run again; vitest (pnpm vitest run <path>); no fixed sleeps in tests (use waitFor); no placeholders, no mocks of the thing under test; only create/modify the files listed for your task; do not edit package.json (deps installed: fastify, @fastify/websocket, @fastify/static, zod, playwright, nanoid, react, react-dom, node-html-parser, vitest, jsdom, @testing-library/react, @testing-library/dom, vite, @vitejs/plugin-react).
+When done: run pnpm typecheck and your tests until green; then git add -A && git commit -m "<task>: <summary>" on your worktree branch (plain commit, no Co-Authored-By, no author override). Return the structured result; branch = git rev-parse --abbrev-ref HEAD, worktree = pwd.
+`
+const TASKS = [
+  { key: 'task6-server', title: 'Task 6: Server core', section: 'Task 6', extra: 'Files: src/server/app.ts, src/server/ws.ts, src/server/routes/deck.ts, slides.ts, versions.ts, thumbs.ts, brief.ts, present.ts, tests/server/deck.test.ts. Use fastify 5 with @fastify/websocket (route GET /ws) and @fastify/static for /assets (root = <deck>/assets, prefix /assets/). ws.ts: attachBus(fastify, bus) subscribes bus.on("any") and sends JSON.stringify(event) to every open socket. Routes per the plan Interfaces block. GET /api/thumbs/for/:slideId returns { hash, ready } where hash = hashSlide(slide) and ready = cache file exists; if not ready, enqueue thumbs.thumb(slide) and when it resolves emit {type:"thumb.ready", hash, slideId}. GET /api/thumbs/:hash.png streams cache/thumbs/<hash>.png or 404. GET /api/present returns a full HTML page: theme css + every slide of main assembled with assembleSlideHtml body markup inside one document, with the original player behaviour (hash navigation #n, arrow keys, "s" toggles a story panel showing the slide story, "n" logs notes to console). PATCH /api/slides/:id validates SlidePatch with SlidePatchSchema, applies via applyChange({kind:"modify"}), commits under store.withLock, emits deck.changed. buildApp signature exactly as in the plan; thumbs and store are constructed by the caller (tests construct them on a temp deck).' },
+  { key: 'task7-web', title: 'Task 7: Web app: main filmstrip and present mode', section: 'Task 7', extra: 'Files: web/src/App.tsx, web/src/main.tsx (replace the placeholder), web/src/api.ts, web/src/screens/Main.tsx, web/src/screens/Present.tsx, web/src/components/Filmstrip.tsx, Thumb.tsx, VersionLine.tsx, tests/web/filmstrip.test.tsx. React 19, no router dependency: read location.pathname ("/" main, "/present" opens /api/present in the same tab via a plain link). api.ts: getDeck(): Promise<{state, brief, order, slides}>; getVersions(); thumbFor(slideId): Promise<{hash, ready}>; thumbUrl(hash) = `/api/thumbs/${hash}.png`; subscribe(handler): connects to `ws://${location.host}/ws`, reconnects with backoff, parses JSON events. Filmstrip per mockup: row label at left (width 120px), thumbs var(--thumb-w) x var(--thumb-h) in a horizontally scrollable row, number + title (ellipsis) under each, selection ring in accent, placeholder (grey card with the title) until thumb ready; on thumb.ready event with slideId, refresh that thumb. Main.tsx: loads deck, renders Filmstrip for main, requests thumbs for all slides (sequentially, the server queues), VersionLine at the bottom listing versions with n and cause. Use web/src/theme.css tokens; light theme; no CSS framework. tests/web/filmstrip.test.tsx with @testing-library/react in jsdom: renders 5 thumbs in order, placeholders until thumb URLs arrive, calls onSelect on click. Add a vitest environment comment `// @vitest-environment jsdom` at the top of the test file.' },
+]
+const RESULT = { type: 'object', properties: {
+  task: { type: 'string' }, branch: { type: 'string' }, worktree: { type: 'string' },
+  files: { type: 'array', items: { type: 'string' } },
+  tests_run: { type: 'number' }, tests_passed: { type: 'number' },
+  typecheck_ok: { type: 'boolean' },
+  deviations_from_contract: { type: 'array', items: { type: 'string' } },
+  open_questions: { type: 'array', items: { type: 'string' } },
+  notes: { type: 'string' },
+}, required: ['task', 'branch', 'worktree', 'files', 'tests_run', 'tests_passed', 'typecheck_ok', 'deviations_from_contract', 'open_questions'] }
+phase('Implement')
+const results = await parallel(TASKS.map(t => () => agent(`${COMMON.replace(/WORKTREE/g, WT + t.key)}\nWORKTREE = ${WT}${t.key} (branch wt/${t.key}).\nYOUR TASK: ${t.title}. Plan section: "${t.section}".\n${t.extra}`, { label: t.key, phase: 'Implement', schema: RESULT, model: 'opus' })))
+return results

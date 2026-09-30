@@ -1,5 +1,7 @@
 import type { Slide } from '../model/types.js';
 
+/** Same web fonts as the original deck; rendering falls back to system fonts when offline. */
+export const FONTS_LINK = '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;800&family=IBM+Plex+Mono:wght@400;700&display=swap">';
 export const STAGE_WIDTH = 1280;
 export const STAGE_HEIGHT = 720;
 
@@ -51,6 +53,7 @@ export function assembleSlideHtml(
   return [
     '<!DOCTYPE html>',
     '<html lang="en"><head><meta charset="UTF-8">',
+    FONTS_LINK,
     `<style>${opts.themeCss}</style>`,
     `<style>${STAGE_OVERRIDE}</style>`,
     '</head><body>',

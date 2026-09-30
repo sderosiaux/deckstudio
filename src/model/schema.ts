@@ -32,7 +32,7 @@ export const ChangeSchema = z.discriminatedUnion('kind', [
   z.object({ ...changeBase, kind: z.literal('remove'), slide: z.string().min(1) }),
   z.object({ ...changeBase, kind: z.literal('move'), slide: z.string().min(1), after: z.string().nullable() }),
 ]);
-export const OriginSchema = z.union([z.literal('user'), z.string().regex(/^check:[a-z]+$/)]);
+export const OriginSchema = z.union([z.literal('user'), z.templateLiteral(['check:', z.string().regex(/^[a-z]+$/)])]);
 export const LaneSchema = z.object({
   id: z.string().min(1),
   label: z.string(),
@@ -65,7 +65,7 @@ export const VersionSchema = z.object({
   cause: VersionCauseSchema,
   createdAt: z.string(),
 });
-export const ThreadKeySchema = z.union([z.literal('global'), z.string().regex(/^(lane|remark):.+$/)]);
+export const ThreadKeySchema = z.union([z.literal('global'), z.templateLiteral(['lane:', z.string().min(1)]), z.templateLiteral(['remark:', z.string().min(1)])]);
 export const ThreadMessageSchema = z.object({
   id: z.string().min(1),
   thread: ThreadKeySchema,
