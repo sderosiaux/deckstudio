@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { BriefChecks } from '../../web/src/screens/BriefChecks.js';
+import { BriefChecks, autoRows, dotState } from '../../web/src/screens/BriefChecks.js';
 import { RemarkPostIt, anchorLabel } from '../../web/src/components/Remark.js';
 import { mainPath, selectionFromSearch, type BriefChecksApi, type BusEvent, type ChecksStatus, type DeckPayload } from '../../web/src/api.js';
 import type { Brief, Lane, Remark, Slide, SlideId } from '../../src/model/types.js';
@@ -60,7 +60,8 @@ const stubApi = () => {
     proposeRemark: vi.fn(async () => undefined),
     runChecks: vi.fn(async () => ({ started: ['arc', 'order', 'gaps', 'render'] as const }) as { started: ('arc' | 'order' | 'gaps' | 'render')[] }),
     getChecksStatus: vi.fn(async () => status),
-    getLanes: vi.fn(async () => [lane]),
+    getLanes: vi.fn(async (_status?: 'draft' | 'open' | 'all') => [lane]),
+    openLane: vi.fn(async (_id: string) => undefined),
     thumbFor: vi.fn(async (id: SlideId) => ({ hash: `h${id}`, ready: true })),
   };
   return api satisfies BriefChecksApi;
@@ -73,13 +74,14 @@ const header = (name: string) => within(row(name)).getAllByRole('button')[0]!;
 afterEach(() => cleanup());
 
 describe('BriefChecks', () => {
-  it('renders one row per check with a green dot unless open warn remarks exist', async () => {
+  it('renders one row per check: green after a run without warnings, accent with warnings, grey never run', async () => {
     render(<BriefChecks api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
     expect(screen.getAllByTestId('check-row').map((r) => r.getAttribute('data-check'))).toEqual(['arc', 'order', 'gaps', 'render']);
     const dot = (name: string) => within(row(name)).getByTestId('check-dot').getAttribute('data-status');
-    // order has an open warn; gaps only an open info (its warn is resolved); arc and render have nothing.
-    expect(['arc', 'order', 'gaps', 'render'].map(dot)).toEqual(['ok', 'warn', 'ok', 'ok']);
+    // order has an open warn; gaps only an open info (its warn is resolved); arc ran clean; render never ran.
+    await waitFor(() => dot('render') === 'idle');
+    expect(['arc', 'order', 'gaps', 'render'].map(dot)).toEqual(['ok', 'warn', 'ok', 'idle']);
     expect((screen.getByLabelText('title') as HTMLInputElement).value).toBe('From Prompts to Products');
   });
 
@@ -196,14 +198,126 @@ describe('BriefChecks live status', () => {
     render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryAllByTestId('brief-thumb').length === 6);
     await waitFor(() => api.getRemarks.mock.calls.length === 1 && api.getLanes.mock.calls.length === 1);
-    expect(within(row('render')).getByTestId('check-dot').getAttribute('data-status')).toBe('ok');
+    await waitFor(() => within(row('render')).getByTestId('check-dot').getAttribute('data-status') === 'idle');
     fireEvent.click(header('render'));
     expect(within(row('render')).queryAllByTestId('remark')).toHaveLength(0);
     expect(screen.getAllByTestId('brief-thumb').filter((t) => t.getAttribute('data-lit') === 'true')).toHaveLength(0);
   });
 });
 
+describe('BriefChecks status dots', () => {
+  const dot = (name: string) => within(row(name)).getByTestId('check-dot');
+
+  it('grey and "not run yet" before any run, animated while running, green after a clean run, accent after one with warnings', async () => {
+    const api = stubApi();
+    api.getRemarks.mockResolvedValue([]);
+    api.getChecksStatus.mockResolvedValue({ running: [], lastRun: { arc: null, order: null, gaps: null, render: null } });
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => api.getChecksStatus.mock.calls.length === 1 && api.getRemarks.mock.calls.length === 1);
+    expect(dot('arc').getAttribute('data-status')).toBe('idle');
+    expect(dot('arc').getAttribute('aria-label')).toBe('not run yet');
+    expect(dot('arc').style.background).toBe('var(--grey-2)');
+
+    act(() => push({ type: 'checks.status', running: ['arc', 'order'] }));
+    expect(dot('arc').getAttribute('data-status')).toBe('running');
+    expect(dot('arc').getAttribute('aria-label')).toBe('running');
+    expect(dot('arc').style.animation).toContain('check-dot-pulse');
+
+    api.getRemarks.mockResolvedValue([remark('r_o', { origin: 'check:order', anchor: { kind: 'slide', slide: 's2' } })]);
+    act(() => push({ type: 'remarks.changed' }));
+    act(() => push({ type: 'checks.status', running: [] }));
+    await waitFor(() => dot('order').getAttribute('data-status') === 'warn');
+    expect(dot('order').style.background).toBe('var(--accent)');
+    expect(dot('arc').getAttribute('data-status')).toBe('ok');
+    expect(dot('arc').getAttribute('aria-label')).toBe('no warnings');
+    expect(dot('arc').style.background).toBe('var(--ok)');
+    expect(dot('gaps').getAttribute('data-status')).toBe('idle');
+  });
+
+  it('marks as new the remarks created after the previous run the screen saw', async () => {
+    const api = stubApi();
+    const old = remark('r_old_arc', { anchor: { kind: 'slide', slide: 's2' }, createdAt: '2026-09-30T09:00:00.000Z' });
+    api.getRemarks.mockResolvedValue([old]);
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => within(row('arc')).queryAllByTestId('remark').length === 1);
+    await waitFor(() => row('arc').textContent?.includes('last run'));
+    // Nothing is new on the first look: the screen never saw an earlier run.
+    expect(within(row('arc')).queryAllByTestId('remark-new')).toHaveLength(0);
+
+    act(() => push({ type: 'checks.status', running: ['arc'] }));
+    api.getRemarks.mockResolvedValue([old, remark('r_new_arc', { anchor: { kind: 'slide', slide: 's4' }, createdAt: '2026-09-30T10:30:00.000Z' })]);
+    act(() => push({ type: 'remarks.changed' }));
+    act(() => push({ type: 'checks.status', running: [] }));
+    await waitFor(() => within(row('arc')).queryAllByTestId('remark').length === 2);
+    const card = (id: string) => within(row('arc')).getAllByTestId('remark').find((c) => c.getAttribute('data-remark') === id)!;
+    await waitFor(() => within(card('r_new_arc')).queryByTestId('remark-new'));
+    expect(within(card('r_old_arc')).queryByTestId('remark-new')).toBeNull();
+  });
+});
+
+describe('BriefChecks draft lanes', () => {
+  const draft: Lane = { ...lane, id: 'l2', label: 'draft fix', status: 'draft', changes: [{ id: 'd1', kind: 'modify', slide: 's2', patch: { title: 'b' }, reason: 'r', status: 'pending' }] };
+
+  it('a remark linked to a draft lane offers "draft ready · open" instead of propose; opening it turns into "lane ready"', async () => {
+    const api = stubApi();
+    api.getRemarks.mockResolvedValue([remark('r_d', { origin: 'check:order', anchor: { kind: 'slide', slide: 's2' }, laneId: 'l2' })]);
+    api.getLanes.mockResolvedValue([lane, draft]);
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    const card = await waitFor(() => within(row('order')).queryByTestId('remark'));
+    expect(api.getLanes).toHaveBeenCalledWith('all');
+    const open = await waitFor(() => within(card).queryByRole('button', { name: 'draft ready · open' }));
+    expect(within(card).queryByRole('button', { name: 'propose' })).toBeNull();
+    expect(within(card).queryByTestId('lane-ready')).toBeNull();
+
+    fireEvent.click(open);
+    expect(api.openLane).toHaveBeenCalledWith('l2');
+    api.getLanes.mockResolvedValue([lane, { ...draft, status: 'open' }]);
+    act(() => push({ type: 'lane.updated', laneId: 'l2' }));
+    await waitFor(() => within(card).queryByTestId('lane-ready'));
+    expect(within(card).getByTestId('lane-ready').getAttribute('href')).toBe('/lane/l2/change/d1');
+    expect(within(card).queryByRole('button', { name: 'draft ready · open' })).toBeNull();
+  });
+});
+
+describe('BriefChecks brief layout', () => {
+  it('audience and message wrap in textareas whose rows follow their content', async () => {
+    const api = stubApi();
+    const long = 'Streaming platform engineers who already run Kafka in production and wonder whether agents belong on it at all.';
+    api.getBrief.mockResolvedValue({ ...brief, audience: long, message: `${long}\n${long}` });
+    render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    const audience = (await waitFor(() => screen.queryByLabelText('audience'))) as HTMLTextAreaElement;
+    const msg = screen.getByLabelText('message in one sentence') as HTMLTextAreaElement;
+    expect(audience.tagName).toBe('TEXTAREA');
+    expect(audience.rows).toBeGreaterThan(1);
+    expect(msg.rows).toBeGreaterThan(audience.rows);
+    fireEvent.change(msg, { target: { value: 'short' } });
+    expect(msg.rows).toBe(2);
+    // one grid row per label and per control: nothing can overlap
+    const form = screen.getByTestId('brief-fields');
+    expect(form.style.display).toBe('grid');
+  });
+});
+
 describe('remark helpers', () => {
+  it('autoRows counts hard lines and wraps long ones, never below the minimum', () => {
+    expect(autoRows('', 2)).toBe(2);
+    expect(autoRows('a\nb\nc', 1)).toBe(3);
+    expect(autoRows('x'.repeat(100), 1, 40)).toBe(3);
+  });
+
+  it('dotState: running beats everything, warnings beat a clean run, never run is idle', () => {
+    expect(dotState({ running: true, warn: true, ran: true })).toBe('running');
+    expect(dotState({ running: false, warn: true, ran: false })).toBe('warn');
+    expect(dotState({ running: false, warn: false, ran: true })).toBe('ok');
+    expect(dotState({ running: false, warn: false, ran: false })).toBe('idle');
+  });
+
   it('labels anchors and round-trips the main selection query', () => {
     expect(anchorLabel({ kind: 'slide', slide: 's6' }, order)).toBe('slide 6');
     expect(anchorLabel({ kind: 'range', from: 's5', to: 's2' }, order)).toBe('slides 2–5');

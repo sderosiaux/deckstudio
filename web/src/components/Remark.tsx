@@ -22,6 +22,11 @@ export interface RemarkCardProps {
   /** Focus route of the lane answering this remark, when that lane still has pending changes. */
   laneHref?: string | undefined;
   onOpenLane?(href: string): void;
+  /** Set when `remark.laneId` is a draft lane (proposed by a check, not on main yet): opening it replaces "propose". */
+  draftLaneId?: string | undefined;
+  onOpenDraft?(laneId: string): Promise<void>;
+  /** Created by the latest run of its check, after the run this screen saw before. */
+  isNew?: boolean;
 }
 
 const chip: CSSProperties = { display: 'inline-block', padding: '4px 10px', borderRadius: 8, background: 'var(--line)', fontSize: 12, fontWeight: 600, color: 'var(--ink)' };
@@ -38,15 +43,17 @@ const btn = (primary: boolean): CSSProperties => ({
 });
 
 /** One remark from a check: where it points, what it says, and the two ways to act on it. */
-export function RemarkCard({ remark, order, onShow, onPropose, laneHref, onOpenLane }: RemarkCardProps) {
-  const [state, setState] = useState<{ kind: 'idle' } | { kind: 'sending' } | { kind: 'sent' } | { kind: 'error'; message: string }>({ kind: 'idle' });
-  const propose = (): void => {
+export function RemarkCard({ remark, order, onShow, onPropose, laneHref, onOpenLane, draftLaneId, onOpenDraft, isNew = false }: RemarkCardProps) {
+  const [state, setState] = useState<{ kind: 'idle' } | { kind: 'sending' } | { kind: 'sent' } | { kind: 'opened' } | { kind: 'error'; message: string }>({ kind: 'idle' });
+  const act = (fn: () => Promise<void>, done: 'sent' | 'opened'): void => {
     setState({ kind: 'sending' });
-    onPropose(remark.id).then(
-      () => setState({ kind: 'sent' }),
+    fn().then(
+      () => setState({ kind: done }),
       (err: unknown) => setState({ kind: 'error', message: err instanceof Error ? err.message : String(err) }),
     );
   };
+  const propose = (): void => act(() => onPropose(remark.id), 'sent');
+  const draft = draftLaneId !== undefined && onOpenDraft !== undefined;
   return (
     <div
       data-testid="remark"
@@ -56,8 +63,20 @@ export function RemarkCard({ remark, order, onShow, onPropose, laneHref, onOpenL
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span data-testid="anchor-chip" style={chip}>{anchorLabel(remark.anchor, order)}</span>
+        {isNew ? (
+          <span data-testid="remark-new" style={{ padding: '2px 8px', borderRadius: 6, background: '#FBE3DA', color: 'var(--accent)', fontSize: 11, fontWeight: 700 }}>new</span>
+        ) : null}
         {remark.severity === 'info' ? <span className="muted" style={{ fontSize: 12 }}>info</span> : null}
-        {remark.laneId ? (
+        {draft ? (
+          <button
+            type="button"
+            disabled={state.kind === 'sending'}
+            onClick={() => act(() => onOpenDraft(draftLaneId), 'opened')}
+            style={{ marginLeft: 'auto', padding: '3px 10px', borderRadius: 6, border: 'none', cursor: 'pointer', background: '#E3F1E8', color: 'var(--ok)', fontSize: 12, fontWeight: 600 }}
+          >
+            draft ready · open
+          </button>
+        ) : remark.laneId ? (
           laneHref ? (
             <a
               href={laneHref}
@@ -79,8 +98,11 @@ export function RemarkCard({ remark, order, onShow, onPropose, laneHref, onOpenL
       <p style={{ margin: 0, fontSize: 14, lineHeight: 1.4 }}>{remark.text}</p>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
         <button type="button" style={btn(false)} onClick={() => onShow(remark.anchor)}>show</button>
-        <button type="button" style={btn(true)} disabled={state.kind === 'sending'} onClick={propose}>propose</button>
+        {draft ? null : (
+          <button type="button" style={btn(true)} disabled={state.kind === 'sending'} onClick={propose}>propose</button>
+        )}
         {state.kind === 'sent' ? <span className="muted" style={{ fontSize: 12 }}>asked the co-author; the lane appears on main</span> : null}
+        {state.kind === 'opened' ? <span className="muted" style={{ fontSize: 12 }}>lane opened on main</span> : null}
         {state.kind === 'error' ? <span style={{ fontSize: 12, color: 'var(--warn)' }}>{state.message}</span> : null}
       </div>
     </div>
@@ -91,14 +113,18 @@ export interface PostItProps {
   remark: RemarkT;
   onPropose(id: string): Promise<void>;
   onResolve(id: string): Promise<unknown>;
+  /** Set when `remark.laneId` is a draft lane: the post-it offers to open it instead of proposing. */
+  draftLaneId?: string | undefined;
+  onOpenLane?(laneId: string): Promise<void>;
 }
 
 const POST_IT_CHARS = 90;
 
 /** A remark pinned under its slide: truncated text, propose, resolve. Fills its container's width (a column, or the columns of a range). */
-export function RemarkPostIt({ remark, onPropose, onResolve }: PostItProps) {
-  const [state, setState] = useState<{ kind: 'idle' } | { kind: 'busy' } | { kind: 'sent' } | { kind: 'error'; message: string }>({ kind: 'idle' });
-  const act = (fn: () => Promise<unknown>, after: 'idle' | 'sent'): void => {
+export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpenLane }: PostItProps) {
+  const [state, setState] = useState<{ kind: 'idle' } | { kind: 'busy' } | { kind: 'sent' } | { kind: 'opened' } | { kind: 'error'; message: string }>({ kind: 'idle' });
+  const draft = draftLaneId !== undefined && onOpenLane !== undefined;
+  const act = (fn: () => Promise<unknown>, after: 'idle' | 'sent' | 'opened'): void => {
     setState({ kind: 'busy' });
     fn().then(
       () => setState({ kind: after }),
@@ -127,15 +153,31 @@ export function RemarkPostIt({ remark, onPropose, onResolve }: PostItProps) {
       }}
     >
       <span style={{ color: 'var(--ink)' }}>{short}</span>
+      {draft ? (
+        <span data-testid="draft-ready" style={{ color: 'var(--ok)', fontWeight: 700 }}>
+          {state.kind === 'opened' ? 'opening…' : 'draft ready'}
+        </span>
+      ) : null}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-        <button
-          type="button"
-          disabled={state.kind === 'busy'}
-          onClick={() => act(() => onPropose(remark.id), 'sent')}
-          style={{ all: 'unset', cursor: 'pointer', color: 'var(--accent)', fontWeight: 700 }}
-        >
-          {state.kind === 'sent' ? 'asked' : 'propose'}
-        </button>
+        {draft ? (
+          <button
+            type="button"
+            disabled={state.kind === 'busy' || state.kind === 'opened'}
+            onClick={() => act(() => onOpenLane(draftLaneId), 'opened')}
+            style={{ all: 'unset', cursor: 'pointer', color: 'var(--accent)', fontWeight: 700 }}
+          >
+            open lane
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled={state.kind === 'busy'}
+            onClick={() => act(() => onPropose(remark.id), 'sent')}
+            style={{ all: 'unset', cursor: 'pointer', color: 'var(--accent)', fontWeight: 700 }}
+          >
+            {state.kind === 'sent' ? 'asked' : 'propose'}
+          </button>
+        )}
         <button
           type="button"
           aria-label="resolve"

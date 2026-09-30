@@ -89,9 +89,16 @@ export function thumbUrl(hash: string): string {
   return `/api/thumbs/${hash}.png`;
 }
 
-/** Open lanes. */
-export function getLanes(): Promise<Lane[]> {
-  return getJson<Lane[]>('/api/lanes');
+export type LaneFilter = 'draft' | 'open' | 'all';
+
+/** Open lanes by default; `draft` lists the lanes a check proposed that the creator has not opened yet, `all` includes closed ones. */
+export function getLanes(status?: LaneFilter): Promise<Lane[]> {
+  return getJson<Lane[]>(status ? `/api/lanes?status=${status}` : '/api/lanes');
+}
+
+/** Turns a draft lane into an open one; `lane.updated` follows. */
+export async function openLane(laneId: string): Promise<void> {
+  await send('POST', `/api/lanes/${seg(laneId)}/open`);
 }
 
 /** One lane by id, open or closed. */
@@ -236,7 +243,8 @@ export interface BriefChecksApi {
   proposeRemark(id: string): Promise<void>;
   runChecks(names?: CheckName[]): Promise<{ started: CheckName[] }>;
   getChecksStatus(): Promise<ChecksStatus>;
-  getLanes(): Promise<Lane[]>;
+  getLanes(status?: LaneFilter): Promise<Lane[]>;
+  openLane(laneId: string): Promise<void>;
   thumbFor(slideId: SlideId): Promise<ThumbStatus>;
 }
 
@@ -255,7 +263,7 @@ export const laneApi: LaneApi = { acceptChange, refuseChange, discardLane };
 export const threadApi: ThreadApi = { getThread, postMessage };
 export const focusApi: FocusApi = { getDeck, getLane, getLanePreview, thumbFor, acceptChange, refuseChange, getThread, postMessage };
 export const remarkApi: RemarkApi = { proposeRemark, resolveRemark };
-export const briefChecksApi: BriefChecksApi = { getDeck, getBrief, putBrief, getRemarks, proposeRemark, runChecks, getChecksStatus, getLanes, thumbFor };
+export const briefChecksApi: BriefChecksApi = { getDeck, getBrief, putBrief, getRemarks, proposeRemark, runChecks, getChecksStatus, getLanes, openLane, thumbFor };
 export const historyApi: HistoryApi = { getDeck, getVersions, getVersionSnapshot, getHistoryDiff, restoreEntry, openVersionAsLane, thumbFor };
 
 /** Client-side routes. The server answers index.html for any non-API path, so these also work on reload. */

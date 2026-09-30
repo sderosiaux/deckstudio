@@ -10,6 +10,7 @@ const m = vi.hoisted(() => ({
   getDeck: vi.fn(),
   getVersions: vi.fn(),
   getLanes: vi.fn(),
+  openLane: vi.fn(),
   getLane: vi.fn(),
   getLanePreview: vi.fn(),
   thumbFor: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock('../../web/src/api.js', async (importOriginal) => {
     getDeck: m.getDeck,
     getVersions: m.getVersions,
     getLanes: m.getLanes,
+    openLane: m.openLane,
     getLane: m.getLane,
     getLanePreview: m.getLanePreview,
     thumbFor: m.thumbFor,
@@ -75,6 +77,9 @@ const previewOf = (laneId: string, s: SlideId): LanePreviewPayload => ({
 });
 
 let deck: DeckPayload;
+let drafts: Lane[] = [];
+/** Calls for the open lanes (the default list), not the draft lookups. */
+const openListCalls = (): number => m.getLanes.mock.calls.filter((c) => c[0] === undefined).length;
 const hashOf = (id: SlideId): string => `h_${id}_${(deck.slides[id]?.body ?? '').length}`;
 
 const emit = (e: BusEvent) => act(() => m.handlers.forEach((h) => h(e)));
@@ -85,7 +90,9 @@ beforeEach(() => {
   m.handlers = [];
   m.getDeck.mockReset().mockImplementation(async () => deck);
   m.getVersions.mockReset().mockResolvedValue([]);
-  m.getLanes.mockReset().mockImplementation(async () => lanes);
+  drafts = [];
+  m.getLanes.mockReset().mockImplementation(async (status?: string) => (status === 'draft' ? drafts : status === undefined ? lanes : []));
+  m.openLane.mockReset().mockResolvedValue(undefined);
   m.getLane.mockReset().mockImplementation(async (id: string) => lanes.find((l) => l.id === id));
   m.getLanePreview.mockReset().mockImplementation(async (id: string) => previewOf(id, id === 'l1' ? 's3' : 's5'));
   m.thumbFor.mockReset().mockImplementation(async (id: SlideId) => ({ hash: hashOf(id), ready: true }));
@@ -135,7 +142,7 @@ describe('Main', () => {
 
   it('a lane.updated burst fetches that lane once (lane + preview) and nothing for the others', async () => {
     await mounted();
-    const lanesBefore = m.getLanes.mock.calls.length;
+    const lanesBefore = openListCalls();
     emit({ type: 'lane.updated', laneId: 'l1' });
     emit({ type: 'lane.updated', laneId: 'l1' });
     await waitFor(() => callsFor(m.getLanePreview, 'l1') === 2);
@@ -144,7 +151,7 @@ describe('Main', () => {
     await waitFor(() => callsFor(m.getLanePreview, 'l2') === 2);
     expect(callsFor(m.getLanePreview, 'l1')).toBe(2);
     expect(callsFor(m.getLane, 'l1')).toBe(1);
-    expect(m.getLanes.mock.calls.length).toBe(lanesBefore);
+    expect(openListCalls()).toBe(lanesBefore);
   });
 
   it('lane.closed drops the lane without refetching anything', async () => {
@@ -166,17 +173,17 @@ describe('Main', () => {
     emit({ type: 'lane.updated', laneId: 'l2' });
     await waitFor(() => callsFor(m.getLanePreview, 'l2') === 2);
     expect(m.getDeck.mock.calls.length).toBe(1);
-    expect(m.getLanes.mock.calls.length).toBe(1);
+    expect(openListCalls()).toBe(1);
 
     emit({ type: 'hello', version: null });
-    await waitFor(() => m.getDeck.mock.calls.length === 2 && m.getLanes.mock.calls.length === 2);
+    await waitFor(() => m.getDeck.mock.calls.length === 2 && openListCalls() === 2);
     await waitFor(() => m.getThread.mock.calls.length === 4);
   });
 
   it('resyncs when the server hello reports another version than the one shown', async () => {
     await mounted();
     emit({ type: 'hello', version: 9 });
-    await waitFor(() => m.getDeck.mock.calls.length === 2 && m.getLanes.mock.calls.length === 2);
+    await waitFor(() => m.getDeck.mock.calls.length === 2 && openListCalls() === 2);
   });
 
   it('thumb.failed with a lane preview hash marks that lane cell, not the main slide, and a click retries the preview', async () => {
@@ -224,6 +231,64 @@ describe('Main remarks', () => {
 
     fireEvent.click(within(laneCell('l1', 's3')).getByRole('button', { name: 'resolve' }));
     expect(m.resolveRemark).toHaveBeenCalledWith('r_lane');
+  });
+});
+
+describe('Main draft lanes', () => {
+  const draft: Lane = { ...mkLane('l3', 's4', '2026-09-30T00:00:02.000Z'), status: 'draft', origin: 'check:render' };
+
+  it('draft lanes are not rendered; a post-it linked to one offers "open lane", and the lane row appears after lane.updated', async () => {
+    drafts = [draft];
+    m.getRemarks.mockResolvedValue([remark('r_d', { anchor: { kind: 'slide', slide: 's4' }, laneId: 'l3' })]);
+    m.getLane.mockImplementation(async (id: string) => (id === 'l3' ? draft : lanes.find((l) => l.id === id)));
+    await mounted();
+    expect(m.getLanes).toHaveBeenCalledWith('draft');
+    const postIt = await waitFor(() => screen.queryAllByTestId('post-it').find((p) => within(p).queryByTestId('draft-ready')));
+    expect(within(postIt).getByTestId('draft-ready').textContent).toBe('draft ready');
+    expect(within(postIt).queryByRole('button', { name: 'propose' })).toBeNull();
+    expect(screen.getAllByTestId('lane-row').map((r) => r.getAttribute('data-lane'))).toEqual(['l1', 'l2']);
+
+    // A draft announced live stays off main too.
+    emit({ type: 'lane.updated', laneId: 'l3' });
+    await waitFor(() => callsFor(m.getLane, 'l3') === 1);
+    await waitFor(() => screen.queryAllByTestId('post-it').some((p) => within(p).queryByRole('button', { name: 'open lane' })));
+    expect(screen.getAllByTestId('lane-row')).toHaveLength(2);
+
+    fireEvent.click(within(screen.getAllByTestId('post-it')[0]!).getByRole('button', { name: 'open lane' }));
+    expect(m.openLane).toHaveBeenCalledWith('l3');
+    m.getLane.mockImplementation(async (id: string) => (id === 'l3' ? { ...draft, status: 'open' } : lanes.find((l) => l.id === id)));
+    emit({ type: 'lane.updated', laneId: 'l3' });
+    await waitFor(() => screen.getAllByTestId('lane-row').length === 3);
+    expect(screen.getAllByTestId('lane-row').map((r) => r.getAttribute('data-lane'))).toEqual(['l1', 'l2', 'l3']);
+    await waitFor(() => screen.queryAllByTestId('draft-ready').length === 0);
+  });
+});
+
+describe('Main propose feedback', () => {
+  const note = () => screen.queryByTestId('propose-note');
+
+  it('propose leaves a line in the thread panel that turns into a link once a lane linked to the remark arrives', async () => {
+    m.getRemarks.mockResolvedValue([remark('r_p', { anchor: { kind: 'slide', slide: 's2' } })]);
+    await mounted();
+    const postIt = await waitFor(() => screen.queryByTestId('post-it'));
+    fireEvent.click(within(postIt).getByRole('button', { name: 'propose' }));
+    expect(m.proposeRemark).toHaveBeenCalledWith('r_p');
+    await waitFor(() => note());
+    expect(note()!.textContent).toBe('asked the co-author for a lane on slide 2…');
+    expect(within(screen.getByTestId('thread-panel')).getByTestId('propose-note')).toBe(note());
+    expect(note()!.querySelector('a')).toBeNull();
+
+    // An unrelated lane event: still waiting.
+    emit({ type: 'lane.updated', laneId: 'l2' });
+    await waitFor(() => callsFor(m.getLanePreview, 'l2') === 2);
+    expect(note()!.querySelector('a')).toBeNull();
+
+    const proposed: Lane = { ...mkLane('l4', 's2', '2026-09-30T00:00:03.000Z'), changes: [{ ...modify('c_first', 's2'), status: 'refused' }, modify('c_l4', 's2')] };
+    m.getLane.mockImplementation(async (id: string) => (id === 'l4' ? proposed : lanes.find((l) => l.id === id)));
+    m.getRemarks.mockResolvedValue([remark('r_p', { anchor: { kind: 'slide', slide: 's2' }, laneId: 'l4' })]);
+    emit({ type: 'lane.created', laneId: 'l4' });
+    const link = await waitFor(() => note()?.querySelector('a'));
+    expect(link.getAttribute('href')).toBe('/lane/l4/change/c_l4');
   });
 });
 
