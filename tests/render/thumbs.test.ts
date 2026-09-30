@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Slide } from '../../src/model/types.js';
 import { ThumbService } from '../../src/render/thumbs.js';
 import { assembleSlideHtml } from '../../src/render/theme.js';
+import type { Page, Request } from 'playwright';
 import { tmpDir } from '../helpers/tmp.js';
 import { assetsDir, themeCss } from './themeCss.js';
 
@@ -86,5 +87,76 @@ describe('ThumbService (real Chromium)', () => {
     const after = await readdir(join(tmp.dir, 'cache', 'thumbs'));
     const added = after.filter((f) => !before.has(f));
     expect(added.sort()).toEqual(results.map((r) => `${r.hash}.png`).sort());
+  });
+
+  it('resolves slide assets named with the importer convention assets/<name> (hash follows the bytes)', async () => {
+    const dir = join(tmp.dir, 'prefixed-assets');
+    await mkdir(dir, { recursive: true });
+    await copyFile(join(assetsDir, 's02.png'), join(dir, 'p.png'));
+    const other = new ThumbService({ cacheDir: join(tmp.dir, 'cache-prefixed'), themeCss, assetsDir: dir });
+    const s = slide({ body: '<img src="assets/p.png" alt="">', assets: ['assets/p.png'] });
+    const before = await other.thumbHash(s);
+    expect(await other.thumbHash(s)).toBe(before);
+    await writeFile(join(dir, 'p.png'), Buffer.from('not the same bytes'));
+    expect(await other.thumbHash(s)).not.toBe(before);
+    // Traversal or nested names never resolve to a file.
+    const bad = await other.thumbHash(slide({ assets: ['assets/../p.png'] }));
+    await writeFile(join(dir, 'p.png'), Buffer.from('third'));
+    expect(await other.thumbHash(slide({ assets: ['assets/../p.png'] }))).toBe(bad);
+  });
+
+  it('never requests Google Fonts; fonts come from the local asset origin and no other host is reached', async () => {
+    // A fresh browser: fonts already in another page's memory cache would emit no request event.
+    const fresh = new ThumbService({ cacheDir: join(tmp.dir, 'cache-fonts'), themeCss, assetsDir });
+    await fresh.start();
+    const page = (fresh as unknown as { page: Page }).page;
+    const urls: string[] = [];
+    const reachedOutside: string[] = [];
+    const onRequest = (r: Request) => urls.push(r.url());
+    const onFinished = (r: Request) => {
+      if (new URL(r.url()).host !== 'deckstudio.assets') reachedOutside.push(r.url());
+    };
+    page.on('request', onRequest);
+    page.on('requestfinished', onFinished);
+    try {
+      const r = await fresh.thumb(slide({ id: 'fonts', title: 'Fonts are local', body: '<p class="big">x</p><img src="https://example.com/x.png">' }));
+      expect(r.cached).toBe(false);
+    } finally {
+      page.off('request', onRequest);
+      page.off('requestfinished', onFinished);
+      await fresh.stop();
+    }
+    expect(reachedOutside).toEqual([]);
+    expect(urls.filter((u) => /fonts\.(googleapis|gstatic)\.com/.test(u))).toEqual([]);
+    expect(urls).toContain('http://deckstudio.assets/fonts/Archivo-800.woff2');
+  });
+
+  it('the self-hosted font is actually applied (render differs without the fonts style)', async () => {
+    const html = assembleSlideHtml(
+      { title: 'Archivo Extra Bold', kind: 'text', body: '' },
+      { themeCss, assetsBaseUrl: ThumbService.assetsBaseUrl, fontsBaseUrl: ThumbService.fontsBaseUrl },
+    );
+    const noFonts = html.replace(/<style data-fonts>[\s\S]*?<\/style>/, '');
+    expect(noFonts).not.toBe(html);
+    const [a, b] = [await svc.render(html), await svc.render(noFonts)];
+    expect(a.equals(b)).toBe(false);
+    expect((await svc.render(html)).equals(a)).toBe(true);
+  });
+
+  it('recovers when the browser disconnects or the page is closed after start()', async () => {
+    await (svc as unknown as { browser: { close(): Promise<void> } }).browser.close();
+    const a = await svc.thumb(slide({ id: 'r1', body: '<p class="big">after browser crash</p>' }));
+    expect(a.cached).toBe(false);
+    expect(pngSize(await readFile(a.path))).toEqual({ width: 1280, height: 720 });
+
+    await (svc as unknown as { page: Page }).page.close();
+    const b = await svc.thumb(slide({ id: 'r2', body: '<p class="big">after page close</p>' }));
+    expect(b.cached).toBe(false);
+    expect(pngSize(await readFile(b.path))).toEqual({ width: 1280, height: 720 });
+  });
+
+  it('thumb() before start() or after stop() still refuses to launch a browser', async () => {
+    const idle = new ThumbService({ cacheDir: join(tmp.dir, 'cache-idle'), themeCss, assetsDir });
+    await expect(idle.render('<p>x</p>')).rejects.toThrow(/not started/);
   });
 });

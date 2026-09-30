@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { FONTS_DIR } from '../render/theme.js';
 import type { ThumbService } from '../render/thumbs.js';
 import { DeckStore } from '../store/deckStore.js';
 import { Bus } from './bus.js';
@@ -36,6 +37,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await app.register(websocket);
   attachBus(app, bus);
   await app.register(fastifyStatic, { root: join(store.dir, 'assets'), prefix: '/assets/' });
+  // Same font files the thumbnail renderer serves, so /api/present matches the thumbs offline.
+  await app.register(fastifyStatic, { root: FONTS_DIR, prefix: '/fonts/', decorateReply: false });
 
   deckRoutes(app, store);
   slideRoutes(app, store, bus);
