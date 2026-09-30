@@ -82,7 +82,7 @@ describe.skipIf(!ENABLED)('smoke: real SDK session proposes a lane that gets acc
   });
 
   it('global message -> lane with one insert -> accept -> next version with one more slide -> thumb rendered', async () => {
-    const deck = (await app.inject({ method: 'GET', url: '/api/deck' })).json() as { order: SlideId[] };
+    const deck = (await app.inject({ method: 'GET', url: '/api/deck' })).json() as { order: SlideId[]; state: { version: number } };
     const initialCount = deck.order.length;
     const initialVersion = deck.state.version;
     expect(initialCount).toBeGreaterThanOrEqual(29);
