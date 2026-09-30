@@ -11,8 +11,8 @@ const THUMB_W = 120;
 const THUMB_H = 132;
 const GAP = 12;
 const COL = THUMB_W + GAP;
-/** Height of the link band in path units; the band itself stretches to fill the screen (strokes keep 1px). */
-const CONNECTOR_H = 64;
+/** Height of the link band: with the numbers under v<a>, about 100px between the two rows. */
+const CONNECTOR_H = 72;
 const PAD = 6;
 /** The row-name gutter, as on main. */
 const GUTTER = 120;
@@ -111,20 +111,20 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
 
   return (
     <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <div ref={scroller} data-testid="diff-filmstrips" style={{ '--thumb-w': `${THUMB_W}px`, '--thumb-h': `${THUMB_H}px`, flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 0 12px', display: 'flex', flexDirection: 'column' } as CSSProperties}>
-        {/* The link band grows first (up to 3x); what is left centres the pair in the screen. */}
-        <div style={{ width, minWidth: '100%', flex: '1 0 auto', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+      <div ref={scroller} data-testid="diff-filmstrips" style={{ '--thumb-w': `${THUMB_W}px`, '--thumb-h': `${THUMB_H}px`, flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 32px 12px 0', display: 'flex', flexDirection: 'column' } as CSSProperties}>
+        {/* The pair sits at the top of the band, a fixed link band between the rows. */}
+        <div style={{ width, minWidth: '100%', flex: '0 0 auto', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'stretch' }}>
             {label(a.n)}
-            <div role="list" aria-label={`slides in v${a.n}`} data-testid="row-a" style={row}>
+            <div role="list" aria-label={`slides in v${a.n}`} data-testid="row-a" data-edge-row style={row}>
               {aCells.map((c) =>
                 c.kind === 'ghost' ? (
-                  <div role="listitem" key={`ghost:${c.id}`} style={cellStyle}>
-                    <div data-testid={`ghost-${c.id}`} title={`"${title(b, c.id)}" is slide ${c.at + 1} in v${b.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--line)' }} />
+                  <div role="listitem" key={`ghost:${c.id}`} data-edge-item style={cellStyle}>
+                    <div data-testid={`ghost-${c.id}`} className="edge-frame" title={`"${title(b, c.id)}" is slide ${c.at + 1} in v${b.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--line)' }} />
                     <div className="meta" style={{ paddingTop: 4, textAlign: 'center' }}>not in v{a.n}</div>
                   </div>
                 ) : (
-                  <div role="listitem" key={c.id} style={cellStyle}>
+                  <div role="listitem" key={c.id} data-edge-item style={cellStyle}>
                     <Thumb slideId={c.id} n={c.n} title={title(a, c.id)} url={a.thumbs[c.id]} selected={c.id === focused} ring="ink" onClick={() => onFocus(c.id)} />
                   </div>
                 ),
@@ -132,7 +132,7 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
             </div>
           </div>
           {/* The band has the rows' sticky gutter too, so scrolled links pass under the row names like the slides do. */}
-          <div style={{ display: 'flex', flex: '1 1 auto', minHeight: CONNECTOR_H, maxHeight: CONNECTOR_H * 3, margin: '4px 0' }}>
+          <div style={{ display: 'flex', flex: '0 0 auto', height: CONNECTOR_H, margin: '4px 0' }}>
           <div className="gutter" />
           <svg
             width={width - GUTTER}
@@ -176,17 +176,17 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
           </div>
           <div style={{ display: 'flex', alignItems: 'stretch' }}>
             {label(b.n)}
-            <div role="list" aria-label={`slides in v${b.n}`} data-testid="row-b" style={row}>
+            <div role="list" aria-label={`slides in v${b.n}`} data-testid="row-b" data-edge-row style={row}>
               {cells.map((c) =>
                 c.kind === 'gone' ? (
-                  <div role="listitem" key={`gone:${c.id}`} style={cellStyle}>
-                    <div data-testid="diff-marker" data-kind="removed" data-slide={c.id} title={`"${title(a, c.id)}" was slide ${c.wasAt + 1} in v${a.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--accent)' }}>
+                  <div role="listitem" key={`gone:${c.id}`} data-edge-item style={cellStyle}>
+                    <div data-testid="diff-marker" data-kind="removed" data-slide={c.id} className="edge-frame" title={`"${title(a, c.id)}" was slide ${c.wasAt + 1} in v${a.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--accent)' }}>
                       {title(a, c.id)}
                     </div>
                     <div className="meta" style={{ paddingTop: 4, textAlign: 'center' }}>removed</div>
                   </div>
                 ) : (
-                  <div role="listitem" key={c.id} style={cellStyle}>
+                  <div role="listitem" key={c.id} data-edge-item style={cellStyle}>
                     <Thumb slideId={c.id} n={c.n} title={title(b, c.id)} url={b.thumbs[c.id]} selected={c.id === focused} ring="ink" onClick={() => onFocus(c.id)} />
                     {added.has(c.id) ? <div data-testid="diff-marker" data-kind="added" data-slide={c.id} className="diff-changed" style={outline} /> : null}
                     {modified.has(c.id) ? <div data-testid="diff-marker" data-kind="modified" data-slide={c.id} className="diff-changed" title="modified" style={dot} /> : null}

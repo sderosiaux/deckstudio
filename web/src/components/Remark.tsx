@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react';
+import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import type { Anchor, Remark as RemarkT, SlideId } from '../../../src/model/types.js';
 
 /** Short anchor label against main's current order: "slide 6", "slides 14–19", "arc". */
@@ -111,9 +111,66 @@ export interface PostItProps {
   selected?: boolean;
 }
 
-const POST_IT_CHARS = 90;
+const CLAMP_LINES = 3;
+const LINE_H = 1.35;
 
-/** A remark pinned under its slide: a plain card with the text (truncated), propose and resolve. Fills its slot's width. */
+/**
+ * The longest start of `text` that `fits`, cut after a whole word and ended with an ellipsis; the text itself when
+ * it fits whole. A single word too long for the box is still kept whole.
+ */
+export function cutAtWord(text: string, fits: (candidate: string) => boolean): string {
+  if (fits(text)) return text;
+  const words = text.split(/\s+/).filter(Boolean);
+  const cut = (n: number): string => `${words.slice(0, n).join(' ')}…`;
+  let lo = 1;
+  let hi = words.length - 1;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (fits(cut(mid))) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo >= words.length ? text : cut(lo);
+}
+
+/**
+ * The text on `lines` lines at most, cut after a whole word. Measured in the browser on an invisible probe of the
+ * same width, again when the card changes width; in jsdom, where nothing has a height, the full text stays.
+ */
+function WordClamp({ text, lines }: { text: string; lines: number }) {
+  // React never fills the probe: trial cuts are written there, then it is emptied.
+  const probe = useRef<HTMLSpanElement>(null);
+  const [shown, setShown] = useState(text);
+  useLayoutEffect(() => {
+    const el = probe.current;
+    if (!el) return;
+    const fit = (): void => {
+      const max = (parseFloat(getComputedStyle(el).lineHeight) || 0) * lines + 1;
+      el.textContent = text;
+      const measurable = el.scrollHeight > 0 && max > 1;
+      const next = measurable
+        ? cutAtWord(text, (candidate) => {
+            el.textContent = candidate;
+            return el.scrollHeight <= max;
+          })
+        : text;
+      el.textContent = '';
+      setShown(next);
+    };
+    fit();
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => fit());
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, [text, lines]);
+  const box: CSSProperties = { display: 'block', lineHeight: LINE_H, overflowWrap: 'normal', wordBreak: 'normal' };
+  return (
+    <span style={{ position: 'relative', display: 'block' }}>
+      <span style={{ ...box, color: 'var(--ink)' }}>{shown}</span>
+      <span ref={probe} aria-hidden style={{ ...box, position: 'absolute', top: 0, left: 0, right: 0, visibility: 'hidden', pointerEvents: 'none' }} />
+    </span>
+  );
+}
+
+/** A remark pinned under its slide: a plain card with the text (three lines at most, cut after a word), propose and resolve. Fills its slot's width. */
 export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpenLane, selected = false }: PostItProps) {
   const [state, setState] = useState<{ kind: 'idle' } | { kind: 'busy' } | { kind: 'sent' } | { kind: 'opened' } | { kind: 'error'; message: string }>({ kind: 'idle' });
   const draft = draftLaneId !== undefined && onOpenLane !== undefined;
@@ -124,7 +181,6 @@ export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpen
       (err: unknown) => setState({ kind: 'error', message: err instanceof Error ? err.message : String(err) }),
     );
   };
-  const short = remark.text.length > POST_IT_CHARS ? `${remark.text.slice(0, POST_IT_CHARS - 1).trimEnd()}…` : remark.text;
   const verb: CSSProperties = { fontSize: 12, fontWeight: 500, color: 'var(--ink)' };
   return (
     <div
@@ -148,7 +204,7 @@ export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpen
         transition: 'border-color .15s ease',
       }}
     >
-      <span style={{ color: 'var(--ink)' }}>{short}</span>
+      <WordClamp text={remark.text} lines={CLAMP_LINES} />
       {draft ? (
         <span data-testid="draft-ready" className="meta">
           {state.kind === 'opened' ? 'opening…' : 'draft ready'}

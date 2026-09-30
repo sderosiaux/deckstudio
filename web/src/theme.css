@@ -50,3 +50,18 @@ button { font: inherit; }
  */
 .fit-columns { container-type: inline-size; }
 .fit-columns > * { --thumb-w: clamp(52px, calc((100cqw - var(--gutter) - 12px - (var(--fit-cols) - 1) * var(--col-gap)) / var(--fit-cols)), 72px); }
+
+/* Every screen header: the screen's way back ("main") in the 120px gutter, the title on the column start (x = 144). */
+.screen-header { display: flex; align-items: baseline; gap: 12px; padding: 18px 24px 14px; }
+.screen-header > .gutter { position: static; margin-right: -12px; font-size: var(--fs-body); font-weight: 500; color: var(--grey); }
+
+/* A thumb's title: one 12px line under its number, shown on hover or selection only, never cut. */
+.thumb-title {
+  position: absolute; left: 0; top: 100%; z-index: 2; white-space: nowrap; padding: 1px 4px 1px 0;
+  font-size: var(--fs-meta); font-weight: 500; line-height: 16px; color: var(--ink); background: var(--paper);
+  visibility: hidden; pointer-events: none;
+}
+.thumb:hover .thumb-title, .thumb:focus-visible .thumb-title { visibility: visible; }
+/* The selected thumb keeps its title, unless another thumb of the strip is hovered. */
+.thumb[aria-pressed='true'] .thumb-title { visibility: visible; }
+[role='list']:hover .thumb[aria-pressed='true']:not(:hover) .thumb-title { visibility: hidden; }

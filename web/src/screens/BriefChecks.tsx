@@ -16,6 +16,7 @@ import {
 import { anchorColumns } from '../components/LaneRow.js';
 import { RemarkCard } from '../components/Remark.js';
 import { Thumb } from '../components/Thumb.js';
+import { ScreenHeader } from '../components/ScreenHeader.js';
 
 export interface BriefChecksProps {
   api?: BriefChecksApi;
@@ -328,10 +329,7 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <header style={{ display: 'flex', alignItems: 'baseline', gap: 12, padding: '18px 24px 14px' }}>
-        <a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }} className="link" style={{ marginRight: 4 }}>
-          main
-        </a>
+      <ScreenHeader>
         <h1 className="screen-title">Brief and checks</h1>
         <span className="meta">{deck.state.name}</span>
         <span className="meta">v{deck.state.version}</span>
@@ -339,7 +337,7 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
         <button type="button" className="btn-primary" onClick={run} disabled={running.size === CHECK_ROWS.length} style={{ marginLeft: 'auto', alignSelf: 'center' }}>
           {running.size > 0 ? 'Checks running…' : 'Run checks'}
         </button>
-      </header>
+      </ScreenHeader>
       <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(300px, 1fr) minmax(380px, 1.2fr) minmax(300px, 1fr)', gap: 0, padding: '8px 24px 20px' }}>
         <BriefCard initial={brief} api={api} />
 

@@ -265,7 +265,7 @@ export function LaneRow({
             data-col-start={region.start}
             data-col-span={region.span}
             aria-label={`lane ${lane.label}`}
-            style={{ gridColumn: `${region.start + 1} / span ${region.span}`, minWidth: 0, paddingTop: 18 }}
+            style={{ gridColumn: `${region.start + 1} / span ${region.span}`, minWidth: 0, paddingTop: 6 }}
           >
             {error ? (
               <p role="alert" style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--warn)', width: 'max-content', maxWidth: 480 }}>
@@ -276,7 +276,7 @@ export function LaneRow({
               <p className="meta" style={{ margin: 0, width: 'max-content' }}>Loading lane preview…</p>
             ) : (
               // Same column widths and gap as the filmstrip: a cell's grid column is its main column.
-              <div data-testid="lane-cells" style={{ display: 'grid', gridTemplateColumns: `repeat(${region.span}, var(--thumb-w))`, gridAutoColumns: 'var(--thumb-w)', columnGap: 'var(--col-gap)' }}>
+              <div data-testid="lane-cells" data-edge-row style={{ display: 'grid', gridTemplateColumns: `repeat(${region.span}, var(--thumb-w))`, gridAutoColumns: 'var(--thumb-w)', columnGap: 'var(--col-gap)' }}>
                 {cells.map((cell) => (
                   <div
                     key={`${cell.mark}:${cell.id}`}
@@ -285,7 +285,9 @@ export function LaneRow({
                     data-mark={cell.mark}
                     data-col={cell.col}
                     data-thumb-failed={thumbFailed(cell.id) ? 'true' : undefined}
-                    style={{ position: 'relative', gridColumn: `${cell.col - region.start + 1}`, gridRow: 1, display: 'flex', flexDirection: 'column', gap: 6 }}
+                    data-edge-item
+                    // No numbers under lane cells (main's row above numbers the columns): every ✓ ✗ pair sits 12px under the 80px card.
+                    style={{ position: 'relative', gridColumn: `${cell.col - region.start + 1}`, gridRow: 1, display: 'flex', flexDirection: 'column', gap: 12 }}
                   >
                     {cell.slot ? (
                       <a
@@ -299,10 +301,10 @@ export function LaneRow({
                         }}
                         title={cell.dest ? `moved: ${cell.title}, now slide ${cell.dest.at}` : `removed: ${cell.title}`}
                         aria-label={cell.dest ? `moved: ${cell.title}, now slide ${cell.dest.at}` : `removed: ${cell.title}`}
-                        style={slotStyle(cell.mark)}
+                        className="edge-frame"
+                        style={cell.dest ? movedStyle : removedStyle}
                       >
-                        <span>{cell.dest ? 'moved' : 'removed'}</span>
-                        {cell.dest ? <span>to {cell.dest.at}</span> : null}
+                        {cell.dest ? <MoveMark col={cell.col} dest={cell.dest} /> : 'removed'}
                       </a>
                     ) : (
                       <>
@@ -312,6 +314,7 @@ export function LaneRow({
                           title={cell.title}
                           url={urlFor(cell.id)}
                           selected={false}
+                          numbered={false}
                           onClick={() => {
                             if (thumbFailed(cell.id) && onRetryThumbs) {
                               onRetryThumbs(lane.id);
@@ -331,7 +334,6 @@ export function LaneRow({
                         {cell.mark === 'modified' ? <div data-testid="modified-dot" style={{ ...overlay, width: 7, height: 7, top: 4, left: 'calc(var(--thumb-w) - 11px)', borderRadius: 999, background: 'var(--accent)' }} /> : null}
                       </>
                     )}
-                    {cell.dest ? <MoveMark col={cell.col} boundary={cell.dest.boundary} /> : null}
                     {cell.changes.map((c) => (
                       <ChangeButtons key={c.id} change={c} disabled={busy} onAccept={accept} onRefuse={refuse} />
                     ))}
@@ -357,53 +359,45 @@ export function LaneRow({
   );
 }
 
-/** Longest move, in columns, that gets an arc; a farther one only says where it goes ("to 24") so no line runs off the row. */
-export const ARC_MAX_COLS = 2;
-
 /** Columns between a slot's centre and the gap before `boundary`, signed (negative = the slide goes left). */
 export const moveDistance = (col: number, boundary: number): number => boundary - col - 0.5;
 
-const slotStyle = (mark: Mark): CSSProperties => ({
+const slotBox: CSSProperties = {
+  position: 'relative',
   width: 'var(--thumb-w)',
   height: 'var(--thumb-h)',
   borderRadius: 4,
-  // Removed is the diff; a moved slot is only the old place, the arc or the "to" line carries the move.
-  border: `1px dashed ${mark === 'removed' ? 'var(--accent)' : 'var(--grey-2)'}`,
   display: 'flex',
   flexDirection: 'column',
   alignItems: 'center',
   justifyContent: 'center',
-  gap: 2,
   color: 'var(--grey)',
   fontSize: 'var(--fs-meta)',
   textDecoration: 'none',
-});
+};
+/** The dashed outline means "removed", and only that. */
+const removedStyle: CSSProperties = { ...slotBox, border: '1px dashed var(--accent)' };
+/** A moved slide's old column: no outline, only the hairline leaving it and where the slide goes. */
+const movedStyle: CSSProperties = slotBox;
 
 /**
- * Where a moved slide lands: a short accent tick in the gap before `boundary`, and, when that gap is at most
- * ARC_MAX_COLS columns away, one curved hairline from the top of the slot to the tick.
+ * A moved slide leaving its column: a short accent hairline from a dot at the middle of the slot out through the
+ * side it goes to, and a grey "to 24" (its new position in the lane) above it.
  */
-function MoveMark({ col, boundary }: { col: number; boundary: number }) {
-  const d = moveDistance(col, boundary);
-  // Tick: centred in the column gap before `boundary`, measured from the slot's left edge.
-  const tickLeft = `calc(${boundary - col} * (var(--thumb-w) + var(--col-gap)) - var(--col-gap) / 2 - 1px)`;
-  const near = Math.abs(d) <= ARC_MAX_COLS;
-  const span = `calc(${Math.abs(d)} * (var(--thumb-w) + var(--col-gap)))`;
-  const arcLeft = d >= 0 ? 'calc(var(--thumb-w) / 2)' : `calc(var(--thumb-w) / 2 - ${span})`;
-  if (!near) return null;
+function MoveMark({ col, dest }: { col: number; dest: { boundary: number; at: number } }) {
+  const d = moveDistance(col, dest.boundary);
+  const side = d < 0 ? { right: '50%' } : { left: '50%' };
   return (
     <>
-      <div data-testid="move-tick" aria-hidden style={{ position: 'absolute', top: 0, left: tickLeft, width: 2, height: 'var(--thumb-h)', borderRadius: 1, background: 'var(--accent)', pointerEvents: 'none' }} />
-      <svg
+      <span style={{ lineHeight: '16px', marginBottom: 28 }}>to {dest.at}</span>
+      <span
         data-testid="move-connector"
         data-distance={d}
         aria-hidden
-        viewBox="0 0 100 16"
-        preserveAspectRatio="none"
-        style={{ position: 'absolute', top: -16, left: arcLeft, width: span, height: 16, overflow: 'visible', pointerEvents: 'none' }}
-      >
-        <path d="M 0 16 C 0 0, 100 0, 100 16" fill="none" stroke="var(--accent)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-      </svg>
+        style={{ position: 'absolute', top: '50%', ...side, width: 'calc(var(--thumb-w) / 2 + var(--col-gap) / 2)', height: 1, background: 'var(--accent)', pointerEvents: 'none' }}
+      />
+      {/* Where the slide stood: the hairline starts from a dot at the slot's centre. */}
+      <span aria-hidden style={{ position: 'absolute', top: 'calc(50% - 2px)', left: 'calc(50% - 2px)', width: 5, height: 5, borderRadius: 999, background: 'var(--accent)', pointerEvents: 'none' }} />
     </>
   );
 }

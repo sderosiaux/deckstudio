@@ -29,6 +29,7 @@ import { Filmstrip } from '../components/Filmstrip.js';
 import { FAILED_THUMB, LaneRow, anchorColumns, laneLetter } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
 import { RemarkRow, placeCards, type Pinned } from '../components/RemarkRow.js';
+import { ScreenHeader } from '../components/ScreenHeader.js';
 import { Thread } from '../components/Thread.js';
 import { VersionLine } from '../components/VersionLine.js';
 
@@ -493,7 +494,7 @@ export function Main() {
   return (
     <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-        <header style={{ display: 'flex', alignItems: 'baseline', gap: 12, padding: '18px 24px 14px' }}>
+        <ScreenHeader onMain>
           <h1 className="screen-title">{deck.brief.title || deck.state.name}</h1>
           <span className="meta">v{deck.state.version}</span>
           <span className="meta">{deck.order.length} slides</span>
@@ -510,9 +511,9 @@ export function Main() {
             {warnCount > 0 ? <span data-testid="warn-badge" className="meta">{warnCount}</span> : null}
           </a>
           <a href="/api/present" className="btn-primary" style={{ alignSelf: 'center' }}>Present</a>
-        </header>
+        </ScreenHeader>
         <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <main ref={canvas} data-testid="canvas" className="fit-columns" onClick={clearOnEmpty} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '8px 24px 24px' }}>
+          <main ref={canvas} data-testid="canvas" className="fit-columns" onClick={clearOnEmpty} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '8px 32px 24px 24px' }}>
             {deck.order.length === 0 ? (
               <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
             ) : (

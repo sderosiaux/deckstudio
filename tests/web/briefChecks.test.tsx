@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { BriefChecks, autoRows, dotState } from '../../web/src/screens/BriefChecks.js';
-import { RemarkPostIt, anchorLabel } from '../../web/src/components/Remark.js';
+import { RemarkPostIt, anchorLabel, cutAtWord } from '../../web/src/components/Remark.js';
 import { mainPath, selectionFromSearch, type BriefChecksApi, type BusEvent, type ChecksStatus, type DeckPayload } from '../../web/src/api.js';
 import type { Brief, Lane, Remark, Slide, SlideId } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
@@ -328,13 +328,21 @@ describe('remark helpers', () => {
     expect(selectionFromSearch('')).toBeNull();
   });
 
-  it('a post-it truncates long text and its buttons call propose and resolve', async () => {
+  it('cuts remark text after a whole word, never inside one', () => {
+    const text = 'Slide 7 is part of the arc but reads as a detour';
+    // A box that holds 18 characters: the cut ends on "part", with the ellipsis.
+    expect(cutAtWord(text, (c) => c.length <= 18)).toBe('Slide 7 is part…');
+    expect(cutAtWord('short', () => true)).toBe('short');
+    expect(cutAtWord('unbreakable', (c) => c.length <= 3)).toBe('unbreakable');
+  });
+
+  it('a post-it keeps its full text as the tooltip and its buttons call propose and resolve', async () => {
     const onPropose = vi.fn(async () => undefined);
     const onResolve = vi.fn(async () => undefined);
     const long = remark('r_long', { text: 'x'.repeat(200), anchor: { kind: 'slide', slide: 's2' } });
     render(<RemarkPostIt remark={long} onPropose={onPropose} onResolve={onResolve} />);
     const p = screen.getByTestId('post-it');
-    expect(p.textContent!.length).toBeLessThan(120);
+    expect(p.getAttribute('title')).toBe('x'.repeat(200));
     fireEvent.click(within(p).getByRole('button', { name: 'propose' }));
     expect(onPropose).toHaveBeenCalledWith('r_long');
     await waitFor(() => within(p).queryByRole('button', { name: 'asked' }));

@@ -125,21 +125,22 @@ describe('LaneRow', () => {
     expect(screen.getByTestId('lane-region').style.gridColumn).toBe('3 / span 1');
   });
 
-  it('leaves a dashed slot with its buttons at a moved slide\'s own column; a far move says where it goes, no line', () => {
+  it('leaves an unoutlined slot with its buttons at a moved slide\'s own column: a hairline leaving it and where it goes', () => {
     const move: Change = { id: 'c9', kind: 'move', slide: 's4', after: 's1', reason: 'earlier', status: 'pending' };
     const moved: LanePreviewPayload = { order: ['s1', 's4', 's2', 's3', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
     render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
     const cells = screen.getAllByTestId('lane-cell');
     expect(cells.map((c) => `${c.getAttribute('data-slide')}:${c.getAttribute('data-col')}`)).toEqual(['s2:1', 's3:2', 's4:3']);
     const slot = within(cells[2]!).getByTestId('moved-slot');
-    // s4 lands before column 1, two and a half columns left of its slot: past the arc limit.
-    expect(slot.textContent).toBe('movedto 2');
-    expect(screen.queryByTestId('move-connector')).toBeNull();
+    // s4 lands before column 1, two and a half columns left of its slot.
+    expect(slot.textContent).toBe('to 2');
+    expect(slot.style.border).toBe('');
+    expect(within(slot).getByTestId('move-connector').getAttribute('data-distance')).toBe('-2.5');
     expect(within(cells[2]!).getByRole('button', { name: 'accept change c9' })).toBeTruthy();
     expect(screen.getByTestId('lane-region').style.gridColumn).toBe('2 / span 3');
   });
 
-  it('joins a near move with one short arc from its slot to where it lands', () => {
+  it('points a move right when the slide lands after its slot', () => {
     const move: Change = { id: 'c9', kind: 'move', slide: 's2', after: 's3', reason: 'swap', status: 'pending' };
     const moved: LanePreviewPayload = { order: ['s1', 's3', 's2', 's4', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
     render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
@@ -147,8 +148,8 @@ describe('LaneRow', () => {
     expect(cell.getAttribute('data-col')).toBe('1');
     // lands before column 3 (after s3): one and a half columns right of the slot's centre
     expect(within(cell).getByTestId('move-connector').getAttribute('data-distance')).toBe('1.5');
-    expect(within(cell).getByTestId('move-tick')).toBeTruthy();
-    expect(within(cell).getByTestId('moved-slot').textContent).toBe('movedto 3');
+    expect(within(cell).getByTestId('move-connector').style.left).toBe('50%');
+    expect(within(cell).getByTestId('moved-slot').textContent).toBe('to 3');
   });
 
   it('gives buttons to a pending change on a slide outside the anchor range', () => {
@@ -307,7 +308,7 @@ d2('thread helpers', () => {
 });
 
 describe('placeCards', () => {
-  it('gives each card three columns at least, pulls it left at the deck end, stacks overlaps, and drops rows past the limit', () => {
+  it('gives each card four columns at least, pulls it left at the deck end, stacks overlaps, and drops rows past the limit', () => {
     const items = [
       { id: 'a', col: 0, span: 1 },
       { id: 'b', col: 1, span: 1 },
@@ -315,10 +316,10 @@ describe('placeCards', () => {
       { id: 'd', col: 5, span: 1, selected: true },
     ];
     expect(placeCards(items, 10)).toEqual([
-      { id: 'd', start: 5, width: 3, row: 0 },
-      { id: 'a', start: 0, width: 3, row: 0 },
-      { id: 'b', start: 1, width: 3, row: 1 },
-      { id: 'c', start: 7, width: 3, row: 1 },
+      { id: 'd', start: 5, width: 4, row: 0 },
+      { id: 'a', start: 0, width: 4, row: 0 },
+      { id: 'b', start: 1, width: 4, row: 1 },
+      { id: 'c', start: 6, width: 4, row: 1 },
     ]);
     expect(placeCards(items, 10, 1).map((p) => p.id)).toEqual(['d', 'a']);
   });
@@ -329,6 +330,6 @@ describe('placeCards', () => {
       { id: 'b', col: 6, span: 1 },
       { id: 'c', col: 9, span: 1 },
     ];
-    expect(placeCards(items, 12, Infinity, { first: 2, end: 8 })).toEqual([{ id: 'b', start: 5, width: 3, row: 0 }]);
+    expect(placeCards(items, 12, Infinity, { first: 2, end: 8 })).toEqual([{ id: 'b', start: 4, width: 4, row: 0 }]);
   });
 });

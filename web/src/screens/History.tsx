@@ -14,6 +14,7 @@ import {
   type ThumbStatus,
 } from '../api.js';
 import { DiffFilmstrips } from '../components/DiffFilmstrips.js';
+import { ScreenHeader } from '../components/ScreenHeader.js';
 import { VersionLine, type VersionPair } from '../components/VersionLine.js';
 
 export interface HistoryProps {
@@ -281,10 +282,7 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
   return (
     <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-        <header style={{ display: 'flex', alignItems: 'baseline', gap: 12, padding: '18px 24px 14px' }}>
-          <a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }} className="link" style={{ marginRight: 4 }}>
-            main
-          </a>
+        <ScreenHeader>
           <h1 className="screen-title">Versions</h1>
           <span className="meta" data-testid="history-deck">{deck.state.name}</span>
           <span className="meta" data-testid="history-version">v{deck.state.version}</span>
@@ -301,7 +299,7 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
               Open v{pair.a} as a lane
             </button>
           ) : null}
-        </header>
+        </ScreenHeader>
         <section aria-label="compared versions" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: '8px 24px 8px' }}>
           {diffError ? (
             <p style={{ color: 'var(--warn)' }}>Could not compare: {diffError}</p>

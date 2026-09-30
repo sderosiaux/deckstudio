@@ -13,6 +13,7 @@ import {
   type ThumbStatus,
 } from '../api.js';
 import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
+import { ScreenHeader } from '../components/ScreenHeader.js';
 import { Filmstrip } from '../components/Filmstrip.js';
 import { anchorColumns, shortLabel } from '../components/LaneRow.js';
 import { SlidePreview, type SlidePreviewProps } from '../components/SlidePreview.js';
@@ -276,15 +277,11 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         {/* The top sizes to the pair, the story and the actions; the filmstrips below take the rest of the height. */}
         <div style={{ flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          {/* "main" in the 120px gutter, above the main row label of the filmstrips below. */}
-          <header style={{ display: 'flex', alignItems: 'baseline', padding: '18px 24px 14px' }}>
-            <div className="gutter" style={{ position: 'static' }}>
-              <a href="/" onClick={go('/')} className="link">main</a>
-            </div>
+          <ScreenHeader navigate={navigate}>
             <h1 data-testid="focus-crumb" className="screen-title" title={lane.label}>
               {short}, change {change ? index + 1 : '–'} of {n}
             </h1>
-          </header>
+          </ScreenHeader>
           <main style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 24px 0', display: 'flex', flexDirection: 'column', gap: 16 }}>
             {!change ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
@@ -346,7 +343,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
           </main>
         </div>
         <div style={{ position: 'relative', flex: '1 0 auto', minHeight: 200, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--line)' }}>
-          <footer ref={strips} className="fit-columns" style={{ flex: 1, minHeight: 0, background: 'var(--paper)', overflow: 'auto', padding: '14px 24px' }}>
+          <footer ref={strips} className="fit-columns" style={{ flex: 1, minHeight: 0, background: 'var(--paper)', overflow: 'auto', padding: '14px 32px 14px 24px' }}>
             <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div>
                 <Filmstrip order={deck.order} slides={deck.slides} thumbs={mainThumbUrls} selected={target ?? undefined} onSelect={openSlide} label="main" />

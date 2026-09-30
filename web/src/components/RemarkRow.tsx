@@ -11,8 +11,8 @@ export interface Pinned {
   card: ReactNode;
 }
 
-/** A card is never narrower than this many columns: remark text needs a readable measure. */
-export const MIN_CARD_COLS = 3;
+/** A card is never narrower than this many columns (about 220px or more): remark text needs a measure that breaks on words. */
+export const MIN_CARD_COLS = 4;
 
 export interface Placed {
   id: string;

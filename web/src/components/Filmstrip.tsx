@@ -20,11 +20,12 @@ export function Filmstrip({ order, slides, thumbs, selected, onSelect, label = '
       <div className="gutter row-label" title={fullLabel} style={{ paddingTop: 8 }}>
         {label}
       </div>
-      <div role="list" data-strip={label} style={{ display: 'flex', gap: 'var(--col-gap)', padding: '6px 6px 4px' }}>
+      {/* 22px under the numbers: room for the selected slide's title line. */}
+      <div role="list" data-strip={label} data-edge-row style={{ display: 'flex', gap: 'var(--col-gap)', padding: '6px 6px 22px' }}>
         {order.map((id, i) => {
           const slide = slides[id];
           return (
-            <div role="listitem" key={id} style={{ flex: '0 0 auto' }}>
+            <div role="listitem" key={id} data-edge-item style={{ flex: '0 0 auto' }}>
               <Thumb slideId={id} n={i + 1} title={slide?.title ?? id} url={thumbs[id]} selected={id === selected} onClick={() => onSelect(id)} />
             </div>
           );
