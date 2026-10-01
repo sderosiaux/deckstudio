@@ -482,7 +482,7 @@ describe('History QA1', () => {
     await waitFor(() => api.getHistoryDiff.mock.calls.some(([a, b]) => a === 3 && b === 2));
   });
 
-  it('an empty version reads "empty (before import)" and cannot be opened as a lane', async () => {
+  it('an empty version reads "empty" and cannot be opened as a lane', async () => {
     const api = stubApi();
     snaps[0] = snap([]);
     try {
@@ -490,11 +490,11 @@ describe('History QA1', () => {
       render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);
       await waitFor(() => screen.queryAllByTestId('version').length === 4);
       const v0 = screen.getAllByTestId('version').find((v) => v.getAttribute('data-version') === '0')!;
-      expect(within(v0).getByTestId('version-cause').textContent).toBe('empty (before import)');
+      expect(within(v0).getByTestId('version-cause').textContent).toBe('empty');
       fireEvent.click(versionButton(0));
       const open = (await screen.findByRole('button', { name: 'Open v0 as a lane' })) as HTMLButtonElement;
       expect(open.disabled).toBe(true);
-      expect(open.title).toBe('v0 is empty (before import)');
+      expect(open.title).toBe('v0 is empty');
     } finally {
       delete snaps[0];
     }

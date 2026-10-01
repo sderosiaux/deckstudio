@@ -13,7 +13,9 @@ import {
   type FocusApi,
   type LanePreviewPayload,
   type ThumbStatus,
+  mainHref,
 } from '../api.js';
+import { routeOf } from '../base.js';
 import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
 import { ALREADY_ON_MAIN, causesOf, settledNote } from '../components/ChangeButtons.js';
 import { BackToMain, ScreenHeader } from '../components/ScreenHeader.js';
@@ -50,7 +52,7 @@ const message = (err: unknown): string => (err instanceof Error ? err.message : 
  */
 export function pathAfter(lane: Lane, changeId: string, slide: SlideId, mainOrder: readonly SlideId[]): string {
   const pending = pendingOf(lane).filter((c) => c.id !== changeId);
-  if (pending.length === 0) return mainOrder.includes(slide) ? slidePath(slide) : '/';
+  if (pending.length === 0) return mainOrder.includes(slide) ? slidePath(slide) : mainHref();
   const pos = lane.changes.findIndex((c) => c.id === changeId);
   const next = pending.find((c) => lane.changes.indexOf(c) > pos) ?? pending[0]!;
   return focusPath(lane.id, next.id);
@@ -482,7 +484,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
         <p style={{ color: 'var(--warn)', fontWeight: 700 }}>Could not load this lane.</p>
         <p className="muted mono">{load.message}</p>
         <button type="button" className="btn" onClick={() => void reload()}>Retry</button>{' '}
-        <a href="/" onClick={go('/')} className="link">back to main</a>
+        <a href={mainHref()} onClick={go(mainHref())} className="link">back to main</a>
       </div>
     );
   }
@@ -564,7 +566,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
       let nextLabel: string;
       let pair: Ack['pair'] = null;
       const labelFor = (path: string, mainOrder: readonly SlideId[]): string =>
-        path.startsWith('/lane/') ? 'next change' : path.startsWith('/slide/') ? `back to slide ${mainOrder.indexOf(target) + 1}` : 'back to main';
+        routeOf(path).startsWith('/lane/') ? 'next change' : routeOf(path).startsWith('/slide/') ? `back to slide ${mainOrder.indexOf(target) + 1}` : 'back to main';
       if (verb === 'accept') {
         const res = await api.acceptChange(lane.id, change.id);
         text = `accepted into main as v${res.version.n}`;

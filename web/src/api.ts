@@ -2,8 +2,10 @@ import type { Anchor, Brief, Change, DeckState, DiffEntry, Lane, Remark, Slide, 
 import type { BusEvent as ServerBusEvent } from '../../src/server/bus.js';
 import type { DesignInfo } from '../../src/server/routes/brief.js';
 import type { CheckName, ChecksStatus } from '../../src/server/routes/checks.js';
+import type { DeckSummary } from '../../src/server/registry.js';
+import { withBase } from './base.js';
 
-export type { CheckName, ChecksStatus, DesignInfo };
+export type { CheckName, ChecksStatus, DeckSummary, DesignInfo };
 /**
  * `hello` arrives on every (re)open of the socket. `subscribe` emits it itself with `version: null`
  * (the client cannot know the server's version); the server may also send its own with the deck version.
@@ -86,26 +88,30 @@ async function send(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unkn
 
 const seg = encodeURIComponent;
 
+/** Per-deck calls: the path is the deck's own ('/api/deck'), sent under the deck the page shows. */
+const deckGet = <T>(path: string): Promise<T> => getJson<T>(withBase(path));
+const deckSend = (method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<Response> => send(method, withBase(path), body);
+
 export function getDeck(): Promise<DeckPayload> {
-  return getJson<DeckPayload>('/api/deck');
+  return deckGet<DeckPayload>('/api/deck');
 }
 
 export function getVersions(): Promise<Version[]> {
-  return getJson<Version[]>('/api/versions');
+  return deckGet<Version[]>('/api/versions');
 }
 
 /** Asks the server for a slide's thumbnail; the server enqueues the render when it is not ready yet. */
 export function thumbFor(slideId: SlideId): Promise<ThumbStatus> {
-  return getJson<ThumbStatus>(`/api/thumbs/for/${encodeURIComponent(slideId)}`);
+  return deckGet<ThumbStatus>(`/api/thumbs/for/${encodeURIComponent(slideId)}`);
 }
 
 /** A slide as it was in version n (history): same hash cache as main's thumbs; `thumb.ready` follows, matched by hash. */
 export function thumbForVersion(n: number, slideId: SlideId): Promise<ThumbStatus> {
-  return getJson<ThumbStatus>(`/api/thumbs/version/${n}/${encodeURIComponent(slideId)}`);
+  return deckGet<ThumbStatus>(`/api/thumbs/version/${n}/${encodeURIComponent(slideId)}`);
 }
 
 export function thumbUrl(hash: string): string {
-  return `/api/thumbs/${hash}.png`;
+  return withBase(`/api/thumbs/${hash}.png`);
 }
 
 export type LaneFilter = 'draft' | 'open' | 'all';
@@ -119,63 +125,63 @@ export type LanePayload = Omit<Lane, 'changes'> & { changes: LaneChange[] };
 
 /** Open lanes by default; `draft` lists the lanes a check proposed that the creator has not opened yet, `all` includes closed ones. */
 export function getLanes(status?: LaneFilter): Promise<LanePayload[]> {
-  return getJson<LanePayload[]>(status ? `/api/lanes?status=${status}` : '/api/lanes');
+  return deckGet<LanePayload[]>(status ? `/api/lanes?status=${status}` : '/api/lanes');
 }
 
 /** Turns a draft lane into an open one; `lane.updated` follows. */
 export async function openLane(laneId: string): Promise<void> {
-  await send('POST', `/api/lanes/${seg(laneId)}/open`);
+  await deckSend('POST', `/api/lanes/${seg(laneId)}/open`);
 }
 
 /** One lane by id, open or closed. */
 export function getLane(laneId: string): Promise<LanePayload> {
-  return getJson<LanePayload>(`/api/lanes/${seg(laneId)}`);
+  return deckGet<LanePayload>(`/api/lanes/${seg(laneId)}`);
 }
 
 /** Also enqueues the thumbnails of the lane's changed slides; `thumb.ready` follows for each. */
 export function getLanePreview(laneId: string): Promise<LanePreviewPayload> {
-  return getJson<LanePreviewPayload>(`/api/lanes/${seg(laneId)}/preview`);
+  return deckGet<LanePreviewPayload>(`/api/lanes/${seg(laneId)}/preview`);
 }
 
 export async function acceptChange(laneId: string, changeId: string): Promise<{ version: Version; lane: Lane }> {
-  const res = await send('POST', `/api/lanes/${seg(laneId)}/changes/${seg(changeId)}/accept`);
+  const res = await deckSend('POST', `/api/lanes/${seg(laneId)}/changes/${seg(changeId)}/accept`);
   return (await res.json()) as { version: Version; lane: Lane };
 }
 
 export async function refuseChange(laneId: string, changeId: string): Promise<Lane> {
-  const res = await send('POST', `/api/lanes/${seg(laneId)}/changes/${seg(changeId)}/refuse`);
+  const res = await deckSend('POST', `/api/lanes/${seg(laneId)}/changes/${seg(changeId)}/refuse`);
   return (await res.json()) as Lane;
 }
 
 export async function discardLane(laneId: string): Promise<void> {
-  await send('DELETE', `/api/lanes/${seg(laneId)}`);
+  await deckSend('DELETE', `/api/lanes/${seg(laneId)}`);
 }
 
 export function getThread(key: ThreadKey): Promise<ThreadMessage[]> {
-  return getJson<ThreadMessage[]>(`/api/threads/${seg(key)}`);
+  return deckGet<ThreadMessage[]>(`/api/threads/${seg(key)}`);
 }
 
 /** The server answers 202 and streams the reply as `assistant.delta` events, then `assistant.done`. */
 export async function postMessage(key: ThreadKey, text: string, context: Anchor | null): Promise<void> {
-  await send('POST', `/api/threads/${seg(key)}/messages`, { text, context });
+  await deckSend('POST', `/api/threads/${seg(key)}/messages`, { text, context });
 }
 
 export function getBrief(): Promise<Brief> {
-  return getJson<Brief>('/api/brief');
+  return deckGet<Brief>('/api/brief');
 }
 
 export function getDesign(): Promise<DesignInfo> {
-  return getJson<DesignInfo>('/api/brief/design');
+  return deckGet<DesignInfo>('/api/brief/design');
 }
 
 export async function putBrief(brief: Brief): Promise<Brief> {
-  const res = await send('PUT', '/api/brief', brief);
+  const res = await deckSend('PUT', '/api/brief', brief);
   return (await res.json()) as Brief;
 }
 
 /** Every remark, open ones first. */
 export function getRemarks(): Promise<Remark[]> {
-  return getJson<Remark[]>('/api/remarks');
+  return deckGet<Remark[]>('/api/remarks');
 }
 
 export interface NewRemark {
@@ -185,28 +191,28 @@ export interface NewRemark {
 }
 
 export async function postRemark(input: NewRemark): Promise<Remark> {
-  const res = await send('POST', '/api/remarks', input);
+  const res = await deckSend('POST', '/api/remarks', input);
   return (await res.json()) as Remark;
 }
 
 export async function resolveRemark(id: string): Promise<Remark> {
-  const res = await send('POST', `/api/remarks/${seg(id)}/resolve`);
+  const res = await deckSend('POST', `/api/remarks/${seg(id)}/resolve`);
   return (await res.json()) as Remark;
 }
 
 /** Hands the remark to the co-author on thread `remark:<id>`; the lane it proposes arrives as `lane.created`. */
 export async function proposeRemark(id: string): Promise<void> {
-  await send('POST', `/api/remarks/${seg(id)}/propose`);
+  await deckSend('POST', `/api/remarks/${seg(id)}/propose`);
 }
 
 /** Starts the checks in the background (all four when `names` is omitted); progress arrives as `checks.status`. */
 export async function runChecks(names?: CheckName[]): Promise<{ started: CheckName[] }> {
-  const res = await send('POST', '/api/checks/run', names ? { names } : {});
+  const res = await deckSend('POST', '/api/checks/run', names ? { names } : {});
   return (await res.json()) as { started: CheckName[] };
 }
 
 export function getChecksStatus(): Promise<ChecksStatus> {
-  return getJson<ChecksStatus>('/api/checks/status');
+  return deckGet<ChecksStatus>('/api/checks/status');
 }
 
 /** What `GET /api/history/diff` answers: the entries that turn version `a` into version `b`. */
@@ -218,21 +224,21 @@ export interface HistoryDiff {
 
 /** Main as it was at version `n`. */
 export function getVersionSnapshot(n: number): Promise<Snapshot> {
-  return getJson<Snapshot>(`/api/versions/${n}`);
+  return deckGet<Snapshot>(`/api/versions/${n}`);
 }
 
 export function getHistoryDiff(a: number, b: number): Promise<HistoryDiff> {
-  return getJson<HistoryDiff>(`/api/history/diff?a=${a}&b=${b}`);
+  return deckGet<HistoryDiff>(`/api/history/diff?a=${a}&b=${b}`);
 }
 
 /** Undoes one entry of the diff from version `from` onto current main; the server records a `restore` version. */
 export async function restoreEntry(from: number, entry: DiffEntry): Promise<void> {
-  await send('POST', '/api/history/restore', { from, entry });
+  await deckSend('POST', '/api/history/restore', { from, entry });
 }
 
 /** Proposes, as a user lane, the changes that bring current main back to version `n`. */
 export async function openVersionAsLane(n: number): Promise<{ laneId: string }> {
-  const res = await send('POST', '/api/history/open-as-lane', { n });
+  const res = await deckSend('POST', '/api/history/open-as-lane', { n });
   return (await res.json()) as { laneId: string };
 }
 
@@ -315,21 +321,29 @@ export const remarkApi: RemarkApi = { proposeRemark, resolveRemark };
 export const briefChecksApi: BriefChecksApi = { getDeck, getBrief, putBrief, getRemarks, proposeRemark, runChecks, getChecksStatus, getLanes, openLane, thumbFor, getDesign };
 export const historyApi: HistoryApi = { getDeck, getVersions, getVersionSnapshot, getHistoryDiff, restoreEntry, openVersionAsLane, thumbFor, thumbForVersion };
 
-/** Client-side routes. The server answers index.html for any non-API path, so these also work on reload. */
+/**
+ * Client-side routes, full paths under the deck the page shows (/d/<id>/...): hrefs and navigate() take them as they
+ * are. The server answers index.html for any non-API path, so these also work on reload.
+ */
 export function focusPath(laneId: string, changeId: string): string {
-  return `/lane/${seg(laneId)}/change/${seg(changeId)}`;
+  return withBase(`/lane/${seg(laneId)}/change/${seg(changeId)}`);
 }
 
 /** One slide of main on its edit screen, with the co-author thread `slide:<id>`. */
 export function slidePath(slideId: SlideId): string {
-  return `/slide/${seg(slideId)}`;
+  return withBase(`/slide/${seg(slideId)}`);
 }
 
 /** Main with a slide (or range) selected: `?select=<slideId>` and, for a range, `&to=<slideId>`. Arc selects nothing. */
 export function mainPath(anchor: Anchor): string {
-  if (anchor.kind === 'slide') return `/?select=${seg(anchor.slide)}`;
-  if (anchor.kind === 'range') return `/?select=${seg(anchor.from)}&to=${seg(anchor.to)}`;
-  return '/';
+  if (anchor.kind === 'slide') return withBase(`/?select=${seg(anchor.slide)}`);
+  if (anchor.kind === 'range') return withBase(`/?select=${seg(anchor.from)}&to=${seg(anchor.to)}`);
+  return mainHref();
+}
+
+/** Main of the deck the page shows, nothing selected. */
+export function mainHref(): string {
+  return withBase('/');
 }
 
 /** Reads what `mainPath` wrote. */
@@ -341,12 +355,18 @@ export function selectionFromSearch(search: string): Anchor | null {
   return to && to !== from ? { kind: 'range', from, to } : { kind: 'slide', slide: from };
 }
 
-export const BRIEF_PATH = '/brief';
-export const HISTORY_PATH = '/history';
+/** Screen routes inside a deck, as App matches them once the deck base is stripped. */
+export const BRIEF_ROUTE = '/brief';
+export const HISTORY_ROUTE = '/history';
+export const PRESENT_ROUTE = '/present';
 
-/** History comparing v<a> with v<b>; the history screen reads `?a=&b=` on mount. */
-export function historyPath(a: number, b: number): string {
-  return `${HISTORY_PATH}?a=${a}&b=${b}`;
+export function briefPath(): string {
+  return withBase(BRIEF_ROUTE);
+}
+
+/** The history screen; with a pair, comparing v<a> with v<b> (the screen reads `?a=&b=` on mount). */
+export function historyPath(a?: number, b?: number): string {
+  return a === undefined || b === undefined ? withBase(HISTORY_ROUTE) : withBase(`${HISTORY_ROUTE}?a=${a}&b=${b}`);
 }
 
 /** Reads what `historyPath` wrote; null unless both are version numbers. */
@@ -360,7 +380,7 @@ export function pairFromSearch(search: string): { a: number; b: number } | null 
 
 /** Main scrolled to one lane: `/#lane=<laneId>`. A hash, so main's `?select=` cleanup does not race it. */
 export function laneOnMainPath(laneId: string): string {
-  return `/#lane=${seg(laneId)}`;
+  return withBase(`/#lane=${seg(laneId)}`);
 }
 
 /** Reads what `laneOnMainPath` wrote. */
@@ -375,14 +395,77 @@ export function openPlayer(href: string): void {
 
 /** The player URL, opened on slide `index` (0-based) when known. */
 export function playerHref(index: number): string {
-  return index >= 0 ? `/api/present#${index + 1}` : '/api/present';
+  return index >= 0 ? `${presentUrl()}#${index + 1}` : presentUrl();
 }
 
-/** Changes the screen without a page load; App listens to popstate. */
+/** The standalone player page of the deck the page shows. */
+export function presentUrl(): string {
+  return withBase('/api/present');
+}
+
+/** Changes the screen without a page load; App listens to popstate. `path` is a full path (see the route helpers). */
 export function navigate(path: string): void {
   history.pushState(null, '', path);
   dispatchEvent(new PopStateEvent('popstate'));
 }
+
+/** The home screen: every deck of the studio. */
+export const HOME_PATH = '/';
+
+/** Main of deck `id`, from anywhere (the home screen has no deck base). */
+export function deckHref(id: string): string {
+  return `/d/${seg(id)}/`;
+}
+
+/** Every deck of the studio, most recently changed first. Root route: the same from the home screen or a deck. */
+export function listDecks(): Promise<DeckSummary[]> {
+  return getJson<DeckSummary[]>('/api/decks');
+}
+
+/** One deck's summary; ApiError 404 when the studio has no deck by that id. */
+export function getDeckSummary(id: string): Promise<DeckSummary> {
+  return getJson<DeckSummary>(`/api/decks/${seg(id)}`);
+}
+
+export interface NewDeck {
+  title: string;
+  audience: string;
+  message: string;
+  pattern?: Brief['pattern'];
+  abstract?: string;
+  /** Left out, the server writes the starter rules. */
+  design?: { rules?: string };
+}
+
+/** Creates an empty deck with the starter brief; ApiError 409 when its id (the title's slug) is taken. */
+export async function createDeck(input: NewDeck): Promise<DeckSummary> {
+  const res = await send('POST', '/api/decks', input);
+  return (await res.json()) as DeckSummary;
+}
+
+/** Imports a single-file deck.html from a path on the server's machine. */
+export async function importDeck(path: string): Promise<DeckSummary> {
+  const res = await send('POST', '/api/decks/import', { path });
+  return (await res.json()) as DeckSummary;
+}
+
+/** A slide's thumbnail in deck `id` (the home screen's cover), enqueued by the server when not ready yet. */
+export function deckThumbFor(id: string, slideId: SlideId): Promise<ThumbStatus> {
+  return getJson<ThumbStatus>(`/d/${seg(id)}/api/thumbs/for/${seg(slideId)}`);
+}
+
+export function deckThumbUrl(id: string, hash: string): string {
+  return `/d/${seg(id)}/api/thumbs/${hash}.png`;
+}
+
+/** What the home screen reads and writes, injectable for tests. */
+export interface HomeApi {
+  listDecks(): Promise<DeckSummary[]>;
+  createDeck(input: NewDeck): Promise<DeckSummary>;
+  importDeck(path: string): Promise<DeckSummary>;
+  deckThumbFor(id: string, slideId: SlideId): Promise<ThumbStatus>;
+}
+export const homeApi: HomeApi = { listDecks, createDeck, importDeck, deckThumbFor };
 
 const BACKOFF_MIN_MS = 500;
 const BACKOFF_MAX_MS = 10_000;
@@ -400,7 +483,7 @@ export function subscribe(handler: (e: BusEvent) => void): () => void {
   const connect = (): void => {
     if (closed) return;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    const ws = new WebSocket(`${proto}://${location.host}${withBase('/ws')}`);
     socket = ws;
     ws.onopen = () => {
       delay = BACKOFF_MIN_MS;
