@@ -3,8 +3,8 @@ export const meta = {
   description: 'Space-usage loop: measure every screen in the real DOM (coverage above the fold, largest slide render) at two viewports, fix per screen family in worktrees, re-measure, up to 3 rounds',
   phases: [{ title: 'Measure', detail: 'four screens, two viewports' }, { title: 'Fix', detail: 'per screen family, worktrees' }],
 }
-// args: { url, repo, wt, outDir, maxRounds }
-const { url, repo, wt, outDir, maxRounds } = args
+// args: { url, repo, wt, outDir, maxRounds, startRound }
+const { url, repo, wt, outDir, maxRounds, startRound } = args
 const RULE = `
 Space rule (decided by the creator and the architect): deckstudio is a presentation tool, so the slide render is always the largest element on screen. On every screen the before/after renders fill the available width; empty paper above the fold is at most 25% of the viewport at 1440x900 and at 1920x1080; the largest slide render is at least 40% of the viewport width on focus and on the slide screen, and at least 30% on main when a slide is selected. A move shows both strips large, with the moved slide bigger than its neighbours, never two 5-thumb excerpts in a corner. Text columns stay under 80 characters, so freed width goes to the renders, not to longer lines.`
 const MEASURE = { type: 'object', properties: { screen: { type: 'string' }, results: { type: 'array', items: { type: 'object', properties: { viewport: { type: 'string' }, coverage_above_fold: { type: 'number' }, largest_render_width_ratio: { type: 'number' }, empty_bands: { type: 'array', items: { type: 'string' } }, screenshot: { type: 'string' }, verdict: { type: 'string', enum: ['pass', 'fail'] }, why: { type: 'string' } }, required: ['viewport', 'coverage_above_fold', 'largest_render_width_ratio', 'empty_bands', 'screenshot', 'verdict', 'why'] } } }, required: ['screen', 'results'] }
@@ -31,7 +31,7 @@ Rules: TDD where a behaviour changes, TypeScript ESM (.js suffixes), strict, no 
 
 const rounds = []
 let failing = null
-for (let r = 1; r <= (maxRounds ?? 3); r++) {
+for (let r = startRound ?? 1; r <= (maxRounds ?? 3); r++) {
   phase('Measure')
   const measures = (await parallel(SCREENS.map(s => () => agent(measurePrompt(s, r), { label: `measure:${s.key}:r${r}`, phase: 'Measure', schema: MEASURE, model: 'opus' })))).filter(Boolean)
   const failed = measures.filter(m => m.results.some(x => x.verdict === 'fail'))
