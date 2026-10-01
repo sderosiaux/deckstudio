@@ -142,10 +142,13 @@ export function pairCardWidth(pane: { width: number; height: number }): number {
   return Math.max(160, Math.floor(Math.min(byWidth, byHeight)));
 }
 
-/** How many of the other side's slides the context card shows on each side of the gap. */
-const CONTEXT_EACH_SIDE = 2;
+/** How many of the other side's slides the context card shows: a 2x2 tiling of its 16:9 frame. */
+const CONTEXT_SLIDES = 4;
 
-/** Where a slide that one side only has would sit on the other: the gap's index there, and its slides just before and after it. */
+/**
+ * Where a slide that one side only has would sit on the other: the gap's index there, and the other side's slides
+ * around it, four of them when it has four (two and two, shifted at either end), so the thumbs tile the frame.
+ */
 export interface SlidePlace {
   /** 0-based index in the other side's order where the slide would go. */
   at: number;
@@ -164,7 +167,8 @@ export function placeIn(id: SlideId, own: Snapshot, other: Snapshot): SlidePlace
   const next = own.order.slice(i + 1).find((x) => other.order.includes(x));
   const at = prev !== undefined ? other.order.indexOf(prev) + 1 : next !== undefined ? other.order.indexOf(next) : -1;
   if (at < 0) return null;
-  return { at, before: other.order.slice(Math.max(0, at - CONTEXT_EACH_SIDE), at), after: other.order.slice(at, at + CONTEXT_EACH_SIDE) };
+  const start = Math.max(0, Math.min(at - CONTEXT_SLIDES / 2, other.order.length - CONTEXT_SLIDES));
+  return { at, before: other.order.slice(start, at), after: other.order.slice(at, start + CONTEXT_SLIDES) };
 }
 
 /** "between slides 2 and 3", "after slide 5", "before slide 1": in the other side's numbers. */
@@ -183,18 +187,30 @@ interface ContextCardProps {
   thumbs: Record<SlideId, string | undefined>;
 }
 
+/** Grid lines of the context frame: cells in columns 2 and 4, rows 1 and 3; the slots between them hold the gap mark. */
+const cellAt = (i: number): CSSProperties => ({ gridRow: Math.floor(i / 2) * 2 + 1, gridColumn: i % 2 === 0 ? 2 : 4 });
+
+/** The gap mark: across the middle row when it falls between the two rows, else upright in the slot beside a cell. */
+function gapAt(g: number, count: number): { across: boolean; style: CSSProperties } {
+  if (g === 2 && count > 2) return { across: true, style: { gridRow: 2, gridColumn: '1 / -1' } };
+  if (g === count && g > 0) return { across: false, style: { gridRow: Math.floor((g - 1) / 2) * 2 + 1, gridColumn: (g - 1) % 2 === 0 ? 3 : 5 } };
+  return { across: false, style: { gridRow: Math.floor(g / 2) * 2 + 1, gridColumn: g % 2 === 0 ? 1 : 3 } };
+}
+
 /**
  * The side of the compare where the slide does not exist: not an empty dashed frame but that side's slides around its
- * place, two before and two after, the gap marked between them, at the size of the render it faces. Same card as
- * SlidePreview's; the thumbs size from the frame's own box (a size container) so the two rows fill it.
+ * place, four of them tiling the frame two by two at the size of the render it faces, the gap marked in the accent
+ * where it falls. Where the slide goes is said on the label line, the captions sit on the thumbs: the frame is all slides.
  */
 function ContextCard({ label, absent, verb, width, place, side, thumbs }: ContextCardProps) {
-  // A lone slide before the gap sits next to it, in the second column, so the strip still reads left to right.
-  const cell = (id: SlideId, i: number, all: SlideId[]) => {
+  const ids = place ? [...place.before, ...place.after] : [];
+  const g = place?.before.length ?? 0;
+  const gap = gapAt(g, ids.length);
+  const cell = (id: SlideId, i: number) => {
     const n = side.order.indexOf(id) + 1;
     const title = side.slides[id]?.title ?? id;
     return (
-      <figure key={id} data-testid="context-thumb" data-slide={id} className="compare-context-thumb" style={all === place?.before && all.length === 1 && i === 0 ? { gridColumn: 2 } : undefined}>
+      <figure key={id} data-testid="context-thumb" data-slide={id} className="compare-context-thumb" style={cellAt(i)}>
         <div className="compare-context-img">
           {thumbs[id] ? <img src={thumbs[id]} alt={title} draggable={false} /> : <span>{title}</span>}
         </div>
@@ -202,18 +218,19 @@ function ContextCard({ label, absent, verb, width, place, side, thumbs }: Contex
       </figure>
     );
   };
+  const where = place ? `${absent}, ${verb} ${placeWords(place)}` : absent;
+  const caption = `${label.slice(0, label.indexOf(','))}, ${where}`;
   return (
     <figure data-testid="slide-preview" data-variant="missing" aria-label={label} className="compare-context" style={width === undefined ? undefined : { width, flex: `0 0 ${width}px` }}>
-      <figcaption className="compare-context-label" title={label}>{label}</figcaption>
+      <figcaption className="compare-context-label" title={caption}>{caption}</figcaption>
       <div className="compare-context-frame">
         {place ? (
           <div className="compare-context-grid">
-            {place.before.map(cell)}
-            <div data-testid="context-gap" className="compare-context-gap" />
-            {place.after.map(cell)}
+            {ids.slice(0, g).map((id, i) => cell(id, i))}
+            <div data-testid="context-gap" className="compare-context-gap" data-across={gap.across ? 'true' : 'false'} style={gap.style} />
+            {ids.slice(g).map((id, i) => cell(id, g + i))}
           </div>
         ) : null}
-        <p className="compare-context-text">{place ? `${absent}, ${verb} ${placeWords(place)}` : absent}</p>
       </div>
     </figure>
   );
@@ -253,13 +270,9 @@ function ComparePair({ compared, slide, thumbsA, thumbsB }: ComparePairProps) {
   const atB = b.order.indexOf(slide);
   const width = size && size.width > 0 && size.height > 0 ? pairCardWidth(size) : undefined;
   const title = (s: Snapshot): string => s.slides[slide]?.title ?? slide;
-  const entry = entries.find((e) => e.slide === slide);
   return (
     <div style={{ display: 'flex', flex: '1 1 0', minHeight: 0 }}>
-      <div className="gutter row-label" data-testid="compare-what" style={{ position: 'static', paddingTop: 12, color: changed ? 'var(--accent)' : 'var(--grey)' }}>
-        {entry ? describeEntry(entry, compared).what : 'unchanged'}
-      </div>
-      <div ref={pane} data-testid="compare-pair" style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', gap: PAIR_GAP, alignItems: 'flex-start', padding: `${PANE_PAD_Y}px ${PANE_PAD_X}px`, overflow: 'hidden' }}>
+      <div ref={pane} data-testid="compare-pair" style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', gap: PAIR_GAP, alignItems: 'flex-start', justifyContent: 'center', padding: `${PANE_PAD_Y}px ${PANE_PAD_X}px`, overflow: 'hidden' }}>
         {atA >= 0 ? (
           <SlidePreview label={`v${pair.a}, slide ${atA + 1}`} variant="main" title={title(a)} url={thumbsA[slide]} width={width} />
         ) : (
