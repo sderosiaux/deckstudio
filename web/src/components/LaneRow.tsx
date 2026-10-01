@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type RefObject } from 'react';
 import type { Anchor, Change, Lane, Remark, Slide, SlideId, SlidePatch } from '../../../src/model/types.js';
 import { focusPath, navigate, remarkApi as defaultRemarkApi, thumbUrl, type LaneApi, type LaneChange, type LanePayload, type LanePreviewPayload, type RemarkApi } from '../api.js';
-import { ChangeButtons } from './ChangeButtons.js';
+import { ChangeButtons, settledNote } from './ChangeButtons.js';
 import { RemarkPostIt, anchorLabel } from './Remark.js';
 import { Thumb } from './Thumb.js';
 
@@ -57,11 +57,13 @@ export function anchorColumns(anchor: Anchor, order: SlideId[]): { start: number
   return { start: Math.min(a, b), span: Math.abs(b - a) + 1 };
 }
 
-type Mark = 'none' | 'inserted' | 'modified' | 'moved' | 'removed';
+/** `settled`: a slide whose changes in this lane are all decided (accepted, refused) or stale, none pending. */
+type Mark = 'inserted' | 'modified' | 'moved' | 'removed' | 'settled';
 export interface Cell {
   id: SlideId;
   title: string;
   mark: Mark;
+  /** The pending changes on the slide; for a settled cell, its decided ones. */
   changes: Change[];
   /** 0-based main (deck) column the cell sits under. Every cell of a lane shares one row. */
   col: number;
@@ -98,32 +100,36 @@ function cellOffSlide(changes: readonly Change[]): OffSlideField[] {
 export const targetOf = (c: Change): SlideId => (c.kind === 'insert' ? c.slide.id : c.slide);
 
 /**
- * The lane's slides laid in one row, each pinned to a main column:
- * - slides of the anchor range and any slide with a live change (even outside the range) sit under their own column;
+ * The lane's own slides laid in one row, each pinned to a main column. A slide gets a cell only for a change of the
+ * lane: an unchanged slide of main never shows in a lane row (main's row above already shows it).
+ * - a slide with a live change sits under its own column;
  * - a removed slide, and a moved one, leave a dashed slot at their own column (a moved slot knows where the slide lands);
- * - an inserted slide takes the column right after the main slide it follows, or the next one a changed cell or slot
- *   does not hold (an unchanged context cell in the way yields: main already shows that slide).
+ * - a slide whose changes are all decided or stale (accepted, refused, orphan) keeps its column on main, as a settled
+ *   cell; a decided change whose slide has no column on main (an accepted removal) has no cell;
+ * - an inserted slide takes the column right after the main slide it follows, or the next one no other cell holds.
  * Cells come sorted by column.
  */
-export function laneCells(
-  lane: Lane,
-  preview: LanePreviewPayload,
-  mainOrder: SlideId[],
-  cols: { start: number; span: number },
-  mainSlides?: Record<SlideId, Slide>,
-): Cell[] {
+export function laneCells(lane: Lane, preview: LanePreviewPayload, mainOrder: SlideId[], mainSlides?: Record<SlideId, Slide>): Cell[] {
   const skipped = new Set(preview.skipped);
   const live = lane.changes.filter((c) => c.status === 'pending' && !skipped.has(c.id));
   const byTarget = new Map<SlideId, Change[]>();
   for (const c of live) byTarget.set(targetOf(c), [...(byTarget.get(targetOf(c)) ?? []), c]);
+  // Decided changes on slides with no live change left: one settled cell per slide.
+  const decided = new Map<SlideId, Change[]>();
+  for (const c of lane.changes) {
+    if (c.status === 'pending' || byTarget.has(targetOf(c))) continue;
+    decided.set(targetOf(c), [...(decided.get(targetOf(c)) ?? []), c]);
+  }
   const has = (id: SlideId, kind: Change['kind']): boolean => (byTarget.get(id) ?? []).some((c) => c.kind === kind);
   const mainIndex = new Map(mainOrder.map((id, i) => [id, i] as const));
   const displaced = (id: SlideId): boolean => has(id, 'insert') || has(id, 'move') || !mainIndex.has(id);
 
-  const range = new Set(mainOrder.slice(cols.start, cols.start + cols.span));
-  const markOf = (id: SlideId): Mark => (has(id, 'insert') ? 'inserted' : has(id, 'move') ? 'moved' : has(id, 'modify') ? 'modified' : 'none');
-  // A removed slide is gone from the preview: main still has its title.
-  const titleOf = (id: SlideId): string => preview.slides[id]?.title ?? mainSlides?.[id]?.title ?? id;
+  const markOf = (id: SlideId): Mark => (has(id, 'insert') ? 'inserted' : has(id, 'move') ? 'moved' : has(id, 'remove') ? 'removed' : 'modified');
+  // A removed slide is gone from the preview: main still has its title; a refused insert only its change has.
+  const titleOf = (id: SlideId): string => {
+    const inserted = (decided.get(id) ?? []).find((c) => c.kind === 'insert');
+    return preview.slides[id]?.title ?? mainSlides?.[id]?.title ?? (inserted?.kind === 'insert' ? inserted.slide.title : id);
+  };
 
   // Boundary a displaced slide lands before: right after its change's `after` when that is in place on main, else
   // after the nearest preceding in-place slide of the preview (e.g. after another inserted slide), else the start.
@@ -140,39 +146,60 @@ export function laneCells(
   };
 
   const fixed: Cell[] = [];
-  const floating: Array<{ id: SlideId; boundary: number }> = [];
+  const floating: Array<{ id: SlideId; boundary: number; settled: boolean }> = [];
   preview.order.forEach((id, pos) => {
-    if (!range.has(id) && !byTarget.has(id)) return;
-    const base = { id, title: titleOf(id), mark: markOf(id), changes: byTarget.get(id) ?? [] };
+    if (!byTarget.has(id)) return;
+    const base = { id, title: titleOf(id), mark: markOf(id), changes: byTarget.get(id)! };
     if (!displaced(id)) fixed.push({ ...base, col: mainIndex.get(id)!, slot: false });
     else if (has(id, 'move') && mainIndex.has(id) && !has(id, 'insert')) {
       fixed.push({ ...base, col: mainIndex.get(id)!, slot: true, dest: { boundary: boundaryOf(id, pos), at: pos + 1 } });
-    } else floating.push({ id, boundary: boundaryOf(id, pos) });
+    } else floating.push({ id, boundary: boundaryOf(id, pos), settled: false });
   });
   const inPreview = new Set(preview.order);
   for (const [i, id] of mainOrder.entries()) {
     if (inPreview.has(id) || !has(id, 'remove')) continue;
     fixed.push({ id, title: titleOf(id), mark: 'removed', changes: byTarget.get(id) ?? [], col: i, slot: true });
   }
+  for (const [id, changes] of decided) {
+    const at = mainIndex.get(id);
+    if (at !== undefined) {
+      fixed.push({ id, title: titleOf(id), mark: 'settled', changes, col: at, slot: false });
+      continue;
+    }
+    // A refused or stale insert never reached main: it stays where it would have landed.
+    const insert = changes.find((c) => c.kind === 'insert');
+    if (insert?.kind !== 'insert') continue;
+    const boundary = insert.after === null ? 0 : mainIndex.get(insert.after);
+    if (boundary !== undefined) floating.push({ id, boundary: insert.after === null ? 0 : boundary + 1, settled: true });
+  }
 
-  // Changed cells and slots hold their column; an unchanged context cell gives way to an inserted slide.
-  const held = new Set(fixed.filter((c) => c.slot || c.mark !== 'none').map((c) => c.col));
+  // Every fixed cell holds its column; an inserted slide takes the next free one, a pending insert before a settled one.
+  const held = new Set(fixed.map((c) => c.col));
   const placed: Cell[] = [];
-  for (const f of floating) {
+  for (const f of [...floating.filter((x) => !x.settled), ...floating.filter((x) => x.settled)]) {
     let col = f.boundary;
     while (held.has(col)) col++;
     held.add(col);
-    placed.push({ id: f.id, title: titleOf(f.id), mark: markOf(f.id), changes: byTarget.get(f.id) ?? [], col, slot: false });
+    placed.push(
+      f.settled
+        ? { id: f.id, title: titleOf(f.id), mark: 'settled', changes: decided.get(f.id)!, col, slot: false }
+        : { id: f.id, title: titleOf(f.id), mark: markOf(f.id), changes: byTarget.get(f.id)!, col, slot: false },
+    );
   }
-  const taken = new Set(placed.map((c) => c.col));
-  return [...fixed.filter((c) => !taken.has(c.col)), ...placed].sort((a, b) => a.col - b.col);
+  return [...fixed, ...placed].sort((a, b) => a.col - b.col);
+}
+
+/** How a settled cell reads: accepted when any of its changes went to main, else refused, else stale. */
+export function settledKind(changes: readonly Change[]): 'accepted' | 'refused' | 'stale' {
+  if (changes.some((c) => c.status === 'accepted')) return 'accepted';
+  if (changes.some((c) => c.status === 'refused')) return 'refused';
+  return 'stale';
 }
 
 /** Main columns a lane's moved hairlines run down (each moved slot's own column); none while the preview loads. */
 export function movedColumns(lane: Lane, preview: LanePreviewPayload | undefined, mainOrder: SlideId[]): number[] {
   if (!preview) return [];
-  const cols = anchorColumns(lane.anchor, mainOrder) ?? { start: 0, span: Math.max(mainOrder.length, 1) };
-  return laneCells(lane, preview, mainOrder, cols).flatMap((c) => (c.dest ? [c.col] : []));
+  return laneCells(lane, preview, mainOrder).flatMap((c) => (c.dest ? [c.col] : []));
 }
 
 /** The columns the lane region covers: the anchor, widened to every cell's column. */
@@ -294,9 +321,8 @@ export function LaneRow({
   const anchored = anchorColumns(lane.anchor, mainOrder);
   const n = Math.max(mainOrder.length, 1);
   const cols = anchored ?? { start: 0, span: n };
-  const allCells = preview ? laneCells(lane, preview, mainOrder, cols, mainSlides) : [];
-  // A whole-deck lane shows only the slides it touches: its untouched slides are main's, already in the row above.
-  const cells = lane.anchor.kind === 'arc' && allCells.some((c) => c.mark !== 'none') ? allCells.filter((c) => c.mark !== 'none') : allCells;
+  const cells = preview ? laneCells(lane, preview, mainOrder, mainSlides) : [];
+  // A whole-deck lane starts at the first slide it touches, not at the first column of the deck.
   const region = lane.anchor.kind === 'arc' && cells.length > 0 ? regionColumns({ start: cells[0]!.col, span: 1 }, cells) : regionColumns(cols, cells);
   const skipped = preview ? lane.changes.filter((c) => c.status === 'pending' && preview.skipped.includes(c.id)) : [];
   const origin = laneOrigin(lane, mainOrder);
@@ -319,9 +345,16 @@ export function LaneRow({
       onRetryThumbs(lane.id);
       return;
     }
-    // A changed slide opens its first pending change at reading size.
+    // A changed slide opens its first pending change at reading size; a settled one has nothing left to decide.
+    if (cell.mark === 'settled') return;
     const first = cell.changes[0];
     if (first) onOpenChange(lane.id, first.id);
+  };
+  /** The moved slot's link: a plain click opens the change in focus (or retries a failed thumb); a modified click is the browser's. */
+  const followMoved = (e: MouseEvent<HTMLAnchorElement>, cell: Cell): void => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    openCell(cell);
   };
   const thumbOf = (cell: Cell, hoverTitle = true) => (
     <Thumb
@@ -426,17 +459,33 @@ export function LaneRow({
                     data-col={cell.col}
                     data-thumb-failed={thumbFailed(cell.id) ? 'true' : undefined}
                     data-edge-item
+                    // The row's "+N" counts pending changes: a settled cell is covered at the edge but never counted.
+                    data-edge-weight={cell.mark === 'settled' ? 0 : cell.changes.length}
                     // No numbers under lane cells (main's row above numbers the columns): every ✓ ✗ pair sits 12px under the cards.
                     style={{ position: 'relative', gridColumn: `${cell.col - region.start + 1}`, gridRow: '1 / span 2', display: 'grid', gridTemplateRows: 'subgrid', alignItems: 'start' }}
                   >
                     {cell.dest ? (
                       <div data-testid="moved-slot" role="group" aria-label={`moved: ${cell.title}, now slide ${cell.dest.at}`} style={movedStyle}>
                         <MoveMark />
-                        {thumbOf(cell, false)}
-                        <span style={{ lineHeight: '16px', marginTop: 6, whiteSpace: 'nowrap' }}>moved to {cell.dest.at}</span>
-                        <span data-testid="moved-title" title={cell.title} style={movedTitle}>
-                          {cell.title}
-                        </span>
+                        {/* The whole slot opens the move in focus: its card, "moved to N" and the title. */}
+                        <a
+                          className="moved-open"
+                          href={cell.changes[0] ? focusPath(lane.id, cell.changes[0].id) : undefined}
+                          aria-label={`open in focus: move slide ${cell.col + 1} (${cell.title})`}
+                          onClick={(e) => followMoved(e, cell)}
+                          style={movedLink}
+                        >
+                          <SlideCard url={urlFor(cell.id)} />
+                          <span style={{ lineHeight: '16px', marginTop: 6, whiteSpace: 'nowrap' }}>moved to {cell.dest.at}</span>
+                          <span data-testid="moved-title" title={cell.title} style={movedTitle}>
+                            {cell.title}
+                          </span>
+                        </a>
+                      </div>
+                    ) : cell.mark === 'settled' ? (
+                      // Decided: the slide as it stands, a refused or stale one dimmed; the tag under it says which.
+                      <div data-testid="settled-card" data-settled={settledKind(cell.changes)} style={settledKind(cell.changes) === 'accepted' ? undefined : { opacity: 0.45 }}>
+                        {thumbOf(cell)}
                       </div>
                     ) : cell.slot ? (
                       <a
@@ -469,9 +518,13 @@ export function LaneRow({
                     )}
                     {/* Under the card: the ✓ ✗ pairs, and what a story or notes rewrite touches, never over the slide. */}
                     <div data-testid="change-line" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                      {cell.changes.map((c) => (
-                        <ChangeButtons key={c.id} change={c} describe={describe(c)} disabled={busy} onAccept={accept} onRefuse={refuse} />
-                      ))}
+                      {cell.mark === 'settled'
+                        ? cell.changes.map((c) => (
+                            <span key={c.id} data-testid="settled-tag" className="meta" title={describe(c)} style={{ lineHeight: '14px', overflowWrap: 'anywhere' }}>
+                              {settledNote(lane, c) ?? c.status}
+                            </span>
+                          ))
+                        : cell.changes.map((c) => <ChangeButtons key={c.id} change={c} describe={describe(c)} disabled={busy} onAccept={accept} onRefuse={refuse} />)}
                       {cell.mark === 'modified' && cellOffSlide(cell.changes).length > 0 ? (
                         <span data-testid="modified-tag" className="meta" style={{ lineHeight: '14px' }}>
                           {cellOffSlide(cell.changes).join(', ')}
@@ -712,6 +765,24 @@ const slotBox: CSSProperties = {
 const removedStyle: CSSProperties = { ...slotBox, height: 'var(--thumb-h)', border: '1px dashed var(--accent)' };
 /** A moved slide's old column: its card, the hairline from main's thumb landing on the card's top edge, the words under it. */
 const movedStyle: CSSProperties = { ...slotBox, alignItems: 'stretch', justifyContent: 'flex-start' };
+/** The moved slot's link: the card and the words under it, in the slot's own colours. */
+const movedLink: CSSProperties = { display: 'flex', flexDirection: 'column', alignItems: 'stretch', color: 'inherit', textDecoration: 'none', cursor: 'pointer', borderRadius: 4 };
+
+/** A slide's render in a 16:9 card, no control of its own (the moved slot's link holds it); a grey block until ready. */
+function SlideCard({ url }: { url: string | undefined }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [url]);
+  return (
+    <div className="edge-frame" style={{ width: 'var(--thumb-w)', height: 'var(--thumb-h)', borderRadius: 4, overflow: 'hidden', background: 'var(--card)', boxShadow: '0 0 0 1px var(--line)', transition: 'box-shadow .15s ease' }}>
+      {url !== undefined && !failed ? (
+        <img data-testid="thumb-image" src={url} alt="" draggable={false} onError={() => setFailed(true)} style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain' }} />
+      ) : (
+        <div data-testid="thumb-placeholder" style={{ width: '100%', height: '100%', background: 'var(--line)' }} />
+      )}
+    </div>
+  );
+}
+
 /** The moved slide's title: at most two 12px lines in the one column, the whole title in the tooltip. */
 const movedTitle: CSSProperties = {
   fontWeight: 500,
@@ -753,7 +824,7 @@ function ModifiedDot() {
  */
 export function edgeTarget(cells: readonly Cell[], view: { first: number; end: number } | undefined): { side: 'left' | 'right'; col: number } | null {
   if (!view) return null;
-  const changed = cells.filter((c) => c.mark !== 'none' || c.slot).map((c) => c.col);
+  const changed = cells.filter((c) => c.mark !== 'settled').map((c) => c.col);
   if (changed.length === 0 || changed.some((c) => c >= view.first && c < view.end)) return null;
   const after = changed.filter((c) => c >= view.end);
   if (after.length > 0) return { side: 'right', col: Math.min(...after) };

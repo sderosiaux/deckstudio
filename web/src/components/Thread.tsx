@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent, type MouseEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type MouseEvent } from 'react';
 import type React from 'react';
 import type { Anchor, Change, Lane, Slide, SlideId, ThreadKey, ThreadMessage } from '../../../src/model/types.js';
 import {
@@ -57,6 +57,12 @@ export interface ThreadProps {
   lead?: React.ReactNode;
   /** Inline only: the log stops growing at this height and scrolls, following the latest message. */
   logMaxHeight?: string;
+  /**
+   * Panel only: the lead and the log scroll together as one middle between the header and the composer, so the
+   * composer is never pushed out however tall they grow; a fade at the middle's bottom says more lies below. Opening
+   * keeps the top (the lead) in view; the middle follows the end only while a turn runs.
+   */
+  scrollBody?: boolean;
   /**
    * What a reply's proposal offers besides its before/after pair: `all` decides in place (accept, refuse, open in
    * focus); `focus-link` when the screen already lists the lane with its own accept and refuse; `none` on the focus
@@ -465,6 +471,7 @@ export function Thread({
   autoFocus = false,
   lead,
   logMaxHeight,
+  scrollBody = false,
   proposalActions = 'all',
   seed,
   heading = 'screen',
@@ -486,6 +493,7 @@ export function Thread({
   const [ownNotes, setOwnNotes] = useState<ThreadNote[]>([]);
   const turn = useRef<Turn | null>(null);
   const log = useRef<HTMLDivElement>(null);
+  const body = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async (): Promise<ThreadMessage[] | null> => {
@@ -566,10 +574,37 @@ export function Thread({
   // Scroll the log itself: scrollIntoView would also scroll every ancestor, the page included. Inline, the screen
   // scrolls, unless the log has a height of its own.
   const ownScroll = layout === 'panel' || logMaxHeight !== undefined;
+  const pinned = scrollBody && layout === 'panel';
+  const live = pending !== null || streaming !== '';
   useEffect(() => {
-    const el = log.current;
-    if (el && ownScroll) el.scrollTop = el.scrollHeight;
-  }, [messages, streaming, pending, ownScroll]);
+    // A pinned panel's middle starts on its lead; it follows the end once a turn runs.
+    const el = pinned ? body.current : log.current;
+    if (el && ownScroll && (!pinned || live)) el.scrollTop = el.scrollHeight;
+  }, [messages, streaming, pending, ownScroll, pinned, live]);
+
+  // The pinned middle's bottom fade: while more of it lies below its visible end.
+  const [more, setMore] = useState(false);
+  const measureMore = useCallback(() => {
+    const el = body.current;
+    setMore(el !== null && el.scrollHeight - el.clientHeight - el.scrollTop > 1);
+  }, []);
+  useLayoutEffect(() => {
+    if (pinned) measureMore();
+  });
+  useEffect(() => {
+    const el = body.current;
+    if (!pinned || !el) return;
+    el.addEventListener('scroll', measureMore, { passive: true });
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measureMore);
+    ro?.observe(el);
+    const mo = typeof MutationObserver === 'undefined' ? null : new MutationObserver(measureMore);
+    mo?.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => {
+      el.removeEventListener('scroll', measureMore);
+      ro?.disconnect();
+      mo?.disconnect();
+    };
+  }, [pinned, measureMore]);
 
   const addNote = useCallback((text: string) => {
     const at = new Date().toISOString();
@@ -608,17 +643,107 @@ export function Thread({
   const turns: Record<string, Turn> = { ...inferred, ...attached };
   const items = merge(shown, [...(notes ?? []), ...ownNotes]);
   const inline = layout === 'inline';
-  const root: CSSProperties = inline ? { display: 'flex', flexDirection: 'column', gap: 12 } : { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 };
+  const root: CSSProperties = inline
+    ? { display: 'flex', flexDirection: 'column', gap: 12 }
+    : pinned
+      ? { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, overflow: 'hidden' }
+      : { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 };
   // A panel's empty log is its hint only: the lead above takes the room, the composer stays at the bottom.
   const quiet = shown.length === 0 && !streaming && !pending;
   const logStyle: CSSProperties = inline
     ? { display: 'flex', flexDirection: 'column', gap: 16, ...(logMaxHeight ? { maxHeight: logMaxHeight, overflowY: 'auto' } : {}) }
-    : { flex: quiet && lead ? '0 0 auto' : '1 1 0', minHeight: 0, overflowY: 'auto', padding: '4px 20px', display: 'flex', flexDirection: 'column', gap: 16 };
+    : pinned
+      ? { flex: '0 0 auto', padding: '4px 20px 12px', display: 'flex', flexDirection: 'column', gap: 16 }
+      : { flex: quiet && lead ? '0 0 auto' : '1 1 0', minHeight: 0, overflowY: 'auto', padding: '4px 20px', display: 'flex', flexDirection: 'column', gap: 16 };
   const textStyle: CSSProperties = { fontSize: inline ? 'var(--fs-body)' : 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' };
+
+  const logView = (
+    <div ref={log} role="log" aria-live="polite" style={logStyle}>
+      {seed && seed.messages.length > 0 ? (
+        <div data-testid="thread-seed" style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
+          <span className="meta">{seed.label}</span>
+          {seed.messages.map((m) => (
+            <div key={m.id} data-testid="seed-message" data-role={m.role} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}>
+                <strong style={{ fontWeight: 700, color: 'var(--ink)' }}>{m.role === 'assistant' ? 'co-author' : 'you'}</strong>
+                <span className="muted">{time(m.at)}</span>
+              </div>
+              <div style={{ ...textStyle, color: 'var(--grey)' }}>{renderInline(m.text)}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {loadError ? <p style={{ color: 'var(--warn)', fontSize: 12, margin: 0 }}>Could not load the thread: {loadError}</p> : null}
+      {!loadError && shown.length === 0 && !streaming && !pending ? (
+        <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.5 }}>
+          {hint}
+        </p>
+      ) : null}
+      {items.map((item) =>
+        item.kind === 'note' ? (
+          <p key={item.n.id} data-testid="thread-note" className="meta" style={{ margin: 0, color: 'var(--ink)' }}>
+            {item.n.text}
+          </p>
+        ) : (
+          <div key={item.m.id} data-testid="thread-message" data-role={item.m.role} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}>
+              <strong style={{ fontWeight: 700, color: 'var(--ink)' }}>{item.m.role === 'assistant' ? 'co-author' : 'you'}</strong>
+              <span className="muted">{time(item.m.at)}</span>
+              {item.m.role === 'user' && item.m.context && !sameAnchor(item.m.context, context) ? (
+                <span data-testid="message-context" className="muted">
+                  on {describeAnchor(item.m.context, order, slides)}
+                </span>
+              ) : null}
+            </div>
+            <div style={textStyle}>{renderInline(item.m.text)}</div>
+            {proposals && turns[item.m.id]
+              ? [...turns[item.m.id]!.lanes].map((laneId) => (
+                  <Proposal
+                    key={laneId}
+                    laneId={laneId}
+                    context={turns[item.m.id]!.context}
+                    threadKey={threadKey}
+                    order={order}
+                    slides={slides}
+                    api={proposals}
+                    subscribe={subscribe}
+                    navigate={navigate}
+                    onNote={addNote}
+                    actions={proposalActions}
+                    onShowLane={onShowLane}
+                  />
+                ))
+              : null}
+          </div>
+        ),
+      )}
+      {pending ? (
+        <p data-testid="thread-pending" role="status" style={{ margin: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 12, fontSize: 12 }}>
+          <span style={{ color: 'var(--ink)', fontWeight: 500 }}>co-author is working on {describeAnchor(pending.context, order, slides)}</span>
+          <span data-testid="thread-elapsed" className="mono muted">
+            {formatElapsed(now - pending.since)}
+          </span>
+          {pending.tool ? <span className="muted">{describeTool(pending.tool)}</span> : null}
+        </p>
+      ) : null}
+      {streaming || (tool && !pending) ? (
+        <div data-testid="thread-streaming" style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <strong style={{ fontSize: 12, color: 'var(--ink)' }}>co-author</strong>
+          {streaming ? <div style={textStyle}>{streaming}</div> : null}
+          {tool && !pending ? <span className="meta">{describeTool(tool)}…</span> : null}
+        </div>
+      ) : null}
+      {agentError ? (
+        <p role="alert" style={{ color: 'var(--warn)', fontSize: 12, margin: 0 }}>
+          {agentError}
+        </p>
+      ) : null}
+    </div>
+  );
 
   return (
     <div data-testid="thread" data-thread={threadKey} data-layout={layout} style={root}>
-      <div style={inline ? { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 12 } : { padding: heading === 'section' ? '14px 20px 8px' : '18px 20px 12px', display: 'flex', flexDirection: 'column', gap: heading === 'section' ? 8 : 12 }}>
+      <div style={inline ? { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 12 } : { flex: '0 0 auto', padding: heading === 'section' ? '14px 20px 8px' : '18px 20px 12px', display: 'flex', flexDirection: 'column', gap: heading === 'section' ? 8 : 12 }}>
         <div>
           <h2 className={inline || heading === 'section' ? 'row-label' : 'screen-title'} style={inline || heading === 'section' ? { margin: 0 } : undefined}>
             {title}
@@ -629,95 +754,27 @@ export function Thread({
           <ContextChip context={context} order={order} slides={slides} onClear={onClearContext} onEdit={onEditContext} />
         </div>
       </div>
-      {lead && !inline ? (
+      {pinned ? null : lead && !inline ? (
         <div data-testid="thread-lead" style={{ flex: '0 1 auto', minHeight: 0, maxHeight: quiet ? undefined : '45%', overflowY: 'auto', padding: '0 20px 12px' }}>
           {lead}
         </div>
       ) : (
         lead
       )}
-      <div ref={log} role="log" aria-live="polite" style={logStyle}>
-        {seed && seed.messages.length > 0 ? (
-          <div data-testid="thread-seed" style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
-            <span className="meta">{seed.label}</span>
-            {seed.messages.map((m) => (
-              <div key={m.id} data-testid="seed-message" data-role={m.role} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}>
-                  <strong style={{ fontWeight: 700, color: 'var(--ink)' }}>{m.role === 'assistant' ? 'co-author' : 'you'}</strong>
-                  <span className="muted">{time(m.at)}</span>
-                </div>
-                <div style={{ ...textStyle, color: 'var(--grey)' }}>{renderInline(m.text)}</div>
-              </div>
-            ))}
-          </div>
-        ) : null}
-        {loadError ? <p style={{ color: 'var(--warn)', fontSize: 12, margin: 0 }}>Could not load the thread: {loadError}</p> : null}
-        {!loadError && shown.length === 0 && !streaming && !pending ? (
-          <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.5 }}>
-            {hint}
-          </p>
-        ) : null}
-        {items.map((item) =>
-          item.kind === 'note' ? (
-            <p key={item.n.id} data-testid="thread-note" className="meta" style={{ margin: 0, color: 'var(--ink)' }}>
-              {item.n.text}
-            </p>
-          ) : (
-            <div key={item.m.id} data-testid="thread-message" data-role={item.m.role} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}>
-                <strong style={{ fontWeight: 700, color: 'var(--ink)' }}>{item.m.role === 'assistant' ? 'co-author' : 'you'}</strong>
-                <span className="muted">{time(item.m.at)}</span>
-                {item.m.role === 'user' && item.m.context && !sameAnchor(item.m.context, context) ? (
-                  <span data-testid="message-context" className="muted">
-                    on {describeAnchor(item.m.context, order, slides)}
-                  </span>
-                ) : null}
-              </div>
-              <div style={textStyle}>{renderInline(item.m.text)}</div>
-              {proposals && turns[item.m.id]
-                ? [...turns[item.m.id]!.lanes].map((laneId) => (
-                    <Proposal
-                      key={laneId}
-                      laneId={laneId}
-                      context={turns[item.m.id]!.context}
-                      threadKey={threadKey}
-                      order={order}
-                      slides={slides}
-                      api={proposals}
-                      subscribe={subscribe}
-                      navigate={navigate}
-                      onNote={addNote}
-                      actions={proposalActions}
-                      onShowLane={onShowLane}
-                    />
-                  ))
-                : null}
+      {pinned ? (
+        <div ref={body} data-testid="thread-body" className="thread-body" style={{ flex: '1 1 0', minHeight: 0, overflowY: 'auto', overflowX: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {lead ? (
+            <div data-testid="thread-lead" style={{ flex: '0 0 auto', padding: '0 20px 12px' }}>
+              {lead}
             </div>
-          ),
-        )}
-        {pending ? (
-          <p data-testid="thread-pending" role="status" style={{ margin: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 12, fontSize: 12 }}>
-            <span style={{ color: 'var(--ink)', fontWeight: 500 }}>co-author is working on {describeAnchor(pending.context, order, slides)}</span>
-            <span data-testid="thread-elapsed" className="mono muted">
-              {formatElapsed(now - pending.since)}
-            </span>
-            {pending.tool ? <span className="muted">{describeTool(pending.tool)}</span> : null}
-          </p>
-        ) : null}
-        {streaming || (tool && !pending) ? (
-          <div data-testid="thread-streaming" style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-            <strong style={{ fontSize: 12, color: 'var(--ink)' }}>co-author</strong>
-            {streaming ? <div style={textStyle}>{streaming}</div> : null}
-            {tool && !pending ? <span className="meta">{describeTool(tool)}…</span> : null}
-          </div>
-        ) : null}
-        {agentError ? (
-          <p role="alert" style={{ color: 'var(--warn)', fontSize: 12, margin: 0 }}>
-            {agentError}
-          </p>
-        ) : null}
-      </div>
-      <form onSubmit={(e) => void submit(e)} style={inline ? { display: 'flex', gap: 8 } : { display: 'flex', gap: 8, padding: 16, marginTop: 'auto', borderTop: '1px solid var(--line)' }}>
+          ) : null}
+          {logView}
+          {more ? <div data-testid="panel-fade" className="panel-fade" aria-hidden /> : null}
+        </div>
+      ) : (
+        logView
+      )}
+      <form onSubmit={(e) => void submit(e)} style={inline ? { display: 'flex', gap: 8 } : { display: 'flex', flexShrink: 0, gap: 8, padding: 16, marginTop: 'auto', borderTop: '1px solid var(--line)' }}>
         <input
           ref={composer}
           aria-label="message"
