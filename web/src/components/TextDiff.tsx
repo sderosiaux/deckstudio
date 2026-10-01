@@ -183,10 +183,12 @@ export interface TextDiffProps {
   label: string;
   before: readonly string[];
   after: readonly string[];
+  /** Without the label line: the caller names the field itself. */
+  bare?: boolean;
 }
 
 /** Line diff of one text field in running text: within an edited line, removed words struck, added words in the accent; long unchanged runs folded. */
-export function TextDiff({ label, before, after }: TextDiffProps) {
+export function TextDiff({ label, before, after, bare = false }: TextDiffProps) {
   const ops = diffLines(before, after);
   const anyChange = ops.some((o) => o.op !== 'same');
   let body: ReactNode;
@@ -214,7 +216,7 @@ export function TextDiff({ label, before, after }: TextDiffProps) {
   }
   return (
     <section data-testid="text-diff" data-field={label} aria-label={`${label} changes`} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <header className="meta" style={{ fontWeight: 500 }}>{label}</header>
+      {bare ? null : <header className="meta" style={{ fontWeight: 500 }}>{label}</header>}
       <div style={{ fontSize: 13, lineHeight: 1.55, display: 'flex', flexDirection: 'column', gap: 2 }}>{body}</div>
     </section>
   );

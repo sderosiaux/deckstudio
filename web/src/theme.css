@@ -137,16 +137,16 @@ button { font: inherit; }
 .diff-more { all: unset; box-sizing: border-box; cursor: pointer; border-radius: var(--radius); transition: box-shadow .15s ease; }
 .diff-more:hover, .diff-more:focus-visible { box-shadow: inset 0 0 0 1px var(--grey-2); }
 
-/* Slide screen. From 1280px: the work column (render, story, notes) and a 360px side column (lanes, remarks, then the
- * conversation down to the bottom), each scrolling on its own. Narrower: one column, the side's sections under the render. */
+/* Slide screen. From 1280px: the work column (render, the conversation under it, story, notes) and a 360px side column
+ * (lanes, remarks) at full height, each scrolling on its own. Narrower: one column, lanes and remarks last. */
 .slide-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .slide-layout[data-columns='2'] { display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
 .slide-main { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 48px calc(24px + var(--gutter)); display: flex; flex-direction: column; gap: 16px; }
 .slide-section { display: flex; flex-direction: column; gap: 8px; max-width: 800px; }
 .slide-side { min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); }
-.slide-side-scroll { flex: 0 1 auto; max-height: 55%; overflow: auto; padding: 4px 20px 16px; display: flex; flex-direction: column; gap: 20px; }
-.slide-side-talk { flex: 1 1 0; min-height: 240px; display: flex; flex-direction: column; border-top: 1px solid var(--line); }
-.slide-side-talk > [data-testid='thread'] { flex: 1; }
+.slide-side-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 20px 16px; display: flex; flex-direction: column; gap: 20px; }
+/* A proposal card in the conversation under the render: a click shows its lane on the render. */
+.slide-main [data-testid='thread-proposal'] { cursor: pointer; }
 /* The slide at reading size: SlidePreview has a fixed width, on the stage it takes the column's, 800px at most. */
 .slide-stage { width: min(100%, 800px); }
 .slide-stage > [data-testid='slide-preview'] { width: 100% !important; flex: none !important; }
@@ -159,13 +159,29 @@ button { font: inherit; }
 .slide-lane:hover { box-shadow: 0 0 0 1px var(--grey-2); }
 .slide-lane[aria-current='true'] { box-shadow: 0 0 0 1.5px var(--accent); }
 
-/* Focus screen. From 1280px the lane thread is a 360px column beside the work column (renders, decision bar, strips),
- * full height, its composer at the bottom; narrower it follows the renders in the scrolling body. The decision bar is a
- * block under that body, never laid over it. */
-.focus-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.focus-layout[data-columns='2'] { display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
+/* Focus screen. From 1280px the lane thread is a 320px column beside the work column (header, diff, decision bar,
+ * strip), from the top of the screen to the bottom, its composer at the bottom; narrower it follows the renders in the
+ * scrolling body. The diff takes all the height the decision bar and the 48px strip leave; the bar is a block under it,
+ * never laid over it. */
+.focus-layout { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.focus-layout[data-columns='2'] { display: grid; grid-template-columns: minmax(0, 1fr) 320px; }
 .focus-work { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.focus-pane { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .focus-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 16px calc(24px + var(--gutter)); display: flex; flex-direction: column; gap: 16px; }
+/* The diff runs on below: paper fades in over its last 48px. */
+.focus-fade { position: absolute; left: 0; right: 0; bottom: 0; height: 48px; pointer-events: none; background: linear-gradient(to bottom, color-mix(in srgb, var(--paper) 0%, transparent), var(--paper)); }
+/* The lane's slides as numbers: changed ones filled, refused ones struck, the one on screen ringed. A click unfolds the strips. */
+.focus-strip { flex: 0 0 48px; height: 48px; display: flex; align-items: center; gap: 12px; padding: 0 24px; border-top: 1px solid var(--line); background: var(--paper); cursor: pointer; transition: background .15s ease; }
+.focus-strip:hover { background: var(--card); }
+.focus-strip:hover .focus-strip-toggle { color: var(--ink); }
+.focus-strip-name { flex: 0 0 calc(var(--gutter) - 12px); }
+.focus-strip-cells { flex: 1; min-width: 0; display: flex; gap: 4px; overflow-x: auto; padding: 4px 2px; }
+.focus-strip-toggle { flex: none; white-space: nowrap; transition: color .15s ease; }
+.strip-cell { flex: none; min-width: 24px; height: 24px; padding: 0 5px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; font-size: var(--fs-meta); font-weight: 500; color: var(--grey); background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+.strip-cell[data-state='changed'] { color: var(--card); background: var(--accent); box-shadow: none; }
+.strip-cell[data-state='refused'] { color: var(--grey); text-decoration: line-through; }
+.strip-cell[data-state='stale'] { color: var(--grey-2); box-shadow: inset 0 0 0 1px var(--grey-2); }
+.strip-cell[aria-current='true'] { outline: 2px solid var(--ink); outline-offset: 2px; }
 .focus-side { min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); }
 .focus-side > [data-testid='thread'] { flex: 1; }
 /* Before/after side by side as long as two 320px cards fit the body, stacked below; each card takes its column's width. */

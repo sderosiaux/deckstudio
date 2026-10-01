@@ -6,6 +6,8 @@ import type { BusEvent, DeckPayload, LanePreviewPayload } from '../../web/src/ap
 import type { SlideScreenApi } from '../../web/src/screens/Slide.js';
 import type { Change, Lane, Remark, Slide, SlideId, ThreadMessage, Version } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const slide = (id: string, over: Partial<Slide> = {}): Slide => ({
   id,
@@ -128,6 +130,7 @@ const pressed = (): string | undefined =>
 const laneLoads = (api: ReturnType<typeof setup>['api']): number => api.getLanes.mock.calls.filter((c) => c[0] === undefined).length;
 
 /** The window narrower than the two-column breakpoint: matchMedia answers false. */
+const themeCss = (): string => readFileSync(join(process.cwd(), 'web/src/theme.css'), 'utf8');
 const narrow = () => {
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: false, media: query, addEventListener: () => undefined, removeEventListener: () => undefined }));
 };
@@ -280,7 +283,7 @@ describe('Slide screen', () => {
     fireEvent.click(screen.getByRole('link', { name: 'back to main' }));
     expect(t.navigate).toHaveBeenLastCalledWith('/');
   });
-  it('two columns: the render, its story and notes on the left; lanes, remarks, then the conversation on the right', async () => {
+  it('two columns: the render, the conversation under it, then story and notes on the left; only lanes and remarks on the right', async () => {
     const t = setup({ remarks: [remark('r1', { kind: 'slide', slide: 's3' })] });
     render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
     await waitFor(() => laneRows().length === 2 && screen.queryAllByTestId('post-it').length === 1);
@@ -289,17 +292,24 @@ describe('Slide screen', () => {
     expect(document.querySelector('style')).toBeNull();
     const left = screen.getByTestId('slide-body');
     const right = screen.getByTestId('slide-side');
-    for (const id of ['slide-toggle', 'slide-stage', 'slide-story', 'slide-notes']) expect(left.contains(screen.getByTestId(id))).toBe(true);
-    const side = ['slide-lanes', 'slide-remarks', 'thread'].map((id) => screen.getByTestId(id));
-    for (const el of side) expect(right.contains(el)).toBe(true);
-    for (let i = 1; i < side.length; i++) expect(side[i - 1]!.compareDocumentPosition(side[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // The conversation fills the rest of the column, its composer at the bottom.
+    const seq = ['slide-toggle', 'slide-stage', 'thread', 'slide-story', 'slide-notes'].map((id) => screen.getByTestId(id));
+    for (const el of seq) expect(left.contains(el)).toBe(true);
+    for (let i = 1; i < seq.length; i++) expect(seq[i - 1]!.compareDocumentPosition(seq[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The conversation grows in the work column with the same composer as main's panel; never in the side column.
     const thread = screen.getByTestId('thread');
-    expect(thread.getAttribute('data-layout')).toBe('panel');
+    expect(thread.getAttribute('data-layout')).toBe('inline');
     expect(thread.lastElementChild!.tagName).toBe('FORM');
+    expect(right.contains(thread)).toBe(false);
+    expect(right.querySelector('[aria-label="conversation about this slide"]')).toBeNull();
+    for (const id of ['slide-lanes', 'slide-remarks']) expect(right.contains(screen.getByTestId(id))).toBe(true);
+    expect(screen.getByTestId('slide-lanes').compareDocumentPosition(screen.getByTestId('slide-remarks')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The side column is one scroll area at full height.
+    expect(right.contains(screen.getByTestId('slide-side-scroll'))).toBe(true);
+    expect(themeCss()).not.toMatch(/\.slide-side-talk/);
+    expect(themeCss()).not.toMatch(/\.slide-side-scroll \{[^}]*max-height/);
   });
 
-  it('below the breakpoint, one column: render, lanes, remarks, conversation, story, notes', async () => {
+  it('below the breakpoint, one column: render, conversation, story, notes, then lanes and remarks', async () => {
     narrow();
     const t = setup({ remarks: [remark('r1', { kind: 'slide', slide: 's3' })] });
     render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
@@ -307,7 +317,7 @@ describe('Slide screen', () => {
     expect(screen.getByTestId('slide-layout').getAttribute('data-columns')).toBe('1');
     expect(screen.queryByTestId('slide-side')).toBeNull();
     const body = screen.getByTestId('slide-body');
-    const seq = ['slide-stage', 'slide-lanes', 'slide-remarks', 'thread', 'slide-story', 'slide-notes'].map((id) => screen.getByTestId(id));
+    const seq = ['slide-stage', 'thread', 'slide-story', 'slide-notes', 'slide-lanes', 'slide-remarks'].map((id) => screen.getByTestId(id));
     for (const el of seq) expect(body.contains(el)).toBe(true);
     for (let i = 1; i < seq.length; i++) expect(seq[i - 1]!.compareDocumentPosition(seq[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByTestId('thread').getAttribute('data-layout')).toBe('inline');
@@ -387,27 +397,109 @@ describe('Slide screen', () => {
     expect(screen.queryAllByTestId('post-it')).toHaveLength(0);
   });
 
-  it('the proposal under a reply keeps its before/after pair but leaves accept and refuse to the lane list', async () => {
-    const t = setup({ lanes: [] });
-    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
-    await waitFor(() => screen.queryByTestId('slide-lanes-empty'));
+  /** Sends a message on s3, then lands the co-author's reply that created `lane`. */
+  async function replyWith(t: ReturnType<typeof setup>, lane: Lane): Promise<void> {
     fireEvent.change(screen.getByLabelText('message'), { target: { value: 'sharper' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     await waitFor(() => t.api.postMessage.mock.calls.length === 1);
-    t.setLanes([onS3]);
-    t.emit({ type: 'lane.created', laneId: 'l1' });
+    t.setLanes([lane]);
+    t.emit({ type: 'lane.created', laneId: lane.id });
     t.stored.push(
       { id: 'u1', thread: 'slide:s3', role: 'user', text: 'sharper', context: { kind: 'slide', slide: 's3' }, at: '2026-09-30T10:00:00.000Z' },
       { id: 'a1', thread: 'slide:s3', role: 'assistant', text: 'Proposed.', context: null, at: '2026-09-30T10:00:05.000Z' },
     );
     t.emit({ type: 'assistant.done', thread: 'slide:s3', messageId: 'a1' });
+  }
+
+  it('the reply carries its proposal card, as on main: the pair with accept, refuse and open in focus, in place', async () => {
+    const t = setup({ lanes: [] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => screen.queryByTestId('slide-lanes-empty'));
+    await replyWith(t, onS3);
     await waitFor(() => screen.queryAllByTestId('proposal-change').length === 1 && laneRows().length === 1);
     const card = screen.getByTestId('thread-proposal');
+    // The card sits under the render, in the work column.
+    expect(screen.getByTestId('slide-body').contains(card)).toBe(true);
     await waitFor(() => card.querySelectorAll('img').length === 2);
-    expect(within(card).queryByRole('button', { name: 'accept' })).toBeNull();
-    expect(within(card).queryByRole('button', { name: 'refuse' })).toBeNull();
-    // One place to decide: the lane row.
-    expect(screen.getAllByLabelText(/^accept: /)).toHaveLength(1);
+    fireEvent.click(within(card).getByRole('button', { name: 'accept' }));
+    await waitFor(() => t.api.acceptChange.mock.calls.length === 1);
+    expect(t.api.acceptChange).toHaveBeenCalledWith('l1', 'c1');
+    await waitFor(() => within(card).queryByText('accepted into main as v4'));
+    expect(within(card).getByRole('link', { name: 'open in focus' }).getAttribute('href')).toBe('/lane/l1/change/c1');
+  });
+
+  it('clicking a proposal card in the conversation switches the render to that lane', async () => {
+    const t = setup({ lanes: [] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => screen.queryByTestId('slide-lanes-empty'));
+    await replyWith(t, onS3);
+    await waitFor(() => screen.queryByTestId('thread-proposal') && laneRows().length === 1);
+    fireEvent.click(within(screen.getByTestId('slide-toggle')).getByRole('button', { name: 'main' }));
+    expect(pressed()).toBe('main');
+    fireEvent.click(within(screen.getByTestId('thread-proposal')).getAllByTestId('slide-preview')[0]!);
+    expect(pressed()).toBe('proposed in Sharper claim');
+    expect(laneRows()[0]!.getAttribute('aria-current')).toBe('true');
+  });
+
+  it('story and notes follow the tab: a lane shows its own text, with a word diff against main where it differs', async () => {
+    const storyLane = mkLane('l8', 'Say it plainly', { kind: 'slide', slide: 's3' }, [change('c8', 's3', { patch: { story: 'the claim told plainly' } } as Partial<Change>)]);
+    const t = setup({ lanes: [storyLane] });
+    t.api.getLanePreview.mockImplementation(async () => ({
+      order,
+      slides: { ...slides, s3: slide('s3', { story: 'the claim told plainly' }) },
+      skipped: [],
+      thumbs: { s3: { hash: 'l8_s3', ready: true } },
+    }));
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => laneRows().length === 1);
+    const story = () => screen.getByTestId('slide-story');
+    const notes = () => screen.getByTestId('slide-notes');
+    expect(story().textContent).toContain('story of s3');
+    expect(within(story()).queryByTestId('text-diff')).toBeNull();
+    expect(within(story()).getByTestId('field-source').textContent).toBe('on main');
+
+    fireEvent.click(within(screen.getByTestId('slide-toggle')).getByRole('button', { name: 'proposed in Say it plainly' }));
+    await waitFor(() => within(story()).queryByTestId('text-diff'));
+    expect(within(story()).getByTestId('field-source').textContent).toBe('in Say it plainly, changed');
+    const lines = within(story()).getAllByTestId('diff-line');
+    expect(lines.map((l) => l.getAttribute('data-op'))).toEqual(['del', 'add']);
+    expect(lines[1]!.getAttribute('data-text')).toBe('the claim told plainly');
+    // The same notes in the lane: plain text, said to be unchanged.
+    expect(within(notes()).queryByTestId('text-diff')).toBeNull();
+    expect(notes().textContent).toContain('notes of s3');
+    expect(within(notes()).getByTestId('field-source').textContent).toBe('in Say it plainly, unchanged');
+
+    fireEvent.click(within(screen.getByTestId('slide-toggle')).getByRole('button', { name: 'main' }));
+    expect(within(story()).queryByTestId('text-diff')).toBeNull();
+    expect(story().textContent).toContain('story of s3');
+  });
+
+  it('a stale change, or one main already holds, shows the server\'s reason in the lane list instead of accept and refuse', async () => {
+    const mixed = {
+      ...mkLane('l9', 'Two takes', { kind: 'slide', slide: 's3' }, [
+        change('c10', 's3', { status: 'orphan' }),
+        change('c11', 's3', { status: 'accepted', patch: { notes: 'n' } } as Partial<Change>),
+        change('c12', 's3', { patch: { story: 'live' } } as Partial<Change>),
+      ]),
+      causes: { c10: 'title changed on main since v1', c11: 'already on main' },
+    } as Lane;
+    const t = setup({ lanes: [mixed] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => laneRows().length === 1);
+    const row = laneRows()[0]!;
+    expect(within(row).getAllByTestId('change-settled').map((n) => n.textContent)).toEqual(['stale: title changed on main since v1', 'already on main']);
+    // Only the live change can be decided.
+    expect(within(row).getAllByTestId('change-buttons').map((b) => b.getAttribute('data-change'))).toEqual(['c12']);
+  });
+
+  it('a lane whose changes on this slide are all settled is listed, with no render tab', async () => {
+    const stale = { ...mkLane('l9', 'Old title', { kind: 'slide', slide: 's3' }, [change('c10', 's3', { status: 'orphan' })]), causes: { c10: 'title changed on main since v1' } } as Lane;
+    const t = setup({ lanes: [stale] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => laneRows().length === 1);
+    expect(within(laneRows()[0]!).getByTestId('change-settled').textContent).toBe('stale: title changed on main since v1');
+    expect(within(laneRows()[0]!).queryByTestId('change-buttons')).toBeNull();
+    expect(screen.queryByTestId('slide-toggle')).toBeNull();
   });
 
   it('moving to another slide brings both columns back to the top', async () => {
