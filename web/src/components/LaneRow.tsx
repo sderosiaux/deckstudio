@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode, type RefObject } from 'react';
 import type { Anchor, Change, Lane, Remark, Slide, SlideId, SlidePatch } from '../../../src/model/types.js';
 import { focusPath, navigate, remarkApi as defaultRemarkApi, thumbUrl, type LaneApi, type LaneChange, type LanePayload, type LanePreviewPayload, type RemarkApi } from '../api.js';
 import { ChangeButtons, settledNote } from './ChangeButtons.js';
@@ -41,6 +41,93 @@ export const FAILED_THUMB = `data:image/svg+xml,${encodeURIComponent(
 
 const NO_FAILED: ReadonlySet<string> = new Set();
 const NO_REMARKS: readonly Remark[] = [];
+/** Empty columns in view before a lane's first cell that take its name instead of the gutter: three hold a line of it. */
+const SPILL_MIN = 3;
+/** Pending changes a spilled lane lists down a column under its name (two lines each), in as many 300px+ columns as its width holds. */
+const SPILL_LINES = 4;
+const SPILL_COL = 300;
+const SPILL_COL_GAP = 24;
+
+/**
+ * A lane's name spilled from the gutter into the empty columns after it (like a ledger line running into empty cells):
+ * the name, its origin and actions, then what the lane does, change by change, in columns under 80 characters; a
+ * click opens a change at reading size. It sits in the sticky gutter and runs `columns` deck columns past it, ending
+ * 12px before the lane's first cell.
+ */
+function LaneSpill({
+  columns,
+  name,
+  meta,
+  changes,
+  onOpen,
+}: {
+  columns: number;
+  name: ReactNode;
+  meta: ReactNode;
+  changes: readonly { id: string; what: string; reason: string }[];
+  onOpen(changeId: string): void;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const [cols, setCols] = useState(1);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const measure = (): void => setCols(Math.max(1, Math.floor((el.clientWidth + SPILL_COL_GAP) / (SPILL_COL + SPILL_COL_GAP))));
+    measure();
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, []);
+  const room = SPILL_LINES * cols;
+  const shown = changes.length > room ? changes.slice(0, room - 1) : changes;
+  const rest = changes.length - shown.length;
+  // Down a column first (the row is as tall as its cards anyway), then the next column.
+  const items = shown.length + (rest > 0 ? 1 : 0);
+  const lines = Math.min(SPILL_LINES, items);
+  const used = Math.ceil(items / Math.max(1, lines));
+  return (
+    <div
+      ref={box}
+      data-testid="lane-spill"
+      data-columns={columns}
+      // The gutter's 120px, the rows' 6px of padding, the empty columns, less 20px short of the first cell.
+      style={{ width: `calc(var(--gutter) + 6px + ${columns} * (var(--thumb-w) + var(--col-gap)) - 20px)`, display: 'flex', flexDirection: 'column', gap: 4 }}
+    >
+      <div style={{ maxWidth: '80ch' }}>{name}</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', columnGap: 12, rowGap: 4 }}>{meta}</div>
+      {changes.length > 0 ? (
+        <ul
+          data-testid="lane-spill-changes"
+          style={{ listStyle: 'none', margin: '4px 0 0', padding: 0, display: 'grid', gridTemplateColumns: `repeat(${used}, minmax(0, 80ch))`, gridTemplateRows: `repeat(${lines}, auto)`, gridAutoFlow: 'column', gap: `4px ${SPILL_COL_GAP}px` }}
+        >
+          {shown.map((c) => (
+            <li key={c.id} style={{ minWidth: 0, maxWidth: '80ch' }}>
+              <button
+                type="button"
+                className="link"
+                title={`${c.what}: ${c.reason}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpen(c.id);
+                }}
+                // Two lines at most: the change and as much of its reason as they hold (the title has it whole).
+                style={{ display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, maxWidth: '100%', overflow: 'hidden', lineHeight: '18px', color: 'var(--ink)', textAlign: 'left' }}
+              >
+                {c.what}
+                <span className="muted">: {c.reason}</span>
+              </button>
+            </li>
+          ))}
+          {rest > 0 ? (
+            <li className="meta" style={{ lineHeight: '18px' }}>
+              {rest} more {rest === 1 ? 'change' : 'changes'}
+            </li>
+          ) : null}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
 
 const openFocus = (laneId: string, changeId: string): void => navigate(focusPath(laneId, changeId));
 
@@ -369,6 +456,68 @@ export function LaneRow({
     />
   );
 
+  // The empty columns in view before the lane's first cell: three or more, and the lane's name, origin and actions
+  // spill into them on one line each (a ledger line), instead of wrapping five lines deep in the 120px gutter.
+  const spillFrom = view ? view.first : 0;
+  const spillTo = view ? Math.min(region.start, view.end) : 0;
+  const spill = view !== undefined && spillTo - spillFrom >= SPILL_MIN;
+  const pending = lane.changes.filter((c) => c.status === 'pending' && !skipped.includes(c));
+  /* The whole title, wrapped: a lane is what the creator decides on, its name is never cut. */
+  const name = (
+    <span className="row-label" data-testid="lane-name" style={{ overflowWrap: 'anywhere' }}>
+      {lane.label}
+    </span>
+  );
+  const originTag = <span className="meta" data-testid="lane-origin">{origin}</span>;
+  const lost = anchored ? null : <span className="meta">anchor no longer on main</span>;
+  const discardBtn = (
+    <button
+      type="button"
+      className="link"
+      disabled={busy}
+      onClick={(e) => {
+        e.stopPropagation();
+        discard();
+      }}
+      style={{ fontSize: 12, alignSelf: 'flex-start' }}
+    >
+      discard lane
+    </button>
+  );
+  const remarksBtn =
+    remarks.length > 0 ? (
+      <button
+        type="button"
+        className="link"
+        aria-expanded={remarksOpen}
+        onClick={(e) => {
+          e.stopPropagation();
+          setRemarksOpen((o) => !o);
+        }}
+        style={{ fontSize: 12, alignSelf: 'flex-start' }}
+      >
+        {remarks.length} check {remarks.length === 1 ? 'remark' : 'remarks'}
+      </button>
+    ) : null;
+  const chip =
+    edge && onReveal ? (
+      <button
+        type="button"
+        className="link edge-chip"
+        data-testid="edge-chip"
+        data-side={edge.side}
+        title={edge.side === 'right' ? 'further on in the strip' : 'earlier in the strip'}
+        onClick={(e) => {
+          e.stopPropagation();
+          onReveal(edge.col);
+        }}
+      >
+        {edge.side === 'left' ? <span aria-hidden>‹ </span> : null}
+        slide {edge.col + 1}
+        {edge.side === 'right' ? <span aria-hidden> ›</span> : null}
+      </button>
+    ) : null;
+
   return (
     <div
       id={`lane-row-${lane.id}`}
@@ -380,55 +529,32 @@ export function LaneRow({
       style={{ display: 'flex', alignItems: 'stretch' }}
     >
       <div className="gutter" style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 8 }}>
-        {/* The whole title, wrapped: a lane is what the creator decides on, its name is never cut. */}
-        <span className="row-label" data-testid="lane-name" style={{ overflowWrap: 'anywhere' }}>
-          {lane.label}
-        </span>
-        <span className="meta" data-testid="lane-origin">{origin}</span>
-        {anchored ? null : <span className="meta">anchor no longer on main</span>}
-        <button
-          type="button"
-          className="link"
-          disabled={busy}
-          onClick={(e) => {
-            e.stopPropagation();
-            discard();
-          }}
-          style={{ fontSize: 12, alignSelf: 'flex-start' }}
-        >
-          discard lane
-        </button>
-        {remarks.length > 0 ? (
-          <button
-            type="button"
-            className="link"
-            aria-expanded={remarksOpen}
-            onClick={(e) => {
-              e.stopPropagation();
-              setRemarksOpen((o) => !o);
-            }}
-            style={{ fontSize: 12, alignSelf: 'flex-start' }}
-          >
-            {remarks.length} check {remarks.length === 1 ? 'remark' : 'remarks'}
-          </button>
-        ) : null}
-        {edge && onReveal ? (
-          <button
-            type="button"
-            className="link edge-chip"
-            data-testid="edge-chip"
-            data-side={edge.side}
-            title={edge.side === 'right' ? 'further on in the strip' : 'earlier in the strip'}
-            onClick={(e) => {
-              e.stopPropagation();
-              onReveal(edge.col);
-            }}
-          >
-            {edge.side === 'left' ? <span aria-hidden>‹ </span> : null}
-            slide {edge.col + 1}
-            {edge.side === 'right' ? <span aria-hidden> ›</span> : null}
-          </button>
-        ) : null}
+        {spill ? (
+          <LaneSpill
+            columns={spillTo - spillFrom}
+            name={name}
+            meta={
+              <>
+                {originTag}
+                {lost}
+                {discardBtn}
+                {remarksBtn}
+                {chip}
+              </>
+            }
+            changes={pending.map((c) => ({ id: c.id, what: describe(c), reason: c.reason }))}
+            onOpen={(id) => onOpenChange(lane.id, id)}
+          />
+        ) : (
+          <>
+            {name}
+            {originTag}
+            {lost}
+            {discardBtn}
+            {remarksBtn}
+            {chip}
+          </>
+        )}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <div data-testid="lane-grid" style={{ display: 'grid', gridTemplateColumns: `repeat(${n}, var(--thumb-w))`, gridAutoColumns: 'var(--thumb-w)', columnGap: 'var(--col-gap)', padding: '0 6px' }}>
@@ -437,7 +563,7 @@ export function LaneRow({
             data-col-start={region.start}
             data-col-span={region.span}
             aria-label={`lane ${lane.label}`}
-            style={{ gridColumn: `${region.start + 1} / span ${region.span}`, minWidth: 0, paddingTop: 6 }}
+            style={{ gridColumn: `${region.start + 1} / span ${region.span}`, gridRow: '1', minWidth: 0, paddingTop: 6 }}
           >
             {error ? (
               <p role="alert" style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--warn)', width: 'max-content', maxWidth: 480 }}>

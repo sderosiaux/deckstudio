@@ -69,8 +69,8 @@ interface ProposeNote {
   touched: ReadonlySet<string>;
 }
 const MAX_NOTES = 5;
-/** Room kept between the stage's bottom and the canvas's visible bottom (the versions rail starts there). */
-const STAGE_CLEAR = 16;
+/** Room kept between the stage's bottom and the canvas's visible bottom (the versions rail starts there); the card's own 12px padding keeps the render off the rail's rule. */
+const STAGE_CLEAR = 4;
 /** What lies above the stage besides the strip: the canvas's 8px top padding, the pin row (8px and its 10px gap), 2px of margin. */
 const STAGE_TOP = 28;
 /** The lane rows' grid starts 6px right of the gutter (their side padding). */
@@ -137,7 +137,9 @@ const STAGE_GAP = 12;
 /**
  * The deck sheet's grid: the fewest columns (so the largest 16:9 cells) that fit all `n` slides in `width` x `height`,
  * at most 320px a cell; when even 112px cells overflow the height, as many 112px+ cells per line as the width holds
- * (the canvas scrolls on).
+ * (the canvas scrolls on). When the fewest columns that fit leave paper under the last line that would hold more than
+ * half a line, one column fewer: its larger cells run past the rail and the canvas scrolls, rather than a band of
+ * nothing above it.
  */
 export function sheetLayout(n: number, width: number, height: number): { cols: number; cell: number } {
   const fit = (cols: number): number => Math.floor((width - (cols - 1) * SHEET_GAP) / cols);
@@ -146,7 +148,9 @@ export function sheetLayout(n: number, width: number, height: number): { cols: n
       const cell = fit(cols);
       if (cell < SHEET_MIN) break;
       const rows = Math.ceil(n / cols);
-      if (rows * ((cell * 9) / 16 + SHEET_LABEL) + (rows - 1) * SHEET_GAP > height) continue;
+      const used = rows * ((cell * 9) / 16 + SHEET_LABEL) + (rows - 1) * SHEET_GAP;
+      if (used > height) continue;
+      if (height - used > ((cell * 9) / 16 + SHEET_LABEL) / 2 && cols > 1 && fit(cols - 1) <= SHEET_MAX) return { cols: cols - 1, cell: fit(cols - 1) };
       if (cell <= SHEET_MAX) return { cols, cell };
       const wide = Math.min(n, Math.ceil((width + SHEET_GAP) / (SHEET_MAX + SHEET_GAP)));
       return { cols: wide, cell: Math.min(SHEET_MAX, fit(wide)) };
@@ -157,10 +161,93 @@ export function sheetLayout(n: number, width: number, height: number): { cols: n
 }
 
 /**
- * Width of a box pinned to the visible canvas under the strip: up to where the "+N" cover starts (EdgeFade paints
- * paper over everything from there), less the canvas's 24px left padding. Before any measure, the canvas less the slot.
+ * Width of a box pinned to the visible canvas under the strip (the stage, the deck sheet): the canvas's whole content
+ * width. The "+N" cover (EdgeFade's paper from the strip's cut to the edge) leaves the band such a box lies in alone
+ * (usePinnedBand), so the box runs to the canvas's edge instead of ending in a column of paper where the slot starts.
  */
-const pinnedWidth = (visible: VisibleColumns | null): string => (visible ? `${Math.max(0, visible.cut - 24)}px` : 'calc(100cqw - var(--end-slot))');
+const PINNED_W = '100cqw';
+/** The canvas's side padding, each side. */
+const CANVAS_SIDE = 24;
+/** The stage runs 12px into the canvas's right padding: its neighbour column ends 12px short of the conversation's rule. */
+const STAGE_RUN = 12;
+
+/** Top and bottom of the canvas's pinned box ([data-pinned]) in the canvas's box, below the sticky strip; null when none shows. */
+export interface PinnedBand {
+  top: number;
+  bottom: number;
+}
+
+export function measurePinnedBand(canvas: HTMLElement, strip: HTMLElement | null): PinnedBand | null {
+  const pinned = canvas.querySelector('[data-pinned]');
+  if (!pinned) return null;
+  const box = canvas.getBoundingClientRect();
+  const r = pinned.getBoundingClientRect();
+  const top = Math.round(Math.max(r.top, strip?.getBoundingClientRect().bottom ?? box.top) - box.top);
+  const bottom = Math.round(Math.min(r.bottom, box.bottom) - box.top);
+  return bottom - top >= 1 ? { top, bottom } : null;
+}
+
+/** usePinnedBand: the pinned box's band, followed as the canvas scrolls, resizes or its rows change height. */
+function usePinnedBand(
+  canvas: React.RefObject<HTMLElement | null>,
+  strip: React.RefObject<HTMLElement | null>,
+  rows: React.RefObject<HTMLElement | null>,
+  /** Changes when the canvas mounts (the deck loaded). */
+  mounted: unknown,
+): PinnedBand | null {
+  const [band, setBand] = useState<PinnedBand | null>(null);
+  const update = useCallback(() => {
+    const el = canvas.current;
+    const next = el ? measurePinnedBand(el, strip.current) : null;
+    setBand((prev) => (prev === next || (prev && next && prev.top === next.top && prev.bottom === next.bottom) ? prev : next));
+  }, [canvas, strip]);
+  // The box comes and goes with the selection: measured after every render.
+  useLayoutEffect(update);
+  useEffect(() => {
+    const el = canvas.current;
+    if (!el) return;
+    let frame = 0;
+    const schedule = (): void => {
+      if (!frame) frame = requestAnimationFrame(() => {
+        frame = 0;
+        update();
+      });
+    };
+    el.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
+    ro?.observe(el);
+    if (rows.current) ro?.observe(rows.current);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      el.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+      ro?.disconnect();
+    };
+  }, [canvas, rows, update, mounted]);
+  return band;
+}
+
+/** The "+N" cover with a gap where the pinned box lies: paper above it (the strip, lane rows) and below it, never over it. */
+function EdgeFadeAround({ visible, band }: { visible: VisibleColumns | null; band: PinnedBand | null }) {
+  const fade = <EdgeFade visible={visible} />;
+  if (!band) return fade;
+  const { top, bottom } = band;
+  return (
+    <div
+      aria-hidden
+      data-testid="edge-fade-clip"
+      style={{
+        position: 'absolute',
+        inset: 0,
+        pointerEvents: 'none',
+        clipPath: `polygon(0 0, 100% 0, 100% ${top}px, 0 ${top}px, 0 ${bottom}px, 100% ${bottom}px, 100% 100%, 0 100%)`,
+      }}
+    >
+      {fade}
+    </div>
+  );
+}
 
 /**
  * Nothing selected: the whole deck as a sheet under the lanes, its cells as large as the room left above the versions
@@ -208,7 +295,7 @@ function DeckSheet({
   }, [measure]);
   const { cols, cell } = room.w > 0 ? sheetLayout(order.length, room.w, room.h) : { cols: 8, cell: SHEET_MIN };
   return (
-    <div ref={box} data-testid="deck-sheet" className="main-pinned" style={{ width }}>
+    <div ref={box} data-testid="deck-sheet" data-pinned className="main-pinned" style={{ width }}>
       <div className="gutter row-label" style={{ paddingTop: 2 }}>
         all slides
       </div>
@@ -248,27 +335,60 @@ function DeckSheet({
   );
 }
 
-/** A neighbour beside the stage reads like a strip thumb from 160px wide; past 360px the width is better left to the render. */
-const SIDE_MIN = 160;
+/**
+ * A neighbour beside the stage reads like a sheet cell from 112px wide (the strip's thumbs are smaller); past 360px
+ * the width is better left to the render. The render gives up at most a fifth of its width to make that column.
+ */
+const SIDE_MIN = 112;
 const SIDE_MAX = 360;
+const SIDE_TAKE = 0.8;
 
 /**
  * The stage's grid for `n` selected slides: as large as the `room` under the strip allows (the whole render stays in
- * view), and the `width` of the visible canvas it leaves beside the render, when that holds a readable neighbour.
- * Nulls (not measured yet): no cap and no side column.
+ * view), and the `width` of the canvas it leaves beside the render for the neighbour slides. Less than 112px left: the
+ * render narrows to make a 112px column (no strip of paper between it and the conversation), unless it would lose
+ * more than a fifth of its width. Nulls (not measured yet): no cap and no side column.
  */
 export function stageLayout(n: number, room: number | null, width: number | null): { cols: number; rows: number; maxW: number | undefined; side: number } {
   const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
   const rows = Math.max(1, Math.ceil(n / cols));
   const maxW =
     room === null ? undefined : Math.max(240, Math.floor(cols * ((((room - (rows - 1) * STAGE_GAP) / rows - PREVIEW_PAD_H) * 16) / 9 + PREVIEW_PAD_W) + (cols - 1) * STAGE_GAP));
-  const left = width === null || maxW === undefined ? 0 : width - maxW - 2 * STAGE_GAP;
-  return { cols, rows, maxW, side: left < SIDE_MIN ? 0 : Math.min(SIDE_MAX, left) };
+  if (width === null || maxW === undefined) return { cols, rows, maxW, side: 0 };
+  const left = width - maxW - STAGE_GAP;
+  if (left >= SIDE_MIN) return { cols, rows, maxW, side: Math.min(SIDE_MAX, left) };
+  const narrowed = width - SIDE_MIN - STAGE_GAP;
+  return narrowed >= maxW * SIDE_TAKE ? { cols, rows, maxW: narrowed, side: SIDE_MIN } : { cols, rows, maxW, side: 0 };
+}
+
+/** A neighbour: its 16:9 frame, the 22px number and title line, 12px to the next; each group's caption line and gap. */
+const NEAR_LABEL = 22;
+const NEAR_GAP = 12;
+const NEAR_CAPTION = 20;
+
+/**
+ * The neighbours a column `width` x `height` holds, as indices of `order`: one slide before the selection, then the
+ * slides after it as long as they fit; near the end of the deck, more of the slides before. Without a height, the one
+ * before and the one after.
+ */
+export function stageNeighbours(count: number, start: number, span: number, width: number, height?: number): { previous: number[]; next: number[] } {
+  const before = start;
+  const after = Math.max(0, count - start - span);
+  if (height === undefined) return { previous: before > 0 ? [start - 1] : [], next: after > 0 ? [start + span] : [] };
+  const per = (width * 9) / 16 + NEAR_LABEL + NEAR_GAP;
+  const k = Math.max(2, Math.floor((height - 2 * NEAR_CAPTION + NEAR_GAP) / per));
+  let prev = Math.min(1, before);
+  const next = Math.min(after, k - prev);
+  prev = Math.min(before, k - next);
+  return {
+    previous: Array.from({ length: prev }, (_, i) => start - prev + i),
+    next: Array.from({ length: next }, (_, i) => start + span + i),
+  };
 }
 
 /**
- * Beside a stage the height stops short of the canvas's width: the slide before the selection and the one after it,
- * as a presenter sees what comes next. A click selects one, a double-click presents from it.
+ * Beside a stage the height stops short of the canvas's width: the slide before the selection and the ones after it,
+ * down the stage's height, as a presenter sees what comes next. A click selects one, a double-click presents from it.
  */
 export function StageNeighbours({
   order,
@@ -277,6 +397,7 @@ export function StageNeighbours({
   start,
   span,
   width,
+  height,
   onPick,
   onOpen,
 }: {
@@ -286,42 +407,48 @@ export function StageNeighbours({
   start: number;
   span: number;
   width: number;
+  /** The stage's height: the column runs down it. */
+  height?: number;
   onPick(id: SlideId): void;
   onOpen(id: SlideId): void;
 }) {
-  const near = [
-    { side: 'previous', i: start - 1 },
-    { side: 'next', i: start + span },
-  ].filter((x) => x.i >= 0 && x.i < order.length);
-  if (near.length === 0) return null;
+  const { previous, next } = stageNeighbours(order.length, start, span, width, height);
+  const groups = [
+    { side: 'previous', at: previous },
+    { side: 'next', at: next },
+  ].filter((g) => g.at.length > 0);
+  if (groups.length === 0) return null;
   return (
-    <div data-testid="stage-side" style={{ width, flex: `0 0 ${width}px`, display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {near.map(({ side, i }) => {
-        const id = order[i]!;
-        const title = slides[id]?.title ?? id;
-        const url = thumbs[id];
-        return (
-          <div key={side} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span className="meta">{side}</span>
-            <button
-              type="button"
-              data-testid="stage-neighbour"
-              data-slide={id}
-              className="sheet-slide"
-              aria-label={`${side}, slide ${i + 1}: ${title}`}
-              title="Click to select, double-click to present"
-              onClick={() => onPick(id)}
-              onDoubleClick={() => onOpen(id)}
-            >
-              <span className="sheet-frame">{url ? <img src={url} alt="" draggable={false} /> : null}</span>
-              <span className="sheet-label">
-                <span className="sheet-n">{i + 1}</span>
-                <span className="sheet-title">{title}</span>
-              </span>
-            </button>
-          </div>
-        );
-      })}
+    <div data-testid="stage-side" style={{ width, flex: `0 0 ${width}px`, display: 'flex', flexDirection: 'column', gap: NEAR_GAP }}>
+      {groups.map(({ side, at }) => (
+        <div key={side} data-testid="stage-neighbour-group" data-side={side} style={{ display: 'flex', flexDirection: 'column', gap: NEAR_GAP }}>
+          <span className="meta" style={{ lineHeight: '16px', marginBottom: NEAR_CAPTION - 16 - NEAR_GAP }}>{side}</span>
+          {at.map((i) => {
+            const id = order[i]!;
+            const title = slides[id]?.title ?? id;
+            const url = thumbs[id];
+            return (
+              <button
+                key={id}
+                type="button"
+                data-testid="stage-neighbour"
+                data-slide={id}
+                className="sheet-slide"
+                aria-label={`${side}, slide ${i + 1}: ${title}`}
+                title="Click to select, double-click to present"
+                onClick={() => onPick(id)}
+                onDoubleClick={() => onOpen(id)}
+              >
+                <span className="sheet-frame">{url ? <img src={url} alt="" draggable={false} /> : null}</span>
+                <span className="sheet-label">
+                  <span className="sheet-n">{i + 1}</span>
+                  <span className="sheet-title">{title}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -962,18 +1089,22 @@ export function Main() {
   // The strip header stays on top of the canvas: the selection panel never grows past the space left under it, so its
   // composer stays above the versions rail; the log scrolls inside.
   const stripHeader = useRef<HTMLDivElement>(null);
-  const [room, setRoom] = useState<{ canvas: number; strip: number }>({ canvas: 0, strip: 0 });
+  const [room, setRoom] = useState<{ canvas: number; strip: number; width: number }>({ canvas: 0, strip: 0, width: 0 });
   useLayoutEffect(() => {
     const el = canvas.current;
     const head = stripHeader.current;
     if (!el || !head) return;
-    const measure = (): void => setRoom((prev) => (prev.canvas === el.clientHeight && prev.strip === head.offsetHeight ? prev : { canvas: el.clientHeight, strip: head.offsetHeight }));
+    const measure = (): void =>
+      setRoom((prev) =>
+        prev.canvas === el.clientHeight && prev.strip === head.offsetHeight && prev.width === el.clientWidth ? prev : { canvas: el.clientHeight, strip: head.offsetHeight, width: el.clientWidth },
+      );
     measure();
     const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
     ro?.observe(el);
     ro?.observe(head);
     return () => ro?.disconnect();
   }, [load.status]);
+  const band = usePinnedBand(canvas, stripHeader, rows, load.status);
 
   // Clicking empty space (not a thumb, not a button) clears the selection back to the whole deck.
   const clearOnEmpty = (e: MouseEvent<HTMLElement>): void => {
@@ -1161,14 +1292,22 @@ export function Main() {
   const remarkCard = (r: Remark): React.ReactNode => (
     <RemarkPostIt remark={r} onPropose={propose} onResolve={remarkApi.resolveRemark} draftLaneId={draftOf(r)} onOpenLane={openFromRemark} openedLane={openedLane(r)} expandable />
   );
-  const pinned = pinnedWidth(visible);
+  const pinned = PINNED_W;
   // The stage's slides: the selected one, or every slide of the range, in a near-square grid.
   const stageIds = selectedCols ? deck.order.slice(selectedCols.start, selectedCols.start + selectedCols.span) : [];
-  const stage = stageLayout(stageIds.length, stageRoom, visible ? visible.cut - 24 : null);
+  const stageWidth = room.width > 0 ? room.width - 2 * CANVAS_SIDE + STAGE_RUN : null;
+  const stage = stageLayout(stageIds.length, stageRoom, stageWidth);
+  // The render's height, so the neighbour column beside it ends with it.
+  const stageHeight = ((): number | undefined => {
+    if (stageWidth === null) return undefined;
+    const w = Math.min(stage.maxW ?? Infinity, stageWidth - (stage.side > 0 ? stage.side + STAGE_GAP : 0));
+    const cell = (w - (stage.cols - 1) * STAGE_GAP) / stage.cols;
+    return stage.rows * (((cell - PREVIEW_PAD_W) * 9) / 16 + PREVIEW_PAD_H) + (stage.rows - 1) * STAGE_GAP;
+  })();
   // The stage spans the gutter too: the render is the largest thing on main, its card names the slide.
   const selectionStage =
     selectedCols && context.kind !== 'arc' ? (
-      <div data-testid="selection-stage" className="main-pinned main-stage" style={{ width: pinned, gap: STAGE_GAP * 2 }}>
+      <div data-testid="selection-stage" data-pinned className="main-pinned main-stage" style={{ width: `calc(${PINNED_W} + ${STAGE_RUN}px)`, gap: STAGE_GAP }}>
         <div
           data-testid="stage-render"
           className="stage-render"
@@ -1192,6 +1331,7 @@ export function Main() {
             start={selectedCols.start}
             span={selectedCols.span}
             width={stage.side}
+            height={stageHeight}
             onPick={(id) => {
               setFocusComposer(false);
               setContext({ kind: 'slide', slide: id });
@@ -1384,7 +1524,7 @@ export function Main() {
               <p>{EMPTY_DECK_HINT}</p>
             </div>
           ) : null}
-          <EdgeFade visible={visible} />
+          <EdgeFadeAround visible={visible} band={band} />
           <StripPager visible={visible} onPage={page} />
         </div>
         <div data-testid="versions-rail" style={{ flex: '0 0 auto', padding: '16px 24px', borderTop: '1px solid var(--line)', background: 'var(--paper)' }}>

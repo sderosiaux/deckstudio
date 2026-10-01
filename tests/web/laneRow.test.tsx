@@ -293,6 +293,37 @@ describe('LaneRow', () => {
     expect(getComputedStyle(tag.parentElement!).position).not.toBe('absolute');
   });
 
+  it('spills its name into the empty columns in view before its first cell, like a ledger line, instead of wrapping it in the gutter', () => {
+    const modifyS5: Change = { id: 'c5', kind: 'modify', slide: 's5', patch: { title: 'New s5' }, reason: 'r', status: 'pending' };
+    const p: LanePreviewPayload = { order, slides: { ...mainSlides, s5: slide('s5', 'New s5') }, skipped: [], thumbs: {} };
+    const long = 'Open the memory answer before the coordination block';
+    const one = lane({ label: long, anchor: { kind: 'slide', slide: 's5' }, changes: [modifyS5] });
+    const open = vi.fn();
+    const { rerender } = render(<LaneRow lane={one} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} view={{ first: 0, end: 5 }} onOpenChange={open} />);
+    const spill = screen.getByTestId('lane-spill');
+    // Columns 1 to 4 are empty in this row: the name, its origin and its actions run from the gutter over them.
+    expect(spill.closest('.gutter')).not.toBeNull();
+    expect(spill.getAttribute('data-columns')).toBe('4');
+    expect(spill.style.width).toContain('4 * (var(--thumb-w) + var(--col-gap))');
+    expect(within(spill).getByTestId('lane-name').textContent).toBe(long);
+    expect(within(spill).getByTestId('lane-origin')).toBeTruthy();
+    expect(within(spill).getByRole('button', { name: 'discard lane' })).toBeTruthy();
+    // What it does, change by change, a click opening one; lines stay under 80 characters.
+    const changes = within(spill).getByTestId('lane-spill-changes');
+    expect(changes.textContent).toBe('modify slide 5, New s5: r');
+    expect(within(changes).getByRole('listitem').style.maxWidth).toBe('80ch');
+    expect(within(spill).getByTestId('lane-name').parentElement!.style.maxWidth).toBe('80ch');
+    fireEvent.click(within(changes).getByRole('button'));
+    expect(open).toHaveBeenCalledWith('l1', 'c5');
+    // Scrolled so that fewer than three empty columns show before it: the name goes back to the gutter.
+    rerender(<LaneRow lane={one} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} view={{ first: 2, end: 5 }} />);
+    expect(screen.queryByTestId('lane-spill')).toBeNull();
+    expect(within(document.querySelector<HTMLElement>('.gutter')!).getByTestId('lane-name').textContent).toBe(long);
+    // Not measured (no view): the gutter.
+    rerender(<LaneRow lane={one} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    expect(screen.queryByTestId('lane-spill')).toBeNull();
+  });
+
   it('a lane whose changed slides lie past the columns in view shows an edge chip that reveals them', () => {
     const modifyS5: Change = { id: 'c5', kind: 'modify', slide: 's5', patch: { title: 'New s5' }, reason: 'r', status: 'pending' };
     const p: LanePreviewPayload = { order, slides: { ...mainSlides, s5: slide('s5', 'New s5') }, skipped: [], thumbs: {} };
