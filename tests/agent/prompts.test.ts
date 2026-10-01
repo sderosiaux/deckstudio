@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { contextHeader, SYSTEM_APPEND } from '../../src/agent/prompts.js';
+import { contextHeader, SYSTEM_APPEND, themeClasses } from '../../src/agent/prompts.js';
 import type { Brief, Lane, Remark, Slide, Snapshot } from '../../src/model/types.js';
 
 const brief: Brief = { title: 'Deck', audience: 'devs', message: 'one log', pattern: 'solution-first', abstract: 'abs', design: { rules: '', imageStyle: '' } };
@@ -132,5 +132,59 @@ describe('SYSTEM_APPEND', () => {
     expect(SYSTEM_APPEND).toMatch(/add_remark/);
     expect(SYSTEM_APPEND).toMatch(/render_slide only validates structure/);
     expect(SYSTEM_APPEND).toMatch(/Never claim .*render check passed/);
+  });
+});
+
+describe('design rules', () => {
+  const rules = 'Archivo for all text.\nNo bullet lists, no sentence under a visual.';
+  const designed: Brief = { ...brief, design: { rules, imageStyle: '' } };
+  const css = [
+    '/* .commented-out{color:red} */',
+    ':root{--paper:#FAF9F6}',
+    '.slide{padding:72px 96px;line-height:.98}',
+    'h2{font-size:82px}',
+    '.big,.cap{font-size:32px;box-shadow:0 4px 12px rgba(23,23,26,.10)}',
+    '.code .kw{font-weight:700}.code .st{color:var(--accent)}',
+    'a[href$=".png"]{border:0}',
+    '@media (min-resolution:1.5dppx){.strata.thin{height:60px}}',
+  ].join('\n');
+
+  it('themeClasses lists each class selector once, in order, ignoring declarations, comments and strings', () => {
+    expect(themeClasses(css)).toEqual(['slide', 'big', 'cap', 'code', 'kw', 'st', 'strata', 'thin']);
+  });
+
+  it('adds a Design rules block after the brief line with the rules verbatim and the theme classes', () => {
+    const h = contextHeader({ thread: 'global', anchor: null, snapshot, brief: designed, themeCss: css });
+    const lines = h.split('\n');
+    const at = lines.findIndex((l) => l.startsWith('Design rules'));
+    expect(at).toBe(lines.findIndex((l) => l.startsWith('Brief:')) + 1);
+    expect(h).toContain(`${lines[at]}\n${rules}\n`);
+    // .slide is the stage the renderer draws, not a class for a body.
+    expect(h).toContain('Theme classes in theme.css (reuse them instead of inline styles): .big, .cap, .code, .kw, .st, .strata, .thin\n');
+    expect(h.indexOf('Design rules')).toBeLessThan(h.indexOf('Deck outline'));
+  });
+
+  it('no Design rules block when the brief has no rules', () => {
+    const blank = { ...brief, design: { rules: '  \n', imageStyle: 'x' } };
+    const h = contextHeader({ thread: 'global', anchor: null, snapshot, brief: blank, themeCss: css });
+    expect(h).not.toContain('Design rules');
+    expect(h).not.toContain('Theme classes');
+  });
+
+  it('lane, remark and slide threads carry the same block', () => {
+    const threads = [
+      contextHeader({ thread: 'lane:l1', anchor: null, snapshot, lane, brief: designed, themeCss: css }),
+      contextHeader({ thread: 'remark:r1', anchor: null, snapshot, remark, brief: designed, themeCss: css }),
+      contextHeader({ thread: 'slide:s3', anchor: null, snapshot, brief: designed, themeCss: css }),
+    ];
+    for (const h of threads) {
+      expect(h).toContain(rules);
+      expect(h).toContain('.big, .cap');
+    }
+  });
+
+  it('SYSTEM_APPEND makes every created or modified slide satisfy the design rules, and names conflicts', () => {
+    expect(SYSTEM_APPEND).toMatch(/every slide you create or modify must satisfy the design rules of the brief/i);
+    expect(SYSTEM_APPEND).toMatch(/conflicts with them, say so in one sentence and propose the closest compliant change/i);
   });
 });

@@ -12,6 +12,7 @@ import {
   type CheckName,
   type ChecksStatus,
   type DeckPayload,
+  type DesignInfo,
 } from '../api.js';
 import { anchorColumns } from '../components/LaneRow.js';
 import { RemarkCard } from '../components/Remark.js';
@@ -41,7 +42,13 @@ type Save = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } | { kind: 
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const sameBrief = (a: Brief, b: Brief): boolean =>
-  a.title === b.title && a.audience === b.audience && a.message === b.message && a.pattern === b.pattern && a.abstract === b.abstract;
+  a.title === b.title &&
+  a.audience === b.audience &&
+  a.message === b.message &&
+  a.pattern === b.pattern &&
+  a.abstract === b.abstract &&
+  a.design.rules === b.design.rules &&
+  a.design.imageStyle === b.design.imageStyle;
 // Remarks from a lane-scoped run describe that lane's preview, not main: they are shown on the lane row, not here.
 const openOf = (rs: Remark[], name: CheckName): Remark[] => rs.filter((r) => r.status === 'open' && r.origin === `check:${name}` && !r.sourceLaneId);
 const hasWarn = (rs: Remark[], name: CheckName): boolean => openOf(rs, name).some((r) => r.severity === 'warn');
@@ -100,10 +107,54 @@ const h2: CSSProperties = { margin: '0 0 14px', fontSize: 20, fontWeight: 700 };
 const fieldLabel: CSSProperties = { display: 'block', fontSize: 13, fontWeight: 500, margin: 0, padding: '10px 0 0' };
 const input: CSSProperties = { display: 'block', width: '100%', margin: 0, padding: '8px 12px', borderRadius: 'var(--radius)', border: '1px solid var(--line)', background: 'var(--card)', font: 'inherit', fontSize: 13, lineHeight: 1.45, color: 'var(--ink)' };
 
+const PLACEHOLDER_MAX_ROWS = 8;
+const h3: CSSProperties = { margin: '28px 0 0', fontSize: 15, fontWeight: 700 };
+
+type DesignLoad = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; info: DesignInfo };
+
+/** Where the deck's theme.css lives and when an edit shows up: it is edited on disk, not here. */
+function themeNote(d: DesignLoad): string {
+  if (d.status === 'loading') return '';
+  if (d.status === 'error') return `theme.css: could not load its location (${d.message})`;
+  const { themeCssPath, themeCssPresent } = d.info;
+  return themeCssPresent
+    ? `theme.css: ${themeCssPath} (edit on disk; renders and thumbnails reload on restart)`
+    : `theme.css: ${themeCssPath} (not present: the built-in theme applies; create it to change the look, then restart)`;
+}
+
 function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
   const [draft, setDraft] = useState<Brief>(initial);
   const saved = useRef<Brief>(initial);
   const [save, setSave] = useState<Save>({ kind: 'idle' });
+  const [design, setDesign] = useState<DesignLoad>({ status: 'loading' });
+
+  useEffect(() => {
+    let live = true;
+    api.getDesign().then(
+      (info) => live && setDesign({ status: 'ready', info }),
+      (err: unknown) => live && setDesign({ status: 'error', message: message(err) }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [api]);
+
+  const designText = (key: 'rules' | 'imageStyle', label: string, minRows: number, placeholder?: string) => (
+    <>
+      <label htmlFor={`brief-design-${key}`} style={fieldLabel}>{label}</label>
+      <textarea
+        id={`brief-design-${key}`}
+        className="brief-design-field"
+        value={draft.design[key]}
+        // An empty field grows with its placeholder too, up to PLACEHOLDER_MAX_ROWS: the built-in style is long.
+        rows={draft.design[key] ? autoRows(draft.design[key], minRows) : Math.min(PLACEHOLDER_MAX_ROWS, autoRows(placeholder ?? '', minRows))}
+        {...(placeholder !== undefined ? { placeholder } : {})}
+        style={{ ...input, resize: 'vertical' }}
+        onChange={(e) => setDraft({ ...draft, design: { ...draft.design, [key]: e.target.value } })}
+        onBlur={() => persist(draft)}
+      />
+    </>
+  );
 
   const persist = useCallback(
     (next: Brief): void => {
@@ -178,6 +229,14 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
         ))}
       </div>
       {text('abstract', 'abstract', 6)}
+      </div>
+      <h3 style={h3}>Design</h3>
+      <div data-testid="brief-design" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gridAutoRows: 'auto', rowGap: 8, alignItems: 'start' }}>
+        {designText('rules', 'rules the co-author must respect', 4)}
+        {designText('imageStyle', 'image style', 3, design.status === 'ready' ? design.info.defaultImageStyle : '')}
+        <p data-testid="theme-note" className="muted" style={{ margin: '4px 0 0', fontSize: 12, lineHeight: 1.45, overflowWrap: 'anywhere' }}>
+          {themeNote(design)}
+        </p>
       </div>
     </section>
   );

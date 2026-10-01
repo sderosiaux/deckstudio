@@ -45,8 +45,9 @@ export interface CheckDef {
   buildPrompt(input: CheckPromptInput): string;
 }
 
+/** The brief, and its design rules as context: only the render check verifies them. */
 export function briefBlock(b: Brief): string {
-  return [
+  const brief = [
     '<brief>',
     `Title: ${b.title}`,
     `Audience: ${b.audience}`,
@@ -55,6 +56,14 @@ export function briefBlock(b: Brief): string {
     `Abstract:\n${b.abstract}`,
     '</brief>',
   ].join('\n');
+  const rules = designRulesBlock(b);
+  return rules ? `${brief}\n\n${rules}\nThe design rules above are context only: another check verifies them; do not report on them.` : brief;
+}
+
+/** The creator's design rules, verbatim, or '' when the brief has none. */
+export function designRulesBlock(b: Brief): string {
+  const rules = b.design.rules.trim();
+  return rules ? `<design-rules>\n${rules}\n</design-rules>` : '';
 }
 
 const BODY_TEXT_MAX = 600;

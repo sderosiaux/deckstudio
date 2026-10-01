@@ -6,6 +6,7 @@ export const SYSTEM_APPEND = `
 You are the co-author of a slide deck. The deck is the source of truth and the creator decides what goes in it. You work on it only through the deck tools (mcp__deck__*): read with get_deck and get_slide, look with render_slide, propose with propose_lane and revise_lane, flag with add_remark. You never edit deck files directly; only files you generate may go under assets/.
 
 # Composition rules
+- Every slide you create or modify must satisfy the design rules of the brief (the Design rules block of the context). When a request conflicts with them, say so in one sentence and propose the closest compliant change.
 - One idea per slide. The title is a claim, not a topic.
 - The body is visual: a diagram image, code, or composed HTML. Never bullet lists (no <ul>, no <ol>).
 - Nothing under 24px.
@@ -60,6 +61,34 @@ function anchorTitles(snapshot: Snapshot, a: Anchor): string {
   return ids.length ? ids.map((id) => slideRef(snapshot, id)).join(', ') : '(none of its slides are in the deck)';
 }
 
+/**
+ * Class names a slide body can reuse, in order of first appearance: the `.name` parts of every selector of `css`.
+ * Declarations (`.98`, `rgba(...,.10)`), comments and quoted strings are skipped.
+ */
+export function themeClasses(css: string): string[] {
+  const clean = css.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '""');
+  const out = new Set<string>();
+  // The text before each `{` is a selector list or an at-rule prelude; what sits between `{` and `}` is declarations.
+  for (const m of clean.matchAll(/([^{}]*)\{/g)) {
+    const prelude = m[1]!.trim();
+    if (prelude.startsWith('@')) continue;
+    for (const c of prelude.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) out.add(c[1]!);
+  }
+  return [...out];
+}
+
+/** Classes the renderer and the player set on their own elements (the stage, the notes, the story panel, the HUD): never for a body. */
+const PLAYER_CLASSES: ReadonlySet<string> = new Set(['slide', 'active', 'notes', 'story', 'hud']);
+
+function designBlock(brief: Brief, themeCss: string | undefined): string[] {
+  const rules = brief.design.rules.trim();
+  if (!rules) return [];
+  const out = ['Design rules (every slide you create or modify must satisfy them):', rules];
+  const classes = themeCss === undefined ? [] : themeClasses(themeCss).filter((c) => !PLAYER_CLASSES.has(c));
+  if (classes.length) out.push(`Theme classes in theme.css (reuse them instead of inline styles): ${classes.map((c) => `.${c}`).join(', ')}`);
+  return out;
+}
+
 /** The per-message context block prepended to the creator's text, so the model knows what it is looking at. */
 export function contextHeader(input: {
   thread: ThreadKey;
@@ -68,12 +97,15 @@ export function contextHeader(input: {
   lane?: Lane;
   remark?: Remark;
   brief: Brief;
+  /** The deck's theme.css: its class names are listed next to the design rules. */
+  themeCss?: string;
 }): string {
   const { thread, snapshot, lane, remark, brief } = input;
   const index = new Map(snapshot.order.map((id, i) => [id, i + 1]));
   const out: string[] = ['<deck-context>'];
   out.push(`Thread: ${thread}`);
   out.push(`Brief: "${brief.title}" for ${brief.audience}. Message: ${brief.message}. Pattern: ${brief.pattern}.`);
+  out.push(...designBlock(brief, input.themeCss));
 
   out.push('', 'Deck outline (index. id: title):');
   for (const id of snapshot.order) out.push(`${index.get(id)}. ${id}: ${snapshot.slides[id]?.title ?? ''}`);
