@@ -76,3 +76,7 @@ button { font: inherit; }
 .thumb-title-link { visibility: visible; pointer-events: auto; cursor: pointer; text-decoration: none; transition: color .15s ease; }
 .thumb-title-link:hover { color: var(--accent); }
 [role='list']:hover .thumb-wrap:not(:hover) .thumb-title-link { visibility: hidden; }
+
+/* History: the "+N" slot over the end of the compared strips scrolls them on; it shows the count EdgeFade prints. */
+.diff-more { all: unset; box-sizing: border-box; cursor: pointer; border-radius: var(--radius); transition: box-shadow .15s ease; }
+.diff-more:hover, .diff-more:focus-visible { box-shadow: inset 0 0 0 1px var(--grey-2); }

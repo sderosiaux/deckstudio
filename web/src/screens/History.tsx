@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react';
 import type { DiffEntry, Slide, SlideId, Snapshot, Version } from '../../../src/model/types.js';
 import {
   ApiError,
@@ -15,7 +15,7 @@ import {
 } from '../api.js';
 import { DiffFilmstrips } from '../components/DiffFilmstrips.js';
 import { BackToMain, ScreenHeader } from '../components/ScreenHeader.js';
-import { VersionLine, type VersionPair } from '../components/VersionLine.js';
+import { EMPTY_VERSION, VersionLine, type VersionPair } from '../components/VersionLine.js';
 
 export interface HistoryProps {
   api?: HistoryApi;
@@ -50,6 +50,19 @@ export const RESTORE_VERB: Record<DiffEntry['kind'], string> = {
   moved: 'move back',
 };
 
+/** How long the "done: vN, undo" line stays in place of a restored row. */
+export const RESTORE_DONE_MS = 6000;
+
+/** A restore that went through: the version it made and how to take it back (the inverse entry, from the version before). */
+interface Done {
+  key: string;
+  /** Where the row was in the list: the line keeps that place even when the entry left the comparison. */
+  index: number;
+  before: number;
+  after: number;
+  slide: SlideId;
+}
+
 const latestOf = (versions: Version[]): number | undefined => versions.reduce<number | undefined>((m, v) => (m === undefined || v.n > m ? v.n : m), undefined);
 
 /** Same content as the slide on main, so main's thumbnail shows it faithfully. */
@@ -77,6 +90,7 @@ export function describeEntry(e: DiffEntry, c: Compared): { where: string; what:
   }
 }
 
+const rowButton: CSSProperties = { padding: '4px 10px', fontSize: 12, whiteSpace: 'nowrap' };
 const chip: CSSProperties = { flex: '0 0 auto', padding: '2px 6px', borderRadius: 4, border: '1px solid var(--line)', fontSize: 12, whiteSpace: 'nowrap' };
 
 /** Compare two versions of main: version line on top, the two filmstrips with diff marks, and what changed with restore. */
@@ -89,6 +103,9 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
   const [diffError, setDiffError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  /** The row whose restore waits for a second click. */
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [done, setDone] = useState<Done | null>(null);
   const [focused, setFocused] = useState<SlideId | undefined>(undefined);
   const [mainThumbs, setMainThumbs] = useState<Record<SlideId, ThumbStatus>>({});
   const [reload, setReload] = useState(0);
@@ -219,18 +236,53 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
     }
   }, [api, compared, deck]);
 
-  const select = (n: number, which: keyof VersionPair): void => setPair((prev) => (prev ? { ...prev, [which]: n } : { a: n, b: n }));
+  // A plain click on the version already compared to would compare it with itself: it does nothing.
+  const select = (n: number, which: keyof VersionPair): void =>
+    setPair((prev) => (!prev ? { a: n, b: n } : which === 'a' && n === prev.b ? prev : { ...prev, [which]: n }));
+  const swap = (): void => setPair((prev) => (prev ? { a: prev.b, b: prev.a } : prev));
 
-  const restore = (e: DiffEntry, key: string): void => {
-    if (!compared) return;
+  // The done line goes away on its own; a newer restore restarts the count.
+  useEffect(() => {
+    if (!done) return;
+    const t = setTimeout(() => setDone(null), RESTORE_DONE_MS);
+    return () => clearTimeout(t);
+  }, [done]);
+
+  const failed = (err: unknown): void => setActionError(err instanceof ApiError ? err.detail : message(err));
+
+  const restore = (e: DiffEntry, key: string, index: number): void => {
+    if (!compared || !deck) return;
+    const before = deck.state.version;
+    setConfirming(null);
+    setDone(null);
     setBusy(key);
     setActionError(null);
     // No reload here: the server announces the new main with deck.changed, which refreshes the screen once.
-    api.restoreEntry(compared.pair.a, e).then(
-      () => undefined,
+    api
+      .restoreEntry(compared.pair.a, e)
+      .then(async () => {
+        const after = (await api.getDeck()).state.version;
+        setDone({ key, index, before, after, slide: e.slide });
+      })
       // The server's own sentence ("entry no longer applies: …"), not the HTTP line.
-      (err: unknown) => setActionError(err instanceof ApiError ? err.detail : message(err)),
-    ).finally(() => setBusy(null));
+      .catch(failed)
+      .finally(() => setBusy(null));
+  };
+
+  /** Takes a restore back: the change v<before> to v<after> made to that slide, restored from v<before>. */
+  const undo = (d: Done): void => {
+    setBusy('undo');
+    setActionError(null);
+    api
+      .getHistoryDiff(d.before, d.after)
+      .then(async ({ entries }) => {
+        const inverse = entries.find((x) => x.slide === d.slide);
+        if (!inverse) throw new Error(`v${d.after} no longer differs from v${d.before} on that slide`);
+        await api.restoreEntry(d.before, inverse);
+        setDone(null);
+      })
+      .catch(failed)
+      .finally(() => setBusy(null));
   };
 
   const openAsLane = (): void => {
@@ -251,6 +303,19 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
         setBusy(null);
       },
     );
+  };
+
+  const doneRow = (d: Done) => (
+    <li key={`done:${d.key}`} data-testid="restore-done" role="status" style={{ display: 'flex', alignItems: 'baseline', gap: 4, padding: '12px 0', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
+      {`done: v${d.after}, `}
+      <button type="button" className="link" onClick={() => undo(d)} disabled={busy !== null} style={{ color: 'var(--ink)', textDecoration: 'underline' }}>undo</button>
+    </li>
+  );
+  /** The list with the done line at the place of the row it replaced, when that entry left the comparison. */
+  const withDone = (rows: ReactElement[]): ReactElement[] => {
+    if (!done || rows.some((r) => r.key === `done:${done.key}`)) return rows;
+    const at = Math.min(done.index, rows.length);
+    return [...rows.slice(0, at), doneRow(done), ...rows.slice(at)];
   };
 
   if (loadError && !versions) {
@@ -277,7 +342,8 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
     pair !== null &&
     (pair.a === deck.state.version ||
       (pair.b === deck.state.version ? shown !== null && shown.entries.length === 0 : mainHas[`${deck.state.version}:${pair.a}`] === true));
-  const openDisabled = busy !== null || aIsMain;
+  const aEmpty = pair !== null && versions.some((v) => v.n === pair.a && v.order.length === 0);
+  const openDisabled = busy !== null || aIsMain || aEmpty;
 
   return (
     <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
@@ -294,14 +360,14 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
               className="btn-primary"
               onClick={openAsLane}
               disabled={openDisabled}
-              title={aIsMain ? `main already has v${pair.a}'s slides` : `Propose the changes that bring main back to v${pair.a}`}
+              title={aEmpty ? `v${pair.a} is ${EMPTY_VERSION}` : aIsMain ? `main already has v${pair.a}'s slides` : `Propose the changes that bring main back to v${pair.a}`}
               style={{ marginLeft: 8, alignSelf: 'center' }}
             >
               Open v{pair.a} as a lane
             </button>
           ) : null}
         </ScreenHeader>
-        {/* The pair sizes to its rows; the rail follows 64px under the lower one (12px strip padding + 8 + 44). */}
+        {/* The pair sizes to its rows; the rail follows 64px under the lower one (24px strip padding, room for a hover title, + 8 + 32). */}
         <section aria-label="compared versions" style={{ flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '8px 24px 8px' }}>
           {diffError ? (
             <p style={{ color: 'var(--warn)' }}>Could not compare: {diffError}</p>
@@ -320,13 +386,19 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
           )}
         </section>
         {/* The version line is a thin rail under the compared rows, as on main under the lanes. */}
-        <div style={{ padding: '44px 24px 16px' }}>
-          <p className="meta" style={{ margin: '0 0 10px calc(var(--gutter) + 6px)' }}>click a version to compare from it, shift-click to compare to it</p>
+        <div style={{ padding: '32px 24px 16px' }}>
+          <p className="meta" style={{ margin: '0 0 10px calc(var(--gutter) + 6px)', display: 'flex', gap: 12, alignItems: 'baseline' }}>
+            <span>click a version to compare from it, shift-click to compare to it</span>
+            {pair && pair.a !== pair.b ? (
+              <button type="button" className="link" onClick={swap} style={{ fontSize: 12, color: 'var(--ink)' }}>swap</button>
+            ) : null}
+          </p>
           <VersionLine versions={versions} current={deck.state.version} selection={pair ?? undefined} onSelect={select} />
         </div>
       </div>
       <aside aria-label="what changed" style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', padding: '18px 20px', overflowY: 'auto' }}>
         <h2 className="screen-title" style={{ marginBottom: 14 }}>What changed</h2>
+        {done && (!shown || shown.a.order.length === 0 || shown.entries.length === 0 || shown.pair.a === shown.pair.b) ? <ol style={{ listStyle: 'none', margin: '0 0 12px', padding: 0 }}>{doneRow(done)}</ol> : null}
         {!shown ? null : shown.pair.a === shown.pair.b ? (
           <p className="muted" style={{ fontSize: 13 }}>Both sides are v{shown.pair.a}. Click another version to compare from it, or shift-click to compare to it.</p>
         ) : shown.entries.length === 0 ? (
@@ -336,8 +408,9 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
           <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} is empty: restoring would remove every slide</p>
         ) : (
           <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-            {shown.entries.map((e) => {
+            {withDone(shown.entries.map((e, index) => {
               const key = `${e.kind}:${e.slide}`;
+              if (done?.key === key) return doneRow(done);
               const d = describeEntry(e, shown);
               const does = RESTORE_VERB[e.kind];
               return (
@@ -356,20 +429,31 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
                     {/* What the button does, in the row itself: a tooltip alone hid that restoring an added slide deletes it. */}
                     <span className="muted" data-testid="diff-entry-does" style={{ display: 'block', marginTop: 2, fontSize: 'var(--fs-meta)', lineHeight: '16px' }}>restore: {does}</span>
                   </span>
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => restore(e, key)}
-                    disabled={busy !== null}
-                    aria-label={`restore (${does}): ${d.where}, as in v${shown.pair.a}`}
-                    title={`${does[0]!.toUpperCase()}${does.slice(1)}, as in v${shown.pair.a}`}
-                    style={{ padding: '4px 10px', fontSize: 12, whiteSpace: 'nowrap' }}
-                  >
-                    {busy === key ? 'restoring…' : 'restore'}
-                  </button>
+                  {confirming === key ? (
+                    // Restoring rewrites main: the second click, next to what it does, is the commit.
+                    <span data-testid="restore-confirm" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, fontSize: 12 }}>
+                      <span>{does}?</span>
+                      <span style={{ display: 'flex', gap: 6 }}>
+                        <button type="button" className="btn" onClick={() => setConfirming(null)} style={rowButton}>cancel</button>
+                        <button type="button" className="btn-primary" onClick={() => restore(e, key, index)} disabled={busy !== null} style={rowButton}>confirm</button>
+                      </span>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => setConfirming(key)}
+                      disabled={busy !== null}
+                      aria-label={`restore (${does}): ${d.where}, as in v${shown.pair.a}`}
+                      title={`${does[0]!.toUpperCase()}${does.slice(1)}, as in v${shown.pair.a}`}
+                      style={rowButton}
+                    >
+                      {busy === key ? 'restoring…' : 'restore'}
+                    </button>
+                  )}
                 </li>
               );
-            })}
+            }))}
           </ol>
         )}
       </aside>

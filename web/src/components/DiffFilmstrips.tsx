@@ -1,6 +1,6 @@
-import { useRef, type CSSProperties } from 'react';
+import { useEffect, useRef, type CSSProperties } from 'react';
 import type { DiffEntry, SlideId, Snapshot } from '../../../src/model/types.js';
-import { EdgeFade, useVisibleColumns } from './EdgeFade.js';
+import { END_W, EdgeFade, useVisibleColumns } from './EdgeFade.js';
 import { Thumb } from './Thumb.js';
 
 /**
@@ -59,6 +59,39 @@ const cellStyle: CSSProperties = { position: 'relative', flex: `0 0 ${THUMB_W}px
 /** Accent means "changed" here; the selected thumbnail uses the ink ring (Thumb ring="ink"), never the accent. */
 const outline: CSSProperties = { position: 'absolute', left: 0, top: 0, width: THUMB_W, height: THUMB_H, borderRadius: 4, boxShadow: '0 0 0 1.5px var(--accent)', pointerEvents: 'none' };
 const dot: CSSProperties = { position: 'absolute', top: 5, right: 5, width: 7, height: 7, borderRadius: 999, background: 'var(--accent)', pointerEvents: 'none' };
+/** The text mark under a changed thumb, on its number's line, right-aligned so the centred number stays readable. */
+const tag: CSSProperties = { position: 'absolute', right: 0, top: THUMB_H + 6, fontSize: 12, lineHeight: '15px', fontWeight: 500, color: 'var(--accent)', whiteSpace: 'nowrap', pointerEvents: 'none' };
+/** What a thumb without a render shows: the slide's title, so a past version never reads as a blank card. */
+const titleCard: CSSProperties = {
+  position: 'absolute',
+  left: 0,
+  top: 0,
+  width: THUMB_W,
+  height: THUMB_H,
+  padding: '8px 10px',
+  fontSize: 12,
+  lineHeight: '16px',
+  fontWeight: 500,
+  color: 'var(--grey)',
+  overflow: 'hidden',
+  overflowWrap: 'anywhere',
+  pointerEvents: 'none',
+};
+/** Room under the lower row for the hover title (one 16px line under the number) so the scroller never clips it. */
+const BOTTOM_ROOM = 24;
+
+/**
+ * A vertical wheel turns into sideways scrolling: the strips only scroll sideways, and the page itself never scrolls.
+ * Shift+wheel too (some platforms leave it on deltaY). A gesture that is already sideways is left to the browser.
+ */
+export function wheelSideways(el: HTMLElement, e: WheelEvent): void {
+  if (el.scrollWidth <= el.clientWidth) return;
+  const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+  if (sideways) return;
+  e.preventDefault();
+  el.scrollLeft += e.deltaY;
+}
+
 const slot: CSSProperties = {
   width: THUMB_W,
   height: THUMB_H,
@@ -82,6 +115,20 @@ const slot: CSSProperties = {
 export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstripsProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const visible = useVisibleColumns(scroller, '[data-testid="row-b"] > [role="listitem"]', [a.n, b.n, entries.length]);
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    // Not React's onWheel: it is passive, so it could not keep the page from scrolling.
+    const onWheel = (e: WheelEvent): void => wheelSideways(el, e);
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+  /** The "+N" slot moves the strips on by the whole columns that fit, so the next card starts where the first one was. */
+  const scrollOn = (): void => {
+    const el = scroller.current;
+    if (!el) return;
+    el.scrollLeft += Math.max(1, Math.floor((el.clientWidth - GUTTER - END_W) / COL)) * COL;
+  };
   const cells = bRowCells(b.snapshot.order, entries);
   const aCells = aRowCells(a.snapshot.order, entries);
   const colInB = new Map(cells.flatMap((c, i) => (c.kind === 'slide' ? [[c.id, i] as const] : [])));
@@ -89,6 +136,12 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
   const added = new Set(entries.flatMap((e) => (e.kind === 'added' ? [e.slide] : [])));
   const modified = new Set(entries.flatMap((e) => (e.kind === 'modified' ? [e.slide] : [])));
   const moved = entries.flatMap((e) => (e.kind === 'moved' ? [e] : []));
+  /** The words under a changed thumb of row b: what happened to it (a slide moved and edited says both). */
+  const tagOf = (id: SlideId): string | undefined => {
+    const words = [added.has(id) ? 'added' : null, modified.has(id) ? 'modified' : null, ...moved.filter((m) => m.slide === id).map((m) => `moved from ${m.from + 1}`)].filter(Boolean);
+    return words.length ? words.join(', ') : undefined;
+  };
+  const cardFor = (side: DiffSide, id: SlideId) => (side.thumbs[id] ? null : <div data-testid="thumb-title-card" style={titleCard}>{title(side, id)}</div>);
   const width = GUTTER + PAD * 2 + Math.max(aCells.length, cells.length) * COL;
   const changedIds = new Set(entries.map((e) => e.slide));
   // Every slide in both versions, joined across the two rows; the moved ones are the diff markers, drawn on top.
@@ -112,7 +165,7 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
 
   return (
     <div style={{ position: 'relative', flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <div ref={scroller} data-testid="diff-filmstrips" style={{ '--thumb-w': `${THUMB_W}px`, '--thumb-h': `${THUMB_H}px`, flex: '0 1 auto', minHeight: 0, overflow: 'auto', padding: '4px 0 12px 0', display: 'flex', flexDirection: 'column' } as CSSProperties}>
+      <div ref={scroller} data-testid="diff-filmstrips" style={{ '--thumb-w': `${THUMB_W}px`, '--thumb-h': `${THUMB_H}px`, flex: '0 1 auto', minHeight: 0, overflow: 'auto', padding: `4px 0 ${BOTTOM_ROOM}px 0`, display: 'flex', flexDirection: 'column' } as CSSProperties}>
         {/* The pair sits at the top of the band, a fixed link band between the rows. */}
         <div style={{ width, minWidth: '100%', flex: '0 0 auto', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'stretch' }}>
@@ -127,6 +180,7 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
                 ) : (
                   <div role="listitem" key={c.id} data-edge-item style={cellStyle}>
                     <Thumb slideId={c.id} n={c.n} title={title(a, c.id)} url={a.thumbs[c.id]} selected={c.id === focused} ring="ink" onClick={() => onFocus(c.id)} />
+                    {cardFor(a, c.id)}
                   </div>
                 ),
               )}
@@ -184,13 +238,15 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
                     <div data-testid="diff-marker" data-kind="removed" data-slide={c.id} className="edge-frame" title={`"${title(a, c.id)}" was slide ${c.wasAt + 1} in v${a.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--accent)' }}>
                       {title(a, c.id)}
                     </div>
-                    <div className="meta" style={{ paddingTop: 4, textAlign: 'center' }}>removed</div>
+                    <div data-testid="diff-tag" data-slide={c.id} style={{ ...tag, position: 'static', paddingTop: 6, textAlign: 'center' }}>removed</div>
                   </div>
                 ) : (
                   <div role="listitem" key={c.id} data-edge-item style={cellStyle}>
                     <Thumb slideId={c.id} n={c.n} title={title(b, c.id)} url={b.thumbs[c.id]} selected={c.id === focused} ring="ink" onClick={() => onFocus(c.id)} />
+                    {cardFor(b, c.id)}
                     {added.has(c.id) ? <div data-testid="diff-marker" data-kind="added" data-slide={c.id} className="diff-changed" style={outline} /> : null}
                     {modified.has(c.id) ? <div data-testid="diff-marker" data-kind="modified" data-slide={c.id} className="diff-changed" title="modified" style={dot} /> : null}
+                    {tagOf(c.id) ? <div data-testid="diff-tag" data-slide={c.id} style={tag}>{tagOf(c.id)}</div> : null}
                   </div>
                 ),
               )}
@@ -199,6 +255,20 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
         </div>
       </div>
       <EdgeFade visible={visible} />
+      {/* Over each row's "+N": a hint that goes somewhere, not a dead end. */}
+      {visible?.rows.map((r, i) =>
+        r.hidden > 0 ? (
+          <button
+            key={i}
+            type="button"
+            className="diff-more"
+            aria-label={`show the next slides (${r.hidden} more)`}
+            title="Scroll on"
+            onClick={scrollOn}
+            style={{ position: 'absolute', left: visible.cut, top: r.top - THUMB_H / 2, width: END_W, height: THUMB_H }}
+          />
+        ) : null,
+      )}
     </div>
   );
 }

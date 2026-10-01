@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { RESTORE_DONE_MS } from '../../web/src/screens/History.js';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { History } from '../../web/src/screens/History.js';
 import { VersionLine } from '../../web/src/components/VersionLine.js';
@@ -133,6 +134,7 @@ describe('History', () => {
     await waitFor(() => screen.queryAllByTestId('diff-entry').some((e) => e.getAttribute('data-kind') === 'removed'));
     const removed = screen.getAllByTestId('diff-entry').find((e) => e.getAttribute('data-kind') === 'removed')!;
     fireEvent.click(within(removed).getByRole('button', { name: /bring back/ }));
+    fireEvent.click(within(removed).getByRole('button', { name: 'confirm' }));
     await waitFor(() => api.restoreEntry.mock.calls.length === 1);
     expect(api.restoreEntry).toHaveBeenCalledWith(1, { kind: 'removed', slide: 's4', wasAt: 3 });
     await waitFor(() => api.getVersions.mock.calls.length >= 2);
@@ -396,5 +398,178 @@ describe('bRowCells', () => {
       { kind: 'removed', slide: 'r9', wasAt: 9 },
     ]);
     expect(cells.map((c) => c.id)).toEqual(['r0', 'x', 'y', 'r9']);
+  });
+});
+
+describe('History QA1', () => {
+  const entryOf = (kind: string) => screen.getAllByTestId('diff-entry').find((e) => e.getAttribute('data-kind') === kind)!;
+  const selectedPair = () => screen.getAllByTestId('version').filter((v) => v.hasAttribute('data-selected')).map((v) => `${v.getAttribute('data-version')}${v.getAttribute('data-selected')}`);
+
+  it('restore is a two-step inline confirm: the first click asks, cancel backs out, confirm restores', async () => {
+    const api = stubApi();
+    render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('version').length === 3);
+    fireEvent.click(versionButton(1));
+    await waitFor(() => screen.queryAllByTestId('diff-entry').length === 4);
+    fireEvent.click(within(entryOf('added')).getByRole('button', { name: /^restore/ }));
+    expect(api.restoreEntry).not.toHaveBeenCalled();
+    expect(within(entryOf('added')).getByTestId('restore-confirm').textContent).toContain('remove from main?');
+    fireEvent.click(within(entryOf('added')).getByRole('button', { name: 'cancel' }));
+    expect(within(entryOf('added')).queryByTestId('restore-confirm')).toBeNull();
+    expect(api.restoreEntry).not.toHaveBeenCalled();
+    fireEvent.click(within(entryOf('added')).getByRole('button', { name: /^restore/ }));
+    fireEvent.click(within(entryOf('added')).getByRole('button', { name: 'confirm' }));
+    await waitFor(() => api.restoreEntry.mock.calls.length === 1);
+    expect(api.restoreEntry).toHaveBeenCalledWith(1, { kind: 'added', slide: 's6', at: 3 });
+  });
+
+  it('after a restore the row says "done: vN, undo" for a few seconds; undo restores the inverse entry', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const api = stubApi();
+    // Restoring "removed s4" from v1 brings s4 back on main: v4.
+    snaps[4] = snap([slide('s1'), slide('s3'), slide('s2', 'Our Solution'), slide('s4'), slide('s6'), slide('s5')]);
+    const deck4: DeckPayload = { ...deck, state: { ...deck.state, version: 4, order: snaps[4].order }, order: snaps[4].order, slides: snaps[4].slides };
+    api.restoreEntry.mockImplementationOnce(async () => {
+      api.getDeck.mockImplementation(async () => deck4);
+      api.getVersions.mockImplementation(async () => [1, 2, 3, 4].map(version));
+    });
+    try {
+      render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);
+      await waitFor(() => screen.queryAllByTestId('version').length === 3);
+      fireEvent.click(versionButton(1));
+      await waitFor(() => screen.queryAllByTestId('diff-entry').length === 4);
+      fireEvent.click(within(entryOf('removed')).getByRole('button', { name: /^restore/ }));
+      fireEvent.click(within(entryOf('removed')).getByRole('button', { name: 'confirm' }));
+      const done = await waitFor(() => screen.queryByTestId('restore-done'));
+      expect(done.textContent).toBe('done: v4, undo');
+      fireEvent.click(within(done).getByRole('button', { name: 'undo' }));
+      await waitFor(() => api.restoreEntry.mock.calls.length === 2);
+      const inverse = diffVersions(snaps[3]!, snaps[4]!).find((e) => e.slide === 's4')!;
+      expect(api.restoreEntry.mock.calls[1]).toEqual([3, inverse]);
+      await waitFor(() => screen.queryByTestId('restore-done') === null);
+
+      // A second restore: the line goes away on its own after RESTORE_DONE_MS.
+      api.restoreEntry.mockImplementation(async () => undefined);
+      await waitFor(() => screen.queryAllByTestId('diff-entry').length > 0);
+      const first = screen.getAllByTestId('diff-entry')[0]!;
+      fireEvent.click(within(first).getByRole('button', { name: /^restore/ }));
+      fireEvent.click(within(first).getByRole('button', { name: 'confirm' }));
+      await waitFor(() => screen.queryByTestId('restore-done'));
+      act(() => {
+        vi.advanceTimersByTime(RESTORE_DONE_MS + 10);
+      });
+      expect(screen.queryByTestId('restore-done')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      delete snaps[4];
+    }
+  });
+
+  it('clicking the current "to" does nothing; swap exchanges from and to', async () => {
+    const api = stubApi();
+    render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('diff-entry').length > 0);
+    expect(selectedPair()).toEqual(['2a', '3b']);
+    fireEvent.click(versionButton(3));
+    expect(selectedPair()).toEqual(['2a', '3b']);
+    expect(api.getHistoryDiff).not.toHaveBeenCalledWith(3, 3);
+    fireEvent.click(screen.getByRole('button', { name: 'swap' }));
+    expect(selectedPair()).toEqual(['2b', '3a']);
+    await waitFor(() => api.getHistoryDiff.mock.calls.some(([a, b]) => a === 3 && b === 2));
+  });
+
+  it('an empty version reads "empty (before import)" and cannot be opened as a lane', async () => {
+    const api = stubApi();
+    snaps[0] = snap([]);
+    try {
+      api.getVersions.mockImplementation(async () => [0, 1, 2, 3].map((n) => (n === 0 ? { ...version(0), order: [], label: 'imported' } : version(n))));
+      render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);
+      await waitFor(() => screen.queryAllByTestId('version').length === 4);
+      const v0 = screen.getAllByTestId('version').find((v) => v.getAttribute('data-version') === '0')!;
+      expect(within(v0).getByTestId('version-cause').textContent).toBe('empty (before import)');
+      fireEvent.click(versionButton(0));
+      const open = (await screen.findByRole('button', { name: 'Open v0 as a lane' })) as HTMLButtonElement;
+      expect(open.disabled).toBe(true);
+      expect(open.title).toBe('v0 is empty (before import)');
+    } finally {
+      delete snaps[0];
+    }
+  });
+
+  it('a past version whose slide differs from main shows a title card, never a blank thumb', async () => {
+    render(<History api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('version').length === 3);
+    fireEvent.click(versionButton(1));
+    await waitFor(() => screen.queryAllByTestId('diff-entry').length === 4);
+    const rowA = screen.getByTestId('row-a');
+    const s2 = within(rowA).getAllByRole('listitem').find((c) => c.querySelector('[data-slide="s2"]'))!;
+    expect(within(s2).getByTestId('thumb-title-card').textContent).toBe('Title s2');
+  });
+});
+
+describe('DiffFilmstrips QA1', () => {
+  const many = (n: number) => snap(Array.from({ length: n }, (_, i) => slide(`m${i + 1}`)));
+  const side = (n: number, s: Snapshot) => ({ n, snapshot: s, thumbs: {} });
+
+  it('each changed thumb carries a text tag: added, removed, modified, moved from N', () => {
+    render(<DiffFilmstrips a={side(1, snaps[1]!)} b={side(3, snaps[3]!)} entries={diffVersions(snaps[1]!, snaps[3]!)} onFocus={vi.fn()} />);
+    const tags = screen.getAllByTestId('diff-tag').map((t) => `${t.getAttribute('data-slide')}:${t.textContent}`).sort();
+    // s3 was the 3rd slide of v1 and is the 2nd of v3.
+    expect(tags).toEqual(['s3:moved from 3', 's2:modified', 's4:removed', 's6:added'].sort());
+    for (const t of screen.getAllByTestId('diff-tag')) expect(t.style.fontSize).toBe('12px');
+  });
+
+  it('both strips live in one scroller: the wheel and shift+wheel scroll them together sideways', () => {
+    render(<DiffFilmstrips a={side(1, many(30))} b={side(2, many(30))} entries={[]} onFocus={vi.fn()} />);
+    const scroller = screen.getByTestId('diff-filmstrips');
+    expect(screen.getByTestId('row-a').closest('[data-testid="diff-filmstrips"]')).toBe(scroller);
+    expect(screen.getByTestId('row-b').closest('[data-testid="diff-filmstrips"]')).toBe(scroller);
+    let left = 0;
+    Object.defineProperty(scroller, 'scrollLeft', { configurable: true, get: () => left, set: (v: number) => void (left = v) });
+    Object.defineProperty(scroller, 'scrollWidth', { configurable: true, value: 6000 });
+    Object.defineProperty(scroller, 'clientWidth', { configurable: true, value: 900 });
+    const wheel = fireEvent.wheel(scroller, { deltaY: 120 });
+    expect(wheel).toBe(false); // default prevented: the page does not try to scroll vertically
+    expect(left).toBe(120);
+    fireEvent.wheel(scroller, { deltaY: 80, shiftKey: true });
+    expect(left).toBe(200);
+    // A sideways gesture is the browser's own.
+    expect(fireEvent.wheel(scroller, { deltaX: 50, deltaY: 2 })).toBe(true);
+    expect(left).toBe(200);
+  });
+
+  it('the "+N" slot is a button that scrolls the strips on by a page', () => {
+    const rect = (left: number, width: number, top = 0, height = 99): DOMRect => ({ left, width, top, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+    const spyRect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.hasAttribute('data-edge-item')) {
+        const i = [...this.parentElement!.children].indexOf(this);
+        return rect(126 + i * 184, 176);
+      }
+      if (this.classList.contains('gutter')) return rect(0, 120);
+      return rect(0, 900, 0, 300);
+    });
+    const spyWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(900);
+    try {
+      render(<DiffFilmstrips a={side(1, many(30))} b={side(2, many(30))} entries={[]} onFocus={vi.fn()} />);
+      const scroller = screen.getByTestId('diff-filmstrips');
+      let left = 0;
+      Object.defineProperty(scroller, 'scrollLeft', { configurable: true, get: () => left, set: (v: number) => void (left = v) });
+      const more = screen.getAllByRole('button', { name: /^show the next slides/ });
+      expect(more).toHaveLength(2);
+      fireEvent.click(more[0]!);
+      expect(left).toBeGreaterThanOrEqual(184);
+      expect(left % 184).toBe(0);
+    } finally {
+      spyRect.mockRestore();
+      spyWidth.mockRestore();
+    }
+  });
+});
+
+describe('VersionLine QA1', () => {
+  it('the compared versions carry "from" and "to" tags', () => {
+    render(<VersionLine versions={[1, 2, 3].map(version)} current={3} selection={{ a: 1, b: 3 }} onSelect={vi.fn()} />);
+    const tag = (n: number) => within(screen.getAllByTestId('version').find((v) => v.getAttribute('data-version') === String(n))!).queryByTestId('version-pick')?.textContent;
+    expect([tag(1), tag(2), tag(3)]).toEqual(['from', undefined, 'to']);
   });
 });
