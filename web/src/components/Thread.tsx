@@ -50,7 +50,10 @@ export interface ThreadProps {
   only?: Anchor;
   /** Puts the caret in the composer when the thread mounts or changes key. */
   autoFocus?: boolean;
-  /** Shown between the header and the messages, eg the remarks of the selection. */
+  /**
+   * Shown between the header and the messages, eg the remarks of the selection. In a panel it scrolls on its own: it
+   * takes the room the conversation leaves while that is empty, under half of it once messages arrive.
+   */
   lead?: React.ReactNode;
   /** Inline only: the log stops growing at this height and scrolls, following the latest message. */
   logMaxHeight?: string;
@@ -606,9 +609,11 @@ export function Thread({
   const items = merge(shown, [...(notes ?? []), ...ownNotes]);
   const inline = layout === 'inline';
   const root: CSSProperties = inline ? { display: 'flex', flexDirection: 'column', gap: 12 } : { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 };
+  // A panel's empty log is its hint only: the lead above takes the room, the composer stays at the bottom.
+  const quiet = shown.length === 0 && !streaming && !pending;
   const logStyle: CSSProperties = inline
     ? { display: 'flex', flexDirection: 'column', gap: 16, ...(logMaxHeight ? { maxHeight: logMaxHeight, overflowY: 'auto' } : {}) }
-    : { flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 20px', display: 'flex', flexDirection: 'column', gap: 16 };
+    : { flex: quiet && lead ? '0 0 auto' : '1 1 0', minHeight: 0, overflowY: 'auto', padding: '4px 20px', display: 'flex', flexDirection: 'column', gap: 16 };
   const textStyle: CSSProperties = { fontSize: inline ? 'var(--fs-body)' : 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' };
 
   return (
@@ -624,7 +629,13 @@ export function Thread({
           <ContextChip context={context} order={order} slides={slides} onClear={onClearContext} onEdit={onEditContext} />
         </div>
       </div>
-      {lead}
+      {lead && !inline ? (
+        <div data-testid="thread-lead" style={{ flex: '0 1 auto', minHeight: 0, maxHeight: quiet ? undefined : '45%', overflowY: 'auto', padding: '0 20px 12px' }}>
+          {lead}
+        </div>
+      ) : (
+        lead
+      )}
       <div ref={log} role="log" aria-live="polite" style={logStyle}>
         {seed && seed.messages.length > 0 ? (
           <div data-testid="thread-seed" style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
@@ -706,7 +717,7 @@ export function Thread({
           </p>
         ) : null}
       </div>
-      <form onSubmit={(e) => void submit(e)} style={inline ? { display: 'flex', gap: 8 } : { display: 'flex', gap: 8, padding: 16, borderTop: '1px solid var(--line)' }}>
+      <form onSubmit={(e) => void submit(e)} style={inline ? { display: 'flex', gap: 8 } : { display: 'flex', gap: 8, padding: 16, marginTop: 'auto', borderTop: '1px solid var(--line)' }}>
         <input
           ref={composer}
           aria-label="message"

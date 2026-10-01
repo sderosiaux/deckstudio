@@ -69,13 +69,13 @@ interface ProposeNote {
   touched: ReadonlySet<string>;
 }
 const MAX_NOTES = 5;
-/** Room kept between the panel's bottom and the canvas's visible bottom (the versions rail starts there). */
-const PANEL_CLEAR = 16;
-/** What lies above the panel besides the strip: the canvas's 8px top padding, the pin row (8px and its 10px gap), 2px of margin. */
-const PANEL_TOP = 28;
+/** Room kept between the stage's bottom and the canvas's visible bottom (the versions rail starts there). */
+const STAGE_CLEAR = 16;
+/** What lies above the stage besides the strip: the canvas's 8px top padding, the pin row (8px and its 10px gap), 2px of margin. */
+const STAGE_TOP = 28;
 /** The lane rows' grid starts 6px right of the gutter (their side padding). */
 const ROW_PAD = 6;
-/** sessionStorage key: whether the whole-deck bar is open (the default) or folded to its 40px rail. */
+/** sessionStorage key: whether the conversation column is open (the default) or folded to its 40px rail. */
 const WHOLE_DECK_KEY = 'deckstudio.wholeDeck';
 const readWholeDeck = (): boolean => {
   try {
@@ -84,14 +84,18 @@ const readWholeDeck = (): boolean => {
     return true;
   }
 };
-/** The whole-deck bar's two fixed widths: the strip's columns never move when a slide is selected. */
+/**
+ * The conversation column's two fixed widths: the strip's columns never move when a slide is selected. The column holds
+ * one conversation at a time, the selection's or else the whole deck's, so the stage under the strip gives all its
+ * width to the render.
+ */
 const BAR_OPEN_W = 360;
 const BAR_SHUT_W = 40;
 /** Remark cards the panel lists before "N more remarks": the conversation stays the larger part of the panel. */
 const PANEL_REMARKS = 3;
 const SLIDE_HINT = 'Ask the co-author about this slide: a sharper title, a tighter story, a diagram. Its proposal shows here with accept and refuse.';
 const RANGE_HINT = 'Ask the co-author about these slides. Only the messages sent on this range show here; the whole deck keeps its own conversation.';
-const DECK_HINT = 'Ask the co-author about the whole deck: its arc, its order, its pacing. Select a slide to talk about it right under the strip.';
+const DECK_HINT = 'Ask the co-author about the whole deck: its arc, its order, its pacing. Select a slide to talk about that slide here.';
 
 /** Focus route of the lane now linked to the note's remark, once the co-author's lane is there with something to review. */
 export function noteHref(note: ProposeNote, remarks: readonly Remark[], lanes: readonly Lane[]): string | undefined {
@@ -243,6 +247,84 @@ function DeckSheet({
   );
 }
 
+/** A neighbour beside the stage reads like a strip thumb from 160px wide; past 360px the width is better left to the render. */
+const SIDE_MIN = 160;
+const SIDE_MAX = 360;
+
+/**
+ * The stage's grid for `n` selected slides: as large as the `room` under the strip allows (the whole render stays in
+ * view), and the `width` of the visible canvas it leaves beside the render, when that holds a readable neighbour.
+ * Nulls (not measured yet): no cap and no side column.
+ */
+export function stageLayout(n: number, room: number | null, width: number | null): { cols: number; rows: number; maxW: number | undefined; side: number } {
+  const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
+  const rows = Math.max(1, Math.ceil(n / cols));
+  const maxW =
+    room === null ? undefined : Math.max(240, Math.floor(cols * ((((room - (rows - 1) * STAGE_GAP) / rows - PREVIEW_PAD_H) * 16) / 9 + PREVIEW_PAD_W) + (cols - 1) * STAGE_GAP));
+  const left = width === null || maxW === undefined ? 0 : width - maxW - 2 * STAGE_GAP;
+  return { cols, rows, maxW, side: left < SIDE_MIN ? 0 : Math.min(SIDE_MAX, left) };
+}
+
+/**
+ * Beside a stage the height stops short of the canvas's width: the slide before the selection and the one after it,
+ * as a presenter sees what comes next. A click selects one, a double-click presents from it.
+ */
+export function StageNeighbours({
+  order,
+  slides,
+  thumbs,
+  start,
+  span,
+  width,
+  onPick,
+  onOpen,
+}: {
+  order: readonly SlideId[];
+  slides: DeckPayload['slides'];
+  thumbs: Record<SlideId, string | undefined>;
+  start: number;
+  span: number;
+  width: number;
+  onPick(id: SlideId): void;
+  onOpen(id: SlideId): void;
+}) {
+  const near = [
+    { side: 'previous', i: start - 1 },
+    { side: 'next', i: start + span },
+  ].filter((x) => x.i >= 0 && x.i < order.length);
+  if (near.length === 0) return null;
+  return (
+    <div data-testid="stage-side" style={{ width, flex: `0 0 ${width}px`, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {near.map(({ side, i }) => {
+        const id = order[i]!;
+        const title = slides[id]?.title ?? id;
+        const url = thumbs[id];
+        return (
+          <div key={side} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span className="meta">{side}</span>
+            <button
+              type="button"
+              data-testid="stage-neighbour"
+              data-slide={id}
+              className="sheet-slide"
+              aria-label={`${side}, slide ${i + 1}: ${title}`}
+              title="Click to select, double-click to present"
+              onClick={() => onPick(id)}
+              onDoubleClick={() => onOpen(id)}
+            >
+              <span className="sheet-frame">{url ? <img src={url} alt="" draggable={false} /> : null}</span>
+              <span className="sheet-label">
+                <span className="sheet-n">{i + 1}</span>
+                <span className="sheet-title">{title}</span>
+              </span>
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Scrolls `canvas` sideways so that main's column `col` (0-based) is the first one right of the gutter. */
 export function revealColumn(canvas: HTMLElement, col: number): void {
   const thumb = canvas.querySelectorAll('[data-strip="main"] [data-testid="thumb"]')[col];
@@ -324,6 +406,85 @@ function PanelRemarks({ remarks, card }: { remarks: readonly Remark[]; card(r: R
           {all ? 'show fewer' : `${rest} more ${rest === 1 ? 'remark' : 'remarks'}`}
         </button>
       ) : null}
+    </div>
+  );
+}
+
+/** Where a remark sits, as the whole-deck list names it: "slide 4: Its title", "slides 2–3", "whole deck". */
+function remarkPlace(anchor: Anchor, order: SlideId[], slides: DeckPayload['slides']): string {
+  if (anchor.kind === 'arc') return 'whole deck';
+  const label = anchorLabel(anchor, order);
+  return anchor.kind === 'slide' ? `${label}: ${slides[anchor.slide]?.title ?? anchor.slide}` : label;
+}
+
+/**
+ * Nothing selected: the deck's open remarks lead the whole-deck conversation, warnings first, then in deck order. Each
+ * names its place; a click there selects it, and the column turns to that selection's conversation.
+ */
+function DeckRemarks({
+  remarks,
+  order,
+  slides,
+  card,
+  onPick,
+}: {
+  remarks: readonly Remark[];
+  order: SlideId[];
+  slides: DeckPayload['slides'];
+  card(r: Remark): React.ReactNode;
+  onPick(anchor: Anchor): void;
+}) {
+  return (
+    <div data-testid="deck-remarks" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <span className="meta">
+        {remarks.length} open {remarks.length === 1 ? 'remark' : 'remarks'} on the deck
+      </span>
+      {remarks.map((r) => {
+        const place = remarkPlace(r.anchor, order, slides);
+        return (
+          <div key={r.id} style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+            {r.anchor.kind === 'arc' ? (
+              <span data-testid="remark-place" className="meta">
+                {place}
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="link"
+                data-testid="remark-place"
+                title={`Select ${place}`}
+                onClick={() => onPick(r.anchor)}
+                style={{ fontSize: 'var(--fs-meta)', color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              >
+                {place}
+              </button>
+            )}
+            {card(r)}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * One selected slide: what it says (its story) and what the speaker says over it (its notes), read-only under its
+ * remarks, so the conversation about it starts from the slide's intent. Edited on the slide screen.
+ */
+function SlideText({ slide }: { slide: DeckPayload['slides'][SlideId] | undefined }) {
+  const story = slide?.story.trim() ?? '';
+  const notes = slide?.notes.trim() ?? '';
+  if (!story && !notes) return null;
+  const part = (name: string, text: string): React.ReactNode => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <span className="meta">{name}</span>
+      <p style={{ margin: 0, fontSize: 'var(--fs-body)', lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{text}</p>
+    </div>
+  );
+  return (
+    <div data-testid="slide-text" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {story ? part('story', story) : null}
+      {notes ? part('speaker notes', notes) : null}
     </div>
   );
 }
@@ -991,11 +1152,10 @@ export function Main() {
       </div>
     </div>
   );
-  // A propose note shows where the creator asked: in the selection panel while there is one, else in the whole-deck bar.
-  const notesInPanel = context.kind !== 'arc';
+  // A propose note shows in the column's conversation, the selection's or the whole deck's: where the creator asked.
   const notesBlock =
     notes.length > 0 ? (
-          <div role="status" aria-live="polite" style={{ padding: notesInPanel ? 0 : '12px 20px 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div role="status" aria-live="polite" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {notes.map((n) => {
               const href = noteHref(n, remarks, lanes);
               return (
@@ -1024,9 +1184,12 @@ export function Main() {
             })}
           </div>
         ) : null;
-  const panelMax = room.canvas > 0 ? Math.max(160, room.canvas - PANEL_TOP - room.strip - PANEL_CLEAR) : null;
+  // The height under the strip, down to the versions rail: the stage's render never runs taller.
+  const stageRoom = room.canvas > 0 ? Math.max(160, room.canvas - STAGE_TOP - room.strip - STAGE_CLEAR) : null;
   const panelSlide = context.kind === 'slide' ? context.slide : context.kind === 'range' ? deck.order[selectedCols?.start ?? 0] : undefined;
   const panelTitle = context.kind === 'slide' ? 'conversation about this slide' : 'conversation about these slides';
+  // The column's name: what its conversation is about.
+  const columnName = context.kind === 'arc' ? 'whole deck' : anchorLabel(context, deck.order);
   const selectionKey = context.kind === 'slide' ? `slide:${context.slide}` : context.kind === 'range' ? `range:${context.from}:${context.to}` : 'arc';
   const remarkCard = (r: Remark): React.ReactNode => (
     <RemarkPostIt remark={r} onPropose={propose} onResolve={remarkApi.resolveRemark} draftLaneId={draftOf(r)} onOpenLane={openFromRemark} openedLane={openedLane(r)} expandable />
@@ -1034,77 +1197,106 @@ export function Main() {
   const pinned = pinnedWidth(visible);
   // The stage's slides: the selected one, or every slide of the range, in a near-square grid.
   const stageIds = selectedCols ? deck.order.slice(selectedCols.start, selectedCols.start + selectedCols.span) : [];
-  const stageCols = Math.max(1, Math.ceil(Math.sqrt(stageIds.length)));
-  const stageRows = Math.max(1, Math.ceil(stageIds.length / stageCols));
-  // As wide as its column allows, but never taller than the room under the strip: the whole render stays in view.
-  const stageMaxW =
-    panelMax === null
-      ? undefined
-      : Math.max(
-          240,
-          Math.floor(stageCols * ((((panelMax - (stageRows - 1) * STAGE_GAP) / stageRows - PREVIEW_PAD_H) * 16) / 9 + PREVIEW_PAD_W) + (stageCols - 1) * STAGE_GAP),
-        );
+  const stage = stageLayout(stageIds.length, stageRoom, visible ? visible.cut - 24 : null);
+  // The stage spans the gutter too: the render is the largest thing on main, its card names the slide.
   const selectionStage =
     selectedCols && context.kind !== 'arc' ? (
-      <div data-testid="selection-stage" className="main-pinned main-stage" style={{ width: pinned }}>
-        <div className="gutter row-label" style={{ paddingTop: 12 }}>
-          {anchorLabel(context, deck.order)}
+      <div data-testid="selection-stage" className="main-pinned main-stage" style={{ width: pinned, gap: STAGE_GAP * 2 }}>
+        <div
+          data-testid="stage-render"
+          className="stage-render"
+          style={{ gridTemplateColumns: `repeat(${stage.cols}, minmax(0, 1fr))`, ...(stage.maxW === undefined ? {} : { maxWidth: stage.maxW }) }}
+        >
+          {stageIds.map((id) => {
+            const n = deck.order.indexOf(id) + 1;
+            const title = deck.slides[id]?.title ?? id;
+            return (
+              <div key={id} onDoubleClick={() => presentFrom(id)} title="Double-click to present from here">
+                <SlidePreview label={`slide ${n}: ${title}`} variant="main" title={title} url={shownThumbs[id]} />
+              </div>
+            );
+          })}
         </div>
-        <div className="main-stage-body">
-          <div
-            data-testid="stage-render"
-            className="stage-render"
-            style={{ gridTemplateColumns: `repeat(${stageCols}, minmax(0, 1fr))`, ...(stageMaxW === undefined ? {} : { maxWidth: stageMaxW }) }}
-          >
-            {stageIds.map((id) => {
-              const n = deck.order.indexOf(id) + 1;
-              const title = deck.slides[id]?.title ?? id;
-              return (
-                <div key={id} onDoubleClick={() => presentFrom(id)} title="Double-click to present from here">
-                  <SlidePreview label={`slide ${n}: ${title}`} variant="main" title={title} url={shownThumbs[id]} />
-                </div>
-              );
-            })}
-          </div>
-          <PanelBox
-            data-testid="selection-panel"
-            data-slide={panelSlide}
-            data-kind={context.kind}
-            aria-label={panelTitle}
-            className="selection-panel"
-            style={{ ...(panelMax === null ? {} : { '--panel-max-h': `${panelMax}px` }), position: 'relative', zIndex: 1, padding: 16, borderRadius: 'var(--radius)', background: 'var(--card)', border: '1px solid var(--line)', boxShadow: 'var(--shadow)', cursor: 'auto' } as CSSProperties}
-          >
-            <Thread
-              key={context.kind === 'slide' ? `slide:${context.slide}` : 'range'}
-              threadKey={context.kind === 'slide' ? `slide:${context.slide}` : 'global'}
-              title={panelTitle}
-              hint={context.kind === 'slide' ? SLIDE_HINT : RANGE_HINT}
-              context={context}
-              only={context.kind === 'range' ? context : undefined}
-              order={deck.order}
-              slides={deck.slides}
-              api={panelApi}
-              subscribe={fanout}
-              onClearContext={() => setContext({ kind: 'arc' })}
-              onEditContext={editSlide}
-              autoFocus={focusComposer}
-              layout="inline"
-              logMaxHeight={panelMax === null ? 'min(360px, 40vh)' : 'var(--panel-max-h)'}
-              knownLanes={lanes}
-              onShowLane={showLane}
-              lead={
-                panelRemarks.length > 0 || notesBlock ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {panelRemarks.length > 0 ? <PanelRemarks key={selectionKey} remarks={panelRemarks} card={remarkCard} /> : null}
-                    {notesBlock}
-                  </div>
-                ) : null
-              }
-            />
-          </PanelBox>
-        </div>
+        {stage.side > 0 ? (
+          <StageNeighbours
+            order={deck.order}
+            slides={deck.slides}
+            thumbs={shownThumbs}
+            start={selectedCols.start}
+            span={selectedCols.span}
+            width={stage.side}
+            onPick={(id) => {
+              setFocusComposer(false);
+              setContext({ kind: 'slide', slide: id });
+            }}
+            onOpen={presentFrom}
+          />
+        ) : null}
       </div>
     ) : null;
+  // A remark's place in the whole-deck list selects it: the strip brings its thumb into view, the stage shows it.
+  const pickAnchor = (anchor: Anchor): void => {
+    if (anchor.kind === 'arc') return;
+    setFocusComposer(false);
+    setContext(anchor.kind === 'slide' ? { kind: 'slide', slide: anchor.slide } : { kind: 'range', from: anchor.from, to: anchor.to });
+    const first = anchor.kind === 'slide' ? anchor.slide : anchor.from;
+    document.querySelector(`[data-strip="main"] [data-testid="thumb"][data-slide="${CSS.escape(first)}"]`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  };
+  const deckRemarks = [...mainRemarks].sort((a, b) => {
+    const start = (r: Remark): number => (r.anchor.kind === 'arc' ? -1 : (anchorColumns(r.anchor, deck.order)?.start ?? deck.order.length));
+    return Number(b.severity === 'warn') - Number(a.severity === 'warn') || start(a) - start(b);
+  });
+  const selectedText = context.kind === 'slide' ? <SlideText slide={deck.slides[context.slide]} /> : null;
+  const conversation =
+    context.kind === 'arc' ? (
+      <Thread
+        threadKey="global"
+        title="whole deck"
+        hint={DECK_HINT}
+        context={WHOLE_DECK}
+        order={deck.order}
+        slides={deck.slides}
+        api={deckApi}
+        subscribe={fanout}
+        lead={
+          deckRemarks.length > 0 || notesBlock ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {notesBlock}
+              {deckRemarks.length > 0 ? <DeckRemarks remarks={deckRemarks} order={deck.order} slides={deck.slides} card={remarkCard} onPick={pickAnchor} /> : null}
+            </div>
+          ) : null
+        }
+      />
+    ) : (
+      <PanelBox data-testid="selection-panel" data-slide={panelSlide} data-kind={context.kind} aria-label={panelTitle} className="selection-panel">
+        <Thread
+          key={context.kind === 'slide' ? `slide:${context.slide}` : 'range'}
+          threadKey={context.kind === 'slide' ? `slide:${context.slide}` : 'global'}
+          title={columnName}
+          hint={context.kind === 'slide' ? SLIDE_HINT : RANGE_HINT}
+          context={context}
+          only={context.kind === 'range' ? context : undefined}
+          order={deck.order}
+          slides={deck.slides}
+          api={panelApi}
+          subscribe={fanout}
+          onClearContext={() => setContext({ kind: 'arc' })}
+          onEditContext={editSlide}
+          autoFocus={focusComposer}
+          knownLanes={lanes}
+          onShowLane={showLane}
+          lead={
+            panelRemarks.length > 0 || notesBlock || selectedText ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {panelRemarks.length > 0 ? <PanelRemarks key={selectionKey} remarks={panelRemarks} card={remarkCard} /> : null}
+                {notesBlock}
+                {selectedText}
+              </div>
+            ) : null
+          }
+        />
+      </PanelBox>
+    );
   const pickFromSheet = (id: SlideId, e: MouseEvent<HTMLElement>): void => {
     shift.current = e.shiftKey;
     pointer.current = e.detail > 0;
@@ -1138,7 +1330,7 @@ export function Main() {
             data-testid="canvas"
             className="fit-columns"
             onClick={clearOnEmpty}
-            style={{ '--strip-h': `${room.strip}px`, flex: 1, minHeight: 0, overflow: 'auto', paddingTop: 8, paddingRight: 24, paddingLeft: 24, paddingBottom: CANVAS_BOTTOM } as CSSProperties}
+            style={{ '--strip-h': `${room.strip}px`, '--fit-max': '160px', flex: 1, minHeight: 0, overflow: 'auto', paddingTop: 8, paddingRight: 24, paddingLeft: 24, paddingBottom: CANVAS_BOTTOM } as CSSProperties}
           >
             {deck.order.length === 0 ? (
               <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
@@ -1213,33 +1405,21 @@ export function Main() {
           <VersionLine versions={versions} current={deck.state.version} />
         </div>
       </div>
-      {/* The whole-deck bar has two fixed widths and its own toggle: a selection never resizes the strip. */}
+      {/* The conversation column has two fixed widths and its own toggle: a selection never resizes the strip. */}
       {wholeDeck ? (
-        <aside data-testid="thread-panel" style={{ width: BAR_OPEN_W, flex: `0 0 ${BAR_OPEN_W}px`, borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        <aside data-testid="thread-panel" data-kind={context.kind} style={{ width: BAR_OPEN_W, flex: `0 0 ${BAR_OPEN_W}px`, borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <button
             type="button"
             className="link"
             aria-expanded
-            aria-label="hide the whole-deck conversation"
-            title="Fold the whole-deck conversation to a rail"
+            aria-label="hide the conversation"
+            title="Fold the conversation to a rail"
             onClick={() => setWholeDeck(false)}
             style={{ alignSelf: 'flex-end', margin: '12px 20px 0', fontSize: 'var(--fs-meta)' }}
           >
             hide
           </button>
-          {notesInPanel ? null : notesBlock}
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <Thread
-              threadKey="global"
-              title="whole deck"
-              hint={DECK_HINT}
-              context={WHOLE_DECK}
-              order={deck.order}
-              slides={deck.slides}
-              api={deckApi}
-              subscribe={fanout}
-            />
-          </div>
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>{conversation}</div>
         </aside>
       ) : (
         <aside data-testid="thread-rail" style={{ width: BAR_SHUT_W, flex: `0 0 ${BAR_SHUT_W}px`, borderLeft: '1px solid var(--line)', background: 'var(--paper)', display: 'flex', justifyContent: 'center', paddingTop: 16 }}>
@@ -1248,10 +1428,10 @@ export function Main() {
             className="link"
             aria-expanded={false}
             onClick={() => setWholeDeck(true)}
-            title="Open the conversation about the whole deck"
+            title={`Open the conversation about ${context.kind === 'arc' ? 'the whole deck' : columnName}`}
             style={{ writingMode: 'vertical-rl', fontSize: 'var(--fs-meta)', color: 'var(--ink)' }}
           >
-            whole deck
+            {columnName}
           </button>
         </aside>
       )}

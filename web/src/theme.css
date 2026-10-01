@@ -48,13 +48,15 @@ button { font: inherit; }
 
 /*
  * A scrolling canvas whose deck columns fit its width: --fit-cols whole columns between the gutter (plus the rows'
- * 6px left padding) and the 48px "+N" slot that ends on the canvas's content edge, never below 80px nor above 128px.
+ * 6px left padding) and the 48px "+N" slot that ends on the canvas's content edge, never below 80px nor above
+ * --fit-max (128px; main's canvas allows 160px, so a wide screen gives its width to the slides, not to a band of paper
+ * behind the "+N" slot).
  * Nine 16:9 columns keep a slide readable as a whole slide; the rest runs on behind the slot. The column width is set
  * on the canvas's children so that 100cqw resolves against the canvas itself; the height is redeclared so it follows.
  */
 .fit-columns { container-type: inline-size; }
 .fit-columns > * {
-  --thumb-w: clamp(80px, calc((100cqw - var(--gutter) - 6px - var(--end-slot) - var(--fit-cols) * var(--col-gap)) / var(--fit-cols)), 128px);
+  --thumb-w: clamp(80px, calc((100cqw - var(--gutter) - 6px - var(--end-slot) - var(--fit-cols) * var(--col-gap)) / var(--fit-cols)), var(--fit-max, 128px));
   --thumb-h: calc(var(--thumb-w) * 9 / 16);
 }
 
@@ -111,28 +113,27 @@ button { font: inherit; }
 }
 .edge-chip:hover { border-color: var(--grey-2); }
 /*
- * The selection panel never runs below the canvas's visible bottom. The log gives way first (it scrolls inside, down to
- * 96px); past that the panel itself scrolls as a whole, so an expanded remark card is never cut, and a fade at its
- * bottom says more lies below. The remark list has no scroll box of its own.
+ * The selection's conversation holds the right column while something is selected: the remarks of the selection
+ * first, then the log, the composer at the bottom. The remark list has no scroll box of its own (it cut cards): the
+ * panel scrolls as a whole when a card unfolds past its height, and a fade at its bottom says more lies below.
  */
-.selection-panel { display: flex; flex-direction: column; max-height: var(--panel-max-h, none); overflow-y: auto; overflow-x: hidden; }
+.selection-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; }
 .selection-panel > [data-testid='thread'] { flex: 1 1 auto; min-height: 0; }
 .selection-panel [data-testid='thread'] > [role='log'] {
-  flex: 1 1 auto; min-height: 96px; padding-top: 12px;
+  min-height: 96px;
   /* Scrolled, the log's top line fades out under the remarks instead of being sliced by its edge. */
   mask-image: linear-gradient(to bottom, transparent 0, #000 12px);
 }
 .panel-fade {
-  position: sticky; bottom: -16px; flex: 0 0 32px; margin: -32px -16px -16px; height: 48px; pointer-events: none;
-  background: linear-gradient(to bottom, transparent, var(--card) 70%);
+  position: sticky; bottom: 0; flex: 0 0 48px; margin-top: -48px; height: 48px; pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--paper) 70%);
 }
 /*
- * Main, under the strip: the selection stage (its render, the conversation beside it) or, nothing selected, the deck
- * sheet. Both are pinned to the visible canvas: they never scroll sideways with the columns, and end where the "+N"
- * cover starts. Freed width goes to the render; the conversation column stays under 80 characters.
+ * Main, under the strip: the selection stage (its render alone, the conversation in the column beside the canvas) or,
+ * nothing selected, the deck sheet. Both are pinned to the visible canvas: they never scroll sideways with the
+ * columns, and end where the "+N" cover starts. The stage spans the gutter too: all that width goes to the render.
  */
 .main-pinned { position: sticky; left: 0; display: flex; align-items: flex-start; }
-.main-stage-body { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) clamp(320px, 38%, 520px); gap: 24px; align-items: start; padding: 0 6px; }
 .stage-render { display: grid; gap: 12px; width: 100%; }
 .stage-render [data-testid='slide-preview'] { width: 100% !important; flex: none !important; }
 .deck-sheet-grid { flex: 1; min-width: 0; display: grid; gap: 12px; padding: 0 6px; justify-content: start; }
