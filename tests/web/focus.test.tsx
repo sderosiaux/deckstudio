@@ -834,6 +834,41 @@ describe('Focus decided and settled changes', () => {
     expect(screen.getByRole('link', { name: 'Review the first pending change' }).getAttribute('href')).toBe('/lane/l1/change/c1');
   });
 
+  it('a decided change opened from its address shows the slide as main holds it now, at reading size', async () => {
+    // c2 (modify s2) is accepted while c1 is still pending: the paper shows main's slide 2, never only a sentence.
+    render(<Focus laneId="l1" changeId="c2" api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('focus-pair'));
+    expect(document.body.textContent).toContain('This change is accepted.');
+    const pair = screen.getByTestId('focus-pair');
+    expect(pair.getAttribute('data-shape')).toBe('single');
+    const shown = within(pair).getAllByTestId('slide-preview');
+    expect(shown).toHaveLength(1);
+    expect(shown[0]!.getAttribute('aria-label')).toBe('main, slide 2, accepted');
+    expect(shown[0]!.getAttribute('data-variant')).toBe('main');
+    await waitFor(() => within(pair).queryByRole('img'));
+    expect(themeCss()).toMatch(/\.focus-pair\[data-shape='single'\] \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+  });
+
+  it('a decided move opened from its address shows main\'s whole strip, large, over the lane\'s, both centred on the slide', async () => {
+    const moved: Change = { id: 'm1', kind: 'move', slide: 's2', after: 's5', reason: 'later', status: 'accepted' };
+    render(<Focus laneId="l1" changeId="m1" api={stubApi(lane([c1, moved]))} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('move-strip').length > 0);
+    const strips = screen.getAllByTestId('move-strip');
+    expect(strips.map((x) => [x.getAttribute('data-side'), x.getAttribute('data-size')])).toEqual([['main', 'large'], ['lane', 'small']]);
+    expect(within(strips[0]!).getAllByRole('listitem')).toHaveLength(order.length);
+    expect(strips.map((x) => x.querySelector('[data-moved="true"]') !== null)).toEqual([true, true]);
+    expect(within(strips[0]!).getByTestId('move-caption').textContent).toBe('main, slide 2, accepted');
+    expect(screen.getByTestId('focus-reason').textContent).toContain('later');
+  });
+
+  it('with every change decided, the change in the address still shows as main holds it', async () => {
+    const decided: Lane = { ...lane([{ ...c1, status: 'accepted' }, c2]), status: 'closed' };
+    render(<Focus laneId="l1" changeId="c1" api={stubApi(decided)} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('focus-outcomes'));
+    const shown = within(screen.getByTestId('focus-pair')).getAllByTestId('slide-preview');
+    expect(shown.map((x) => x.getAttribute('aria-label'))).toEqual(['main, slide 3, accepted']);
+  });
+
   it('a change main already holds says so in the header', async () => {
     const l = withCauses(lane([c1, { ...c3, status: 'accepted' }]), { c3: 'already on main' });
     render(<Focus laneId="l1" changeId="c3" api={stubApi(l)} subscribe={noEvents} navigate={vi.fn()} />);

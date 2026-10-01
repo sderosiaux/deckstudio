@@ -692,7 +692,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
   );
 
   const notOnScreen = (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start', paddingBottom: 24 }}>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px 20px', alignItems: 'center' }}>
       <p style={{ margin: 0 }}>
         {settled ? `Nothing to decide on this change: ${settled}.` : asked ? `This change is ${asked.status}.` : 'This change is no longer part of this lane.'}
       </p>
@@ -703,6 +703,33 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
       )}
     </div>
   );
+
+  // A change nobody has to decide still shows its slide as main holds it now, at reading size: never only a sentence
+  // on empty paper. A move shows main's whole strip centred on the slide, large, over the lane's as it stands now; a
+  // slide main no longer has shows nothing.
+  const shownAt = asked ? deck.order.indexOf(targetOf(asked)) : -1;
+  const shownLabel = asked && shownAt >= 0 ? `main, slide ${shownAt + 1}, ${outcomeOf(lane, asked).outcome}` : '';
+  const settledRender =
+    !asked || change || shownAt < 0 ? null : (
+      <>
+        {asked.kind === 'move' ? (
+          <div data-testid="focus-pair" className="focus-move" data-kind="settled">
+            <StructureStrip side="main" size="large" caption={shownLabel} order={deck.order} slides={deck.slides} focus={{ kind: 'slide', id: targetOf(asked) }} url={mainUrl} />
+            {preview.order.includes(targetOf(asked)) ? (
+              <StructureStrip side="lane" size="small" caption={`this lane, slide ${preview.order.indexOf(targetOf(asked)) + 1}`} order={preview.order} slides={preview.slides} focus={{ kind: 'slide', id: targetOf(asked) }} url={laneUrl} />
+            ) : null}
+          </div>
+        ) : (
+          <div data-testid="focus-pair" className="focus-pair" data-shape="single">
+            <SlidePreview label={shownLabel} variant="main" title={deck.slides[targetOf(asked)]?.title ?? targetOf(asked)} url={mainUrl(targetOf(asked))} />
+          </div>
+        )}
+        <p data-testid="focus-reason" style={{ margin: 0, display: 'flex', gap: 12, alignItems: 'baseline', fontSize: 13, maxWidth: '80ch' }}>
+          <span className="meta">{asked.kind}</span>
+          <span style={{ color: 'var(--grey)' }}>{nameSlides(asked.reason, deck.order, { ...preview.slides, ...deck.slides })}</span>
+        </p>
+      </>
+    );
 
   const toggleStrip = (): void => setExpanded((x) => !x);
 
@@ -767,7 +794,17 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
         <div className="focus-pane">
           <main ref={pane} data-testid="focus-scroll" className="focus-scroll" onScroll={measure}>
             {!change ? (
-              allDecided ? decided : notOnScreen
+              allDecided ? (
+                <>
+                  {settledRender}
+                  {decided}
+                </>
+              ) : (
+                <>
+                  {notOnScreen}
+                  {settledRender}
+                </>
+              )
             ) : (
               <>
                 {sameRender ? (

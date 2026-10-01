@@ -283,6 +283,9 @@ button { font: inherit; }
 .focus-layout[data-columns='2'] .focus-pair[data-shape='both'] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .focus-layout[data-columns='2'] .focus-pair[data-shape='before'] { grid-template-columns: minmax(0, 1fr) 240px; }
 .focus-layout[data-columns='2'] .focus-pair[data-shape='after'] { grid-template-columns: 240px minmax(0, 1fr); }
+/* A decided change: main's one render, the whole body width, between the line that says what became of it and the reason. */
+.focus-pair[data-shape='single'] { grid-template-columns: minmax(0, 1fr); }
+.focus-pair[data-shape='single'] > [data-testid='slide-preview'] { max-width: calc((100cqh - 120px) * 16 / 9 + 24px); }
 .focus-pair > [data-testid='slide-preview'] { width: 100% !important; flex: none !important; max-width: calc((100cqh - 90px) * 16 / 9 + 24px); }
 /* Text diffs in columns across the body, each under 80 characters: freed width goes to the renders and more fields, not longer lines. */
 .focus-diffs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 14px 32px; align-items: start; }
@@ -298,6 +301,8 @@ button { font: inherit; }
   display: flex; flex-direction: column; gap: 12px;
   --move-u: max(96px, min(calc((100cqh - 212px) / 1.8), calc(100cqw * 0.3 - 26px)));
 }
+/* A decided move: the line saying what became of it sits above the strips, so they share 48px less height. */
+.focus-move[data-kind='settled'] { --move-u: max(96px, min(calc((100cqh - 260px) / 1.8), calc(100cqw * 0.3 - 26px))); }
 .move-strip { margin: 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .move-strip[data-size='small'] { --move-s: 0.6; }
 .move-strip[data-size='large'] { --move-s: 1; }
