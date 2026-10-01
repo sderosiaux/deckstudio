@@ -566,10 +566,12 @@ export function Thread({
   // Scroll the log itself: scrollIntoView would also scroll every ancestor, the page included. Inline, the screen
   // scrolls, unless the log has a height of its own.
   const ownScroll = layout === 'panel' || logMaxHeight !== undefined;
+  // The seed arrives on its own, above the messages: it pushes the newest one down, so it scrolls the log as well.
+  const seedMessages = seed?.messages;
   useEffect(() => {
     const el = log.current;
     if (el && ownScroll) el.scrollTop = el.scrollHeight;
-  }, [messages, streaming, pending, ownScroll]);
+  }, [messages, streaming, pending, ownScroll, seedMessages, notes, ownNotes]);
 
   const addNote = useCallback((text: string) => {
     const at = new Date().toISOString();

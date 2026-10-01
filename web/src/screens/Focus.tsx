@@ -152,13 +152,29 @@ export function sameRenderNote(fields: readonly OffSlideField[]): string | null 
 /** The decision bar's height: a block of its own under the scrolling body, so it never sits over content. */
 export const BAR_HEIGHT = 56;
 
-/** The last exchange of a conversation: its last user message and the first reply after it. */
-export function lastExchange(messages: readonly ThreadMessage[]): ThreadMessage[] {
-  let at = messages.length - 1;
-  while (at >= 0 && messages[at]!.role !== 'user') at--;
-  if (at < 0) return [];
-  const reply = messages.slice(at + 1).find((m) => m.role === 'assistant');
-  return reply ? [messages[at]!, reply] : [messages[at]!];
+/**
+ * The exchange of a slide conversation that created `lane`: the turn (a user message and its replies up to the next
+ * user message) during which the lane was created. A turn spans from its message to its last reply, the reply being
+ * written after the tools ran; a turn with no timed reply runs until the next user message. No turn holds the
+ * creation (a lane from a check, or one older than the conversation): nothing, never the latest unrelated exchange.
+ */
+export function creatingExchange(messages: readonly ThreadMessage[], lane: Pick<Lane, 'createdAt' | 'origin'>): ThreadMessage[] {
+  const created = Date.parse(lane.createdAt);
+  if (lane.origin !== 'user' || Number.isNaN(created)) return [];
+  const turns: ThreadMessage[][] = [];
+  for (const m of messages) {
+    if (m.role === 'user') turns.push([m]);
+    else turns.at(-1)?.push(m);
+  }
+  const found = turns.find(([ask, ...replies], i) => {
+    const start = Date.parse(ask!.at);
+    if (Number.isNaN(start) || created < start) return false;
+    const times = replies.map((r) => Date.parse(r.at));
+    if (times.length > 0 && times.every((t) => !Number.isNaN(t))) return created <= Math.max(...times);
+    const next = turns[i + 1];
+    return !next || created < Date.parse(next[0]!.at);
+  });
+  return found ?? [];
 }
 
 /** "14:32": the local time of `d`, 24-hour. */
@@ -439,21 +455,24 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
     return () => ro.disconnect();
   });
 
-  // A lane asked for on a slide opens with that request and its answer, from the slide's own conversation.
+  // A lane asked for on a slide opens with the request that created it and its answer, from the slide's own conversation.
   const seedSlide = load.status === 'ready' && load.lane.anchor.kind === 'slide' ? load.lane.anchor.slide : null;
+  const createdAt = load.status === 'ready' ? load.lane.createdAt : '';
+  const laneOrigin = load.status === 'ready' ? load.lane.origin : 'user';
   useEffect(() => {
+    const creation = { createdAt, origin: laneOrigin };
     setSeed([]);
     if (!seedSlide) return;
     let live = true;
     api.getThread(`slide:${seedSlide}`).then(
-      (list) => live && setSeed(lastExchange(list)),
+      (list) => live && setSeed(creatingExchange(list, creation)),
       // Without the slide conversation the lane thread still works: it opens on its own messages.
       () => undefined,
     );
     return () => {
       live = false;
     };
-  }, [api, seedSlide]);
+  }, [api, seedSlide, createdAt, laneOrigin]);
 
   const strips = useRef<HTMLElement>(null);
   const visible = useVisibleColumns(strips, '[data-strip="main"] [data-testid="thumb"]', [load.status, expanded]);
@@ -632,7 +651,8 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
       navigate={navigate}
       layout={wide ? 'panel' : 'inline'}
       heading="section"
-      logMaxHeight={wide ? undefined : 'min(320px, 40vh)'}
+      // Narrow, the log may take the body's height less the thread's header and composer (theme: .focus-thread).
+      logMaxHeight={wide ? undefined : 'var(--focus-log-max)'}
       notes={notes}
       proposalActions="none"
       seed={seed.length > 0 ? { label: 'from the slide conversation', messages: seed } : undefined}
@@ -811,7 +831,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
               </p>
             ) : null}
             {wide ? null : (
-              <section aria-label="lane thread" style={{ maxWidth: 924, padding: '8px 0 16px', borderTop: '1px solid var(--line)' }}>
+              <section aria-label="lane thread" className="focus-thread">
                 {thread}
               </section>
             )}

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { Focus, BAR_HEIGHT } from '../../web/src/screens/Focus.js';
+import { Focus, BAR_HEIGHT, creatingExchange } from '../../web/src/screens/Focus.js';
 import type { BusEvent, DeckPayload, FocusApi, LanePreviewPayload } from '../../web/src/api.js';
 import type { Change, Lane, Slide, SlideId, ThreadMessage, Version } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
@@ -388,8 +388,8 @@ describe('Focus', () => {
     expect(scroll.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('a lane anchored on a slide opens its thread with the last exchange of that slide conversation, read-only', async () => {
-    const api = stubApi({ ...lane([c1]), anchor: { kind: 'slide', slide: 's3' } });
+  it('a lane anchored on a slide opens its thread with the exchange of that slide conversation that created it, read-only', async () => {
+    const api = stubApi({ ...lane([c1]), anchor: { kind: 'slide', slide: 's3' }, createdAt: '2026-09-30T10:00:03.000Z' });
     const slideThread: ThreadMessage[] = [
       { id: 'u0', thread: 'slide:s3', role: 'user', text: 'older ask', context: { kind: 'slide', slide: 's3' }, at: '2026-09-30T09:00:00.000Z' },
       { id: 'a0', thread: 'slide:s3', role: 'assistant', text: 'older reply', context: null, at: '2026-09-30T09:00:05.000Z' },
@@ -423,6 +423,22 @@ describe('Focus', () => {
     render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryByTestId('focus-reason'));
     expect(screen.getByTestId('focus-reason').textContent).toContain('slide 2, Title s2 already makes the point');
+  });
+
+  it('seeds with the exchange that created the lane, never a later unrelated one', async () => {
+    const api = stubApi({ ...lane([c1]), anchor: { kind: 'slide', slide: 's3' }, createdAt: '2026-09-30T21:41:20.000Z' });
+    const slideThread: ThreadMessage[] = [
+      { id: 'u1', thread: 'slide:s3', role: 'user', text: 'trim the illustrative values', context: { kind: 'slide', slide: 's3' }, at: '2026-09-30T21:41:00.000Z' },
+      { id: 'a1', thread: 'slide:s3', role: 'assistant', text: 'Lane Trim the illustrative values is open.', context: null, at: '2026-09-30T21:41:40.000Z' },
+      { id: 'u2', thread: 'slide:s3', role: 'user', text: 'anything else here?', context: { kind: 'slide', slide: 's3' }, at: '2026-09-30T22:26:00.000Z' },
+      { id: 'a2', thread: 'slide:s3', role: 'assistant', text: 'Nothing to change. No lane opened.', context: null, at: '2026-09-30T22:26:30.000Z' },
+    ];
+    api.getThread.mockImplementation(async (key: string) => (key === 'slide:s3' ? slideThread : []));
+    render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('thread-seed'));
+    const shown = within(screen.getByTestId('thread-seed')).getAllByTestId('seed-message').map((m) => m.textContent);
+    expect(shown).toEqual([expect.stringContaining('trim the illustrative values'), expect.stringContaining('Lane Trim the illustrative values is open.')]);
+    expect(screen.getByTestId('thread-seed').textContent).not.toContain('No lane opened');
   });
 
   it('a lane on a range has no seed', async () => {
@@ -841,5 +857,87 @@ describe('Focus decided and settled changes', () => {
     expect(screen.getByTestId('focus-settled').textContent).toBe('already on main');
     expect(crumb()).toBe('already on main');
     expect(screen.queryByRole('button', { name: 'accept' })).toBeNull();
+  });
+});
+
+describe('creatingExchange', () => {
+  const m = (id: string, role: 'user' | 'assistant', at: string): ThreadMessage => ({ id, thread: 'slide:s3', role, text: id, context: null, at: `2026-09-30T${at}.000Z` });
+  const turns = [m('u1', 'user', '09:00:00'), m('a1', 'assistant', '09:00:10'), m('a1b', 'assistant', '09:00:12'), m('u2', 'user', '10:00:00'), m('a2', 'assistant', '10:00:10')];
+  const at = (t: string, origin: Lane['origin'] = 'user'): Pick<Lane, 'createdAt' | 'origin'> => ({ createdAt: `2026-09-30T${t}.000Z`, origin });
+
+  it('is the turn whose span holds the lane creation: its user message and every reply until the next user message', () => {
+    expect(creatingExchange(turns, at('09:00:05')).map((x) => x.id)).toEqual(['u1', 'a1', 'a1b']);
+    expect(creatingExchange(turns, at('10:00:05')).map((x) => x.id)).toEqual(['u2', 'a2']);
+  });
+
+  it('is nothing for a lane created before the conversation, after the last reply, or by a check', () => {
+    expect(creatingExchange(turns, at('08:00:00'))).toEqual([]);
+    expect(creatingExchange(turns, at('11:00:00'))).toEqual([]);
+    expect(creatingExchange(turns, at('09:00:05', 'check:gaps'))).toEqual([]);
+  });
+
+  it('a turn still running (no reply yet) holds a lane created after its message', () => {
+    const running = [m('u1', 'user', '09:00:00'), m('a1', 'assistant', '09:00:10'), m('u2', 'user', '10:00:00')];
+    expect(creatingExchange(running, at('10:00:05')).map((x) => x.id)).toEqual(['u2']);
+  });
+
+  it('replies without a time fall back on the last turn begun before the lane', () => {
+    const untimed = [m('u1', 'user', '09:00:00'), { ...m('a1', 'assistant', '09:00:10'), at: '' }];
+    expect(creatingExchange(untimed, at('09:30:00')).map((x) => x.id)).toEqual(['u1', 'a1']);
+  });
+});
+
+describe('Focus thread at 1200px', () => {
+  it('the log follows the newest message: after a new message event it is scrolled to the bottom', async () => {
+    narrow();
+    const b = bus();
+    const api = stubApi();
+    let list: ThreadMessage[] = [{ id: 'm1', thread: 'lane:l1', role: 'user', text: 'shorter', context: null, at: '2026-09-30T10:00:00.000Z' }];
+    api.getThread.mockImplementation(async (key: string) => (key === 'lane:l1' ? list : []));
+    render(<Focus laneId="l1" changeId="c1" api={api} subscribe={b.subscribe} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('thread-message').length === 1);
+    const log = screen.getByRole('log');
+    Object.defineProperty(log, 'scrollHeight', { value: 449, configurable: true });
+    Object.defineProperty(log, 'clientHeight', { value: 320, configurable: true });
+    log.scrollTop = 0;
+    list = [...list, { id: 'm2', thread: 'lane:l1', role: 'assistant', text: 'So lane "Shorter hook title" now proposes one change.', context: null, at: '2026-09-30T10:00:20.000Z' }];
+    b.emit({ type: 'assistant.done', thread: 'lane:l1', messageId: 'm2' });
+    await waitFor(() => screen.queryAllByTestId('thread-message').length === 2);
+    expect(log.scrollTop).toBe(449);
+  });
+
+  it('the seed arriving after the lane messages keeps the log at its bottom', async () => {
+    narrow();
+    const api = stubApi({ ...lane([c1]), anchor: { kind: 'slide', slide: 's3' }, createdAt: '2026-09-30T09:00:05.000Z' });
+    let release: (v: ThreadMessage[]) => void = () => undefined;
+    const slideThread = new Promise<ThreadMessage[]>((r) => (release = r));
+    api.getThread.mockImplementation(async (key: string) =>
+      key === 'slide:s3' ? slideThread : [{ id: 'm1', thread: 'lane:l1', role: 'user', text: 'shorter', context: null, at: '2026-09-30T10:00:00.000Z' }],
+    );
+    render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('thread-message').length === 1);
+    const log = screen.getByRole('log');
+    Object.defineProperty(log, 'scrollHeight', { value: 600, configurable: true });
+    log.scrollTop = 0;
+    await act(async () => {
+      release([
+        { id: 'u1', thread: 'slide:s3', role: 'user', text: 'make it shorter', context: null, at: '2026-09-30T09:00:00.000Z' },
+        { id: 'a1', thread: 'slide:s3', role: 'assistant', text: 'Opened a lane.', context: null, at: '2026-09-30T09:00:10.000Z' },
+      ]);
+      await slideThread;
+    });
+    await waitFor(() => screen.queryByTestId('thread-seed'));
+    expect(log.scrollTop).toBe(600);
+  });
+
+  it('the log is not capped at 320px: it grows with the body height, the composer under it', async () => {
+    narrow();
+    render(<Focus laneId="l1" changeId="c1" api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByRole('log'));
+    const log = screen.getByRole('log');
+    expect(log.closest('.focus-thread')).not.toBeNull();
+    expect(log.style.maxHeight).not.toContain('320px');
+    expect(log.style.maxHeight).toBe('var(--focus-log-max)');
+    expect(themeCss()).toMatch(/\.focus-thread \{[^}]*--focus-log-max: max\(200px, calc\(100cqh - 150px\)\)/);
   });
 });
