@@ -19,11 +19,12 @@ import {
   type SlideApi,
   type ThumbStatus,
 } from '../api.js';
-import { ChangeButtons } from '../components/ChangeButtons.js';
+import { ChangeButtons, settledNote } from '../components/ChangeButtons.js';
 import { describeChange, originTag, targetOf, useLaneActions } from '../components/LaneRow.js';
 import { RemarkPostIt } from '../components/Remark.js';
 import { BackToMain, ScreenHeader } from '../components/ScreenHeader.js';
 import { SlidePreview, type SlidePreviewProps } from '../components/SlidePreview.js';
+import { TextDiff } from '../components/TextDiff.js';
 import { Thread } from '../components/Thread.js';
 import { modified, typingIn } from '../keys.js';
 
@@ -71,6 +72,10 @@ const message = (err: unknown): string => (err instanceof Error ? err.message : 
 const liveOn = (lane: Lane, slideId: SlideId): Change[] =>
   lane.status === 'open' ? lane.changes.filter((c) => c.status === 'pending' && targetOf(c) === slideId) : [];
 
+/** The changes of an open lane the list shows on `slideId`: those to decide, and those the server settled (with why). */
+const listedOn = (lane: Lane, slideId: SlideId): Change[] =>
+  lane.status === 'open' ? lane.changes.filter((c) => targetOf(c) === slideId && (c.status === 'pending' || settledNote(lane, c) !== null)) : [];
+
 /** Open remarks about this slide on main: anchored on it, or on a range that holds it. */
 export function remarksOn(remarks: readonly Remark[], slideId: SlideId, order: readonly SlideId[]): Remark[] {
   const at = order.indexOf(slideId);
@@ -99,15 +104,33 @@ export function nameSlides(text: string, order: readonly SlideId[], slides: Reco
 }
 
 const TEXT_WIDTH = 800;
+/** The conversation under the render stops growing here and scrolls, following its latest message. */
+const THREAD_MAX = 'min(420px, 50vh)';
 
-const HINT = 'Ask for a change to this slide. The co-author answers here with a lane: its render shows on the slide, and you accept or refuse it from the lane list.';
+const HINT = 'Ask for a change to this slide. The co-author answers here, under the render: its proposal shows above, and you accept or refuse it in its reply.';
 
-/** One slide's text field under the render: its name, then the text as written. */
-function Field({ name, text, testId, empty }: { name: string; text: string; testId: string; empty: string }) {
+/** A text field as diff lines: one per line, none for an empty field. */
+const linesOf = (text: string): string[] => (text === '' ? [] : text.split('\n'));
+
+/**
+ * One slide's text field under the render, as the render tab shows it: main's text, or the lane's, said to be changed
+ * or not; a changed one is a word diff against main.
+ */
+function Field({ name, main, lane, testId, empty }: { name: string; main: string; lane?: { label: string; text: string } | undefined; testId: string; empty: string }) {
+  const text = lane ? lane.text : main;
+  const changed = lane !== undefined && lane.text !== main;
+  const source = lane ? `in ${lane.label}, ${changed ? 'changed' : 'unchanged'}` : 'on main';
   return (
     <section data-testid={testId} style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: TEXT_WIDTH }}>
-      <h2 className="meta" style={{ margin: 0, fontWeight: 500 }}>{name}</h2>
-      <p style={{ margin: 0, fontSize: 'var(--fs-body)', lineHeight: 1.5, whiteSpace: 'pre-wrap', color: text ? 'var(--ink)' : 'var(--grey)' }}>{text || empty}</p>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+        <h2 className="meta" style={{ margin: 0, fontWeight: 500, color: 'var(--ink)' }}>{name}</h2>
+        <span data-testid="field-source" className="meta">{source}</span>
+      </div>
+      {changed ? (
+        <TextDiff label={name} before={linesOf(main)} after={linesOf(lane.text)} bare />
+      ) : (
+        <p style={{ margin: 0, fontSize: 'var(--fs-body)', lineHeight: 1.5, whiteSpace: 'pre-wrap', color: text ? 'var(--ink)' : 'var(--grey)' }}>{text || empty}</p>
+      )}
     </section>
   );
 }
@@ -144,6 +167,7 @@ function LaneOnSlide({ lane, changes, api, navigate, selected, onShow, describe,
       </div>
       {changes.map((c) => {
         const href = focusPath(lane.id, c.id);
+        const settled = settledNote(lane, c);
         return (
           <div key={c.id} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <p style={{ margin: 0, color: 'var(--grey)', fontSize: 'var(--fs-body)', lineHeight: 1.4 }}>
@@ -151,7 +175,13 @@ function LaneOnSlide({ lane, changes, api, navigate, selected, onShow, describe,
               {readable(c.reason)}
             </p>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <ChangeButtons change={c} disabled={busy} onAccept={accept} onRefuse={refuse} describe={describe(c)} />
+              {settled ? (
+                <span data-testid="change-settled" className="meta" style={{ color: 'var(--ink)' }}>
+                  {settled}
+                </span>
+              ) : (
+                <ChangeButtons change={c} disabled={busy} onAccept={accept} onRefuse={refuse} describe={describe(c)} />
+              )}
               <a
                 href={href}
                 className="link"
@@ -179,9 +209,9 @@ function LaneOnSlide({ lane, changes, api, navigate, selected, onShow, describe,
 }
 
 /**
- * One slide of main, to change it by talking to the co-author. From 1280px, two columns: the slide large (main's
- * render, or a lane's proposal) with its story and notes; beside it the open lanes that change it, its remarks, then the
- * `slide:<id>` conversation down to the bottom. Narrower, one column in that order, story and notes last.
+ * One slide of main, to change it by talking to the co-author. The conversation lives where the slide is: under the
+ * render (main's, or a lane's proposal), its replies carrying their proposals, then story and notes as the tab shows
+ * them. From 1280px a side column lists the open lanes that change the slide and its remarks; narrower, they follow.
  */
 export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe, navigate = defaultNavigate }: SlideProps) {
   const wide = useMediaQuery(WIDE_QUERY);
@@ -375,7 +405,9 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
   }
 
   const context: Anchor = { kind: 'slide', slide: slideId };
-  const rows = lanesLoad.status === 'ready' ? lanesLoad.lanes.map((lane) => ({ lane, changes: liveOn(lane, slideId) })).filter((r) => r.changes.length > 0) : [];
+  // Lanes listed on this slide; only those with a change still to decide have a render tab.
+  const listed = lanesLoad.status === 'ready' ? lanesLoad.lanes.map((lane) => ({ lane, changes: listedOn(lane, slideId) })).filter((r) => r.changes.length > 0) : [];
+  const rows = listed.map((r) => ({ lane: r.lane, changes: liveOn(r.lane, slideId) })).filter((r) => r.changes.length > 0);
   const stepLink = (to: SlideId | null, text: string) =>
     to ? (
       <a href={slidePath(to)} onClick={go(slidePath(to))} className="link">
@@ -455,13 +487,13 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
           <span>Lanes: {lanesLoad.message}</span>{' '}
           <button type="button" className="btn" onClick={() => void reloadLanes()}>Retry</button>
         </p>
-      ) : rows.length === 0 ? (
+      ) : listed.length === 0 ? (
         <p data-testid="slide-lanes-empty" className="muted" style={{ margin: 0, fontSize: 'var(--fs-body)', lineHeight: 1.5 }}>
           No open lane changes this slide. Ask the co-author in the conversation: its lane lands here and on the render.
         </p>
       ) : (
         <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {rows.map((r) => (
+          {listed.map((r) => (
             <LaneOnSlide
               key={r.lane.id}
               lane={r.lane}
@@ -527,16 +559,32 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
       api={api}
       subscribe={fanout}
       navigate={navigate}
-      layout={wide ? 'panel' : 'inline'}
-      heading="section"
-      proposalActions="focus-link"
+      layout="inline"
+      logMaxHeight={THREAD_MAX}
     />
   );
 
+  // A click on a proposal card (not on its buttons or links) shows that lane's proposal on the render.
+  const onTalkClick = (e: MouseEvent): void => {
+    const target = e.target as Element;
+    if (target.closest('button, a, input')) return;
+    const laneId = target.closest('[data-testid="thread-proposal"]')?.getAttribute('data-lane');
+    if (laneId && rows.some((r) => r.lane.id === laneId)) setView(laneId);
+  };
+
+  const talk = (
+    <section aria-label="conversation about this slide" data-testid="slide-talk" className="slide-section" onClick={onTalkClick}>
+      {thread}
+    </section>
+  );
+
+  // On a lane's tab, story and notes are the lane's (its preview of this slide), compared with main's.
+  const laneSlide = shown ? proposal?.slides[slideId] : undefined;
+  const laneText = (field: 'story' | 'notes') => (shown && laneSlide ? { label: shown.lane.label, text: laneSlide[field] } : undefined);
   const text = (
     <>
-      <Field name="story" text={slide.story} testId="slide-story" empty="No story yet: ask the co-author to write the message this slide carries." />
-      <Field name="notes" text={slide.notes} testId="slide-notes" empty="No speaker notes yet." />
+      <Field name="story" main={slide.story} lane={laneText('story')} testId="slide-story" empty="No story yet: ask the co-author to write the message this slide carries." />
+      <Field name="notes" main={slide.notes} lane={laneText('notes')} testId="slide-notes" empty="No speaker notes yet." />
     </>
   );
 
@@ -554,16 +602,14 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
         {/* The work column starts on the title's left edge (24px padding + the 120px gutter). */}
         <main ref={bodyRef} data-testid="slide-body" className="slide-main">
           {render}
+          {talk}
+          {text}
           {wide ? null : (
             <>
               {lanesSection}
               {remarksSection}
-              <section aria-label="conversation about this slide" className="slide-section" style={{ paddingBottom: 8 }}>
-                {thread}
-              </section>
             </>
           )}
-          {text}
         </main>
         {wide ? (
           <div data-testid="slide-side" className="slide-side">
@@ -571,9 +617,6 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
               {lanesSection}
               {remarksSection}
             </div>
-            <section aria-label="conversation about this slide" className="slide-side-talk">
-              {thread}
-            </section>
           </div>
         ) : null}
       </div>

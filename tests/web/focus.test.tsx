@@ -234,7 +234,7 @@ describe('Focus', () => {
     fireEvent.click(screen.getByRole('button', { name: 'refuse' }));
     await waitFor(() => screen.queryByTestId('decide-ack'));
     expect(api.refuseChange).toHaveBeenCalledWith('l1', 'c5');
-    fireEvent.click(within(screen.getByTestId('decide-ack')).getByRole('button', { name: 'back to the slide' }));
+    fireEvent.click(within(screen.getByTestId('decide-ack')).getByRole('button', { name: 'back to slide 4' }));
     expect(navigate).toHaveBeenCalledWith('/slide/s4');
   });
 
@@ -289,6 +289,8 @@ describe('Focus', () => {
   it('underlines the anchor range in both filmstrips and opens the lane thread', async () => {
     const api = stubApi();
     render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('focus-strip'));
+    fireEvent.click(screen.getByTestId('focus-strip'));
     await waitFor(() => screen.queryAllByTestId('range-underline').length === 2);
     const [mainLine, laneLine] = screen.getAllByTestId('range-underline');
     // main: s2..s4 = columns 2..4
@@ -314,7 +316,10 @@ describe('Focus', () => {
     expect(side.contains(document.querySelector('footer'))).toBe(false);
     // Beside the renders: the side column follows the work column.
     expect(screen.getByTestId('focus-work').compareDocumentPosition(side) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(themeCss()).toMatch(/\.focus-layout\[data-columns='2'\] \{[^}]*grid-template-columns: minmax\(0, 1fr\) 360px/);
+    expect(themeCss()).toMatch(/\.focus-layout\[data-columns='2'\] \{[^}]*grid-template-columns: minmax\(0, 1fr\) 320px/);
+    // The thread column starts at the top of the screen: the header belongs to the work column only.
+    expect(screen.getByTestId('focus-work').contains(document.querySelector('.screen-header'))).toBe(true);
+    expect(side.contains(document.querySelector('.screen-header'))).toBe(false);
   });
 
   it('below the breakpoint the thread follows the renders in the scrolling body; the bar sits outside it, under', async () => {
@@ -469,8 +474,9 @@ describe('Focus text diff and layout', () => {
     expect(pair.querySelectorAll('[data-testid="slide-preview"]')).toHaveLength(2);
     const scroll = screen.getByTestId('focus-scroll');
     const bar = screen.getByTestId('decide-bar');
-    // The bar is the scroll area's next sibling, a fixed-height block of its own: nothing scrolls under it.
-    expect(scroll.nextElementSibling).toBe(bar);
+    // The bar follows the diff pane (the scroll area and its fade), a fixed-height block of its own: nothing scrolls under it.
+    expect(scroll.parentElement!.className).toBe('focus-pane');
+    expect(scroll.parentElement!.nextElementSibling).toBe(bar);
     expect(bar.style.position).not.toBe('sticky');
     expect(bar.style.height).toBe(`${BAR_HEIGHT}px`);
     expect(bar.contains(screen.getByRole('button', { name: 'accept' }))).toBe(true);
@@ -531,6 +537,7 @@ describe('Focus move changes', () => {
     try {
       render(<Focus laneId="l1" changeId="m2" api={api} subscribe={noEvents} navigate={vi.fn()} />);
       await waitFor(() => screen.queryAllByTestId('move-excerpt').length === 2);
+      fireEvent.click(screen.getByTestId('focus-strip'));
       const footer = document.querySelector('footer')!;
       // s2 lands at column 28 (index 27): x = 144 + 2700, centred in the strip area.
       await waitFor(() => footer.scrollLeft > 0);
@@ -580,5 +587,131 @@ describe('LaneRow links to the focus screen', () => {
     expect(removed.getAttribute('href')).toBe('/lane/l1/change/c5');
     fireEvent.click(removed);
     expect(open).toHaveBeenLastCalledWith('l1', 'c5');
+  });
+});
+
+describe('Focus strip and diff pane', () => {
+  it('one 48px strip of slide numbers: changed filled, refused struck, the current one ringed; a click expands the full strips', async () => {
+    render(<Focus laneId="l1" changeId="c1" api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('strip-cell').length > 0);
+    // Collapsed: no filmstrip, no underline.
+    expect(document.querySelector('footer')).toBeNull();
+    expect(screen.queryAllByTestId('range-underline')).toHaveLength(0);
+    const strip = screen.getByTestId('focus-strip');
+    expect(strip.getAttribute('aria-expanded')).toBe('false');
+    const cells = screen.getAllByTestId('strip-cell');
+    expect(cells.map((c) => c.textContent)).toEqual(['1', '2', 'new', '3', '4', '5']);
+    expect(cells.map((c) => c.getAttribute('data-state'))).toEqual(['same', 'changed', 'changed', 'changed', 'changed', 'refused']);
+    expect(cells.filter((c) => c.getAttribute('aria-current') === 'true').map((c) => c.getAttribute('data-slide'))).toEqual(['s3']);
+    const css = themeCss();
+    expect(css).toMatch(/\.focus-strip \{[^}]*height: 48px/);
+    expect(css).toMatch(/\.strip-cell\[data-state='changed'\] \{[^}]*background: var\(--accent\)/);
+    expect(css).toMatch(/\.strip-cell\[data-state='refused'\] \{[^}]*text-decoration: line-through/);
+
+    fireEvent.click(strip);
+    expect(strip.getAttribute('aria-expanded')).toBe('true');
+    await waitFor(() => screen.queryAllByTestId('range-underline').length === 2);
+    expect(document.querySelector('footer')).not.toBeNull();
+    fireEvent.click(strip);
+    expect(document.querySelector('footer')).toBeNull();
+  });
+
+  it('the diff pane takes the remaining height; a bottom fade shows while it runs on below', async () => {
+    render(<Focus laneId="l1" changeId="c1" api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('focus-pair'));
+    const pane = screen.getByTestId('focus-scroll');
+    expect(screen.queryByTestId('focus-fade')).toBeNull();
+    Object.defineProperty(pane, 'scrollHeight', { value: 900, configurable: true });
+    Object.defineProperty(pane, 'clientHeight', { value: 400, configurable: true });
+    fireEvent.scroll(pane);
+    await waitFor(() => screen.queryByTestId('focus-fade'));
+    pane.scrollTop = 500;
+    fireEvent.scroll(pane);
+    await waitFor(() => screen.queryByTestId('focus-fade') === null);
+    expect(themeCss()).toMatch(/\.focus-scroll \{[^}]*flex: 1/);
+  });
+});
+
+describe('Focus decided and settled changes', () => {
+  /** A lane payload with the server's reasons for the changes it settled itself. */
+  const withCauses = (l: Lane, causes: Record<string, string>): Lane => ({ ...l, causes }) as Lane;
+
+  it('a lane with nothing pending says "all changes decided", lists each outcome and goes back to the slide', async () => {
+    const decided = withCauses(
+      {
+        ...lane([{ ...c1, status: 'accepted' }, c2, { ...c3, status: 'refused' }, { ...c5, status: 'orphan' }]),
+        status: 'closed',
+      },
+      { c2: 'already on main', c5: 'a slide it needs is no longer on main' },
+    );
+    const navigate = vi.fn();
+    render(<Focus laneId="l1" changeId="c1" api={stubApi(decided)} subscribe={noEvents} navigate={navigate} />);
+    await waitFor(() => screen.queryByTestId('focus-outcomes'));
+    expect(crumb()).toBe('all changes decided');
+    expect(document.body.textContent).not.toContain('of 0');
+    const items = within(screen.getByTestId('focus-outcomes')).getAllByRole('listitem');
+    expect(items.map((i) => i.getAttribute('data-outcome'))).toEqual(['accepted', 'already on main', 'refused', 'stale']);
+    expect(items[0]!.textContent).toContain('slide 3, Title s3');
+    expect(items[2]!.textContent).toContain('Hook');
+    expect(items[3]!.textContent).toContain('a slide it needs is no longer on main');
+    expect(screen.queryByTestId('decide-bar')).toBeNull();
+    const back = screen.getByRole('link', { name: 'back to slide 3' });
+    expect(back.className).toBe('btn-primary');
+    fireEvent.click(back);
+    expect(navigate).toHaveBeenCalledWith('/slide/s3');
+  });
+
+  it('a discarded lane says its pending changes were discarded', async () => {
+    const gone: Lane = { ...lane([c1]), status: 'closed' };
+    render(<Focus laneId="l1" changeId="c1" api={stubApi(gone)} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('focus-outcomes'));
+    expect(within(screen.getByTestId('focus-outcomes')).getAllByRole('listitem').map((i) => i.getAttribute('data-outcome'))).toEqual(['discarded']);
+  });
+
+  it('while the co-author revises this lane, accept and refuse wait for it', async () => {
+    const api = stubApi();
+    const b = bus();
+    render(<Focus laneId="l1" changeId="c1" api={api} subscribe={b.subscribe} navigate={vi.fn()} />);
+    await waitFor(() => crumb().includes('change 1 of 3'));
+    const accept = () => screen.getByRole('button', { name: 'accept' }) as HTMLButtonElement;
+    const refuse = () => screen.getByRole('button', { name: 'refuse' }) as HTMLButtonElement;
+    expect(accept().disabled).toBe(false);
+    // Another thread's turn changes nothing.
+    b.emit({ type: 'tool.call', name: 'mcp__deck__get_deck', thread: 'slide:s3' });
+    expect(accept().disabled).toBe(false);
+    b.emit({ type: 'tool.call', name: 'mcp__deck__revise_lane', thread: 'lane:l1' });
+    expect(accept().disabled).toBe(true);
+    expect(refuse().disabled).toBe(true);
+    expect(accept().title).toBe('the co-author is revising this lane');
+    b.emit({ type: 'assistant.done', thread: 'lane:l1', messageId: 'a1' });
+    expect(accept().disabled).toBe(false);
+    expect(accept().title).toBe('');
+    // A message sent from this screen starts the turn at once.
+    fireEvent.change(screen.getByLabelText('message'), { target: { value: 'shorter' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => api.postMessage.mock.calls.length === 1);
+    expect(accept().disabled).toBe(true);
+    b.emit({ type: 'agent.error', thread: 'lane:l1', message: 'boom' });
+    expect(accept().disabled).toBe(false);
+  });
+
+  it('a stale change shows the server\'s reason in the header instead of accept and refuse', async () => {
+    const l = withCauses(lane([c1, { ...c5, status: 'orphan' }]), { c5: 'title changed on main since v1' });
+    render(<Focus laneId="l1" changeId="c5" api={stubApi(l)} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('focus-settled'));
+    expect(screen.getByTestId('focus-settled').textContent).toBe('stale: title changed on main since v1');
+    expect(crumb()).toBe('stale');
+    expect(screen.queryByRole('button', { name: 'accept' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'refuse' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Review the first pending change' }).getAttribute('href')).toBe('/lane/l1/change/c1');
+  });
+
+  it('a change main already holds says so in the header', async () => {
+    const l = withCauses(lane([c1, { ...c3, status: 'accepted' }]), { c3: 'already on main' });
+    render(<Focus laneId="l1" changeId="c3" api={stubApi(l)} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('focus-settled'));
+    expect(screen.getByTestId('focus-settled').textContent).toBe('already on main');
+    expect(crumb()).toBe('already on main');
+    expect(screen.queryByRole('button', { name: 'accept' })).toBeNull();
   });
 });

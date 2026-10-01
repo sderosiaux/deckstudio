@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import type { Change } from '../../../src/model/types.js';
+import type { Change, Lane } from '../../../src/model/types.js';
 
 export interface ChangeButtonsProps {
   change: Change;
@@ -50,4 +50,23 @@ export function ChangeButtons({ change, disabled, onAccept, onRefuse, describe }
       </button>
     </div>
   );
+}
+
+/** The cause the server gives a change it settled itself when rebasing a lane on main, instead of the creator. */
+export const ALREADY_ON_MAIN = 'already on main';
+
+/** The server's reasons for the changes it settled on a rebase, by change id, as the lane payload carries them. */
+export function causesOf(lane: Lane): Record<string, string> {
+  return (lane as Lane & { causes?: Record<string, string> }).causes ?? {};
+}
+
+/**
+ * What stands instead of accept and refuse for a change nobody has to decide: "stale: <the server's reason>" for an
+ * orphan, "already on main" for a change main took on its own; null for any other.
+ */
+export function settledNote(lane: Lane, change: Change): string | null {
+  const cause = causesOf(lane)[change.id];
+  if (change.status === 'orphan') return `stale: ${cause ?? 'it no longer applies on main'}`;
+  if (change.status === 'accepted' && cause === ALREADY_ON_MAIN) return ALREADY_ON_MAIN;
+  return null;
 }
