@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { Focus, BAR_HEIGHT, excerpt } from '../../web/src/screens/Focus.js';
+import { Focus, BAR_HEIGHT } from '../../web/src/screens/Focus.js';
 import type { BusEvent, DeckPayload, FocusApi, LanePreviewPayload } from '../../web/src/api.js';
 import type { Change, Lane, Slide, SlideId, ThreadMessage, Version } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
@@ -483,35 +483,98 @@ describe('Focus text diff and layout', () => {
   });
 });
 
+describe('Focus fills the body', () => {
+  it('the pair spans the body: the lane side larger, a side missing slims to a narrow column', async () => {
+    const api = stubApi();
+    const shape = () => screen.getByTestId('focus-pair').getAttribute('data-shape');
+    const { rerender } = render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('slide-preview').length === 2);
+    expect(shape()).toBe('both');
+    // an insert has no main side, a remove no lane side
+    rerender(<Focus laneId="l1" changeId="c3" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => crumb().includes('change 2 of 3'));
+    expect(shape()).toBe('after');
+    rerender(<Focus laneId="l1" changeId="c5" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => crumb().includes('change 3 of 3'));
+    expect(shape()).toBe('before');
+    const css = themeCss();
+    expect(css).not.toMatch(/\.focus-pair \{[^}]*max-width/);
+    expect(css).toMatch(/\.focus-pair\[data-shape='both'\] \{[^}]*5fr\) minmax\(0, 7fr/);
+    // No empty 120px gutter on this screen: the body starts at the screen edge padding.
+    expect(css).not.toMatch(/\.focus-scroll \{[^}]*var\(--gutter\)/);
+  });
+
+  it('text diffs sit in columns across the body, each under 80 characters wide', async () => {
+    const body: Change = { id: 'c1', kind: 'modify', slide: 's3', patch: { title: 'Sharper s3', story: 'why now' }, reason: 'tighter title', status: 'pending' };
+    render(<Focus laneId="l1" changeId="c1" api={stubApi(lane([body, c3]))} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('text-diff').length === 2);
+    const diffs = screen.getByTestId('focus-diffs');
+    expect(diffs.className).toBe('focus-diffs');
+    for (const d of screen.getAllByTestId('text-diff')) {
+      expect(diffs.contains(d)).toBe(true);
+      expect(d.style.maxWidth).toBe('80ch');
+    }
+    expect(screen.getByTestId('focus-reason').style.maxWidth).toBe('80ch');
+    expect(themeCss()).toMatch(/\.focus-diffs \{[^}]*grid-template-columns/);
+  });
+});
+
 describe('Focus move changes', () => {
   const move: Change = { id: 'm1', kind: 'move', slide: 's2', after: 's5', reason: 'later', status: 'pending' };
   const moved: LanePreviewPayload = { order: ['s1', 's3', 's4', 's5', 's2'], slides: mainSlides, skipped: [], thumbs: {} };
 
-  it('excerpt keeps 5 slides centred on a position, clamped at the deck ends', () => {
-    const o = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-    expect(excerpt(o, 4)).toEqual({ start: 2, ids: ['c', 'd', 'e', 'f', 'g'] });
-    expect(excerpt(o, 0)).toEqual({ start: 0, ids: ['a', 'b', 'c', 'd', 'e'] });
-    expect(excerpt(o, 7)).toEqual({ start: 3, ids: ['d', 'e', 'f', 'g', 'h'] });
-    expect(excerpt(['a', 'b'], 1)).toEqual({ start: 0, ids: ['a', 'b'] });
-  });
-
-  it('a move shows two strip excerpts centred on the slide, "was N" on main and "now M" in the lane', async () => {
+  it('a move shows both whole strips, the moved slide twice its neighbours and ringed, "was N" on main and "now M" in the lane', async () => {
     const api = stubApi(lane([move]));
     api.getLanePreview.mockResolvedValue(moved);
     render(<Focus laneId="l1" changeId="m1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
-    await waitFor(() => screen.queryAllByTestId('move-excerpt').length === 2);
+    await waitFor(() => screen.queryAllByTestId('move-strip').length === 2);
     expect(screen.queryAllByTestId('slide-preview')).toHaveLength(0);
-    const [main, laneSide] = screen.getAllByTestId('move-excerpt');
+    expect(screen.queryAllByTestId('move-excerpt')).toHaveLength(0);
+    const [main, laneSide] = screen.getAllByTestId('move-strip');
     const ids = (el: HTMLElement) => within(el).getAllByTestId('thumb').map((t) => t.getAttribute('data-slide'));
-    const sel = (el: HTMLElement) => within(el).getAllByTestId('thumb').find((t) => t.getAttribute('aria-pressed') === 'true')?.getAttribute('data-slide');
+    const sel = (el: HTMLElement) => within(el).getAllByTestId('thumb').filter((t) => t.getAttribute('aria-pressed') === 'true').map((t) => t.getAttribute('data-slide'));
+    const scale = (el: HTMLElement) => within(el).getAllByRole('listitem').map((li) => li.style.getPropertyValue('--move-k'));
     expect(main!.getAttribute('data-side')).toBe('main');
     expect(ids(main!)).toEqual(['s1', 's2', 's3', 's4', 's5']);
-    expect(sel(main!)).toBe('s2');
+    expect(sel(main!)).toEqual(['s2']);
+    expect(scale(main!)).toEqual(['1', '2', '1', '1', '1']);
     expect(within(main!).getByTestId('move-caption').textContent).toBe('main, was 2');
     expect(laneSide!.getAttribute('data-side')).toBe('lane');
     expect(ids(laneSide!)).toEqual(['s1', 's3', 's4', 's5', 's2']);
-    expect(sel(laneSide!)).toBe('s2');
+    expect(sel(laneSide!)).toEqual(['s2']);
+    expect(scale(laneSide!)).toEqual(['1', '1', '1', '1', '2']);
     expect(within(laneSide!).getByTestId('move-caption').textContent).toBe('this lane, now 5');
+    // The thumbs size from the viewport-filling unit in the theme, the lane side larger than main's.
+    expect(themeCss()).toMatch(/\.move-strip-item \{[^}]*--move-k/);
+    expect(themeCss()).toMatch(/\.focus-move \{[^}]*--move-u:[^;]*cqh/);
+  });
+
+  it('each move strip scrolls so the moved slide sits in its middle', async () => {
+    const many: SlideId[] = Array.from({ length: 30 }, (_, i) => `s${i + 1}`);
+    const slidesMany = Object.fromEntries(many.map((id) => [id, slide(id)]));
+    const far: Change = { id: 'm2', kind: 'move', slide: 's2', after: 's28', reason: 'later', status: 'pending' };
+    const after = [...many.filter((x) => x !== 's2').slice(0, 27), 's2', ...many.filter((x) => x !== 's2').slice(27)];
+    const api = stubApi({ ...lane([far]), anchor: { kind: 'slide', slide: 's2' } });
+    api.getDeck.mockResolvedValue({ ...deck, order: many, slides: slidesMany, state: { ...deck.state, order: many } });
+    api.getLanePreview.mockResolvedValue({ order: after, slides: slidesMany, skipped: [], thumbs: {} });
+    // Items 100px apart in an 800px wide strip; the moved one is 200px wide.
+    const proto = HTMLElement.prototype;
+    const saved = ['offsetLeft', 'offsetWidth', 'clientWidth'].map((k) => [k, Object.getOwnPropertyDescriptor(proto, k)] as const);
+    const item = (el: HTMLElement) => (el.getAttribute('role') === 'listitem' ? el : null);
+    Object.defineProperty(proto, 'offsetLeft', { configurable: true, get(this: HTMLElement) { const li = item(this); return li ? Array.from(li.parentElement!.children).indexOf(li) * 100 : 0; } });
+    Object.defineProperty(proto, 'offsetWidth', { configurable: true, get(this: HTMLElement) { const li = item(this); return li ? (li.getAttribute('data-moved') ? 200 : 96) : 0; } });
+    Object.defineProperty(proto, 'clientWidth', { configurable: true, get(this: HTMLElement) { return this.getAttribute('role') === 'list' ? 800 : 0; } });
+    try {
+      render(<Focus laneId="l1" changeId="m2" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+      await waitFor(() => screen.queryAllByTestId('move-strip').length === 2);
+      const [main, laneSide] = screen.getAllByTestId('move-strip').map((s) => within(s).getByRole('list'));
+      // main: s2 at index 1 -> centre 200 is left of the middle, no scroll; lane: s2 at index 27 -> 2700 + 100 - 400.
+      await waitFor(() => laneSide!.scrollLeft > 0);
+      expect(main!.scrollLeft).toBe(0);
+      expect(laneSide!.scrollLeft).toBe(2700 + 100 - 400);
+    } finally {
+      for (const [k, d] of saved) if (d) Object.defineProperty(proto, k, d);
+    }
   });
 
   it('the bottom strips scroll so the destination column is visible', async () => {
@@ -536,7 +599,7 @@ describe('Focus move changes', () => {
     });
     try {
       render(<Focus laneId="l1" changeId="m2" api={api} subscribe={noEvents} navigate={vi.fn()} />);
-      await waitFor(() => screen.queryAllByTestId('move-excerpt').length === 2);
+      await waitFor(() => screen.queryAllByTestId('move-strip').length === 2);
       fireEvent.click(screen.getByTestId('focus-strip'));
       const footer = document.querySelector('footer')!;
       // s2 lands at column 28 (index 27): x = 144 + 2700, centred in the strip area.

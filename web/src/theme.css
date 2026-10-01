@@ -157,19 +157,29 @@ button { font: inherit; }
 .diff-more:hover, .diff-more:focus-visible { box-shadow: inset 0 0 0 1px var(--grey-2); }
 
 /* Slide screen. From 1280px: the work column (render, the conversation under it, story, notes) and a 360px side column
- * (lanes, remarks) at full height, each scrolling on its own. Narrower: one column, lanes and remarks last. */
+ * (lanes, remarks) at full height, each scrolling on its own. Narrower: one column, lanes and remarks last. No empty
+ * 120px gutter: the render takes that width. Once the work column holds a 1100px render and a text column beside it,
+ * story and notes move there instead of leaving a band of paper right of the render. */
+.slide-screen > .screen-header > .gutter { display: none; }
 .slide-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .slide-layout[data-columns='2'] { display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
-.slide-main { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 48px calc(24px + var(--gutter)); display: flex; flex-direction: column; gap: 16px; }
+.slide-main { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 48px; display: flex; flex-direction: column; gap: 16px; container: slide-body / inline-size; }
+.slide-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+.slide-work, .slide-text { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+@container slide-body (min-width: 1420px) {
+  .slide-grid { grid-template-columns: minmax(0, 1100px) minmax(0, 1fr); column-gap: 32px; }
+}
 .slide-section { display: flex; flex-direction: column; gap: 8px; max-width: 800px; }
+/* The conversation under the render spans the render's width. */
+.slide-work > .slide-section { max-width: 1100px; }
 .slide-side { min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); }
 .slide-side-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 20px 16px; display: flex; flex-direction: column; gap: 20px; }
 /* A proposal card in the conversation under the render: a click shows its lane on the render. */
 .slide-main [data-testid='thread-proposal'] { cursor: pointer; }
-/* The slide at reading size: SlidePreview has a fixed width, on the stage it takes the column's, 800px at most. */
-.slide-stage { width: min(100%, 800px); }
+/* The slide as the largest thing on screen: SlidePreview has a fixed width, on the stage it takes the column's, 1100px at most. */
+.slide-stage { width: min(100%, 1100px); }
 .slide-stage > [data-testid='slide-preview'] { width: 100% !important; flex: none !important; }
-.slide-toggle { display: flex; flex-wrap: wrap; gap: 4px; max-width: 800px; }
+.slide-toggle { display: flex; flex-wrap: wrap; gap: 4px; max-width: 1100px; }
 .slide-toggle > button { all: unset; cursor: pointer; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 10px; border-radius: 4px; font-size: var(--fs-meta); font-weight: 500; color: var(--grey); box-shadow: 0 0 0 1px var(--line); transition: color .15s ease, box-shadow .15s ease; }
 .slide-toggle > button:hover { color: var(--ink); }
 .slide-toggle > button[aria-pressed='true'] { color: var(--ink); background: var(--card); box-shadow: 0 0 0 1.5px var(--accent); }
@@ -181,12 +191,14 @@ button { font: inherit; }
 /* Focus screen. From 1280px the lane thread is a 320px column beside the work column (header, diff, decision bar,
  * strip), from the top of the screen to the bottom, its composer at the bottom; narrower it follows the renders in the
  * scrolling body. The diff takes all the height the decision bar and the 48px strip leave; the bar is a block under it,
- * never laid over it. */
+ * never laid over it. No empty 120px gutter here: a presentation tool gives that width to the renders. */
 .focus-layout { height: 100%; min-height: 0; display: flex; flex-direction: column; }
 .focus-layout[data-columns='2'] { display: grid; grid-template-columns: minmax(0, 1fr) 320px; }
 .focus-work { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.focus-work > .screen-header > .gutter { display: none; }
 .focus-pane { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.focus-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 16px calc(24px + var(--gutter)); display: flex; flex-direction: column; gap: 16px; }
+/* A size container: the move strips and the pair size their renders from the body's own width and height. */
+.focus-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 16px; display: flex; flex-direction: column; gap: 16px; container: focus-body / size; }
 /* The diff runs on below: paper fades in over its last 48px. */
 .focus-fade { position: absolute; left: 0; right: 0; bottom: 0; height: 48px; pointer-events: none; background: linear-gradient(to bottom, color-mix(in srgb, var(--paper) 0%, transparent), var(--paper)); }
 /* The lane's slides as numbers: changed ones filled, refused ones struck, the one on screen ringed. A click unfolds the strips. */
@@ -203,7 +215,32 @@ button { font: inherit; }
 .strip-cell[aria-current='true'] { outline: 2px solid var(--ink); outline-offset: 2px; }
 .focus-side { min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); }
 .focus-side > [data-testid='thread'] { flex: 1; }
-/* Before/after side by side as long as two 320px cards fit the body, stacked below; each card takes its column's width. */
-/* 1fr, not a 450px max: auto-fit counts its columns with the max, and two 450px cards miss the 1440px work column by 12px. */
-.focus-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); max-width: 924px; gap: 24px; }
-.focus-pair > [data-testid='slide-preview'] { width: 100% !important; flex: none !important; }
+/*
+ * Before/after across the whole body width. Narrow, side by side as long as two 320px cards fit, stacked below. From
+ * 1280px the lane's proposal (what is decided) takes 7/12 of the body and main's slide 5/12, so the larger render is
+ * 40% of a 1440px viewport even beside the 320px thread; a side with nothing to show (insert, remove) slims to a
+ * 240px column and the other render takes the rest. A render never runs taller than the body.
+ */
+.focus-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+.focus-layout[data-columns='2'] .focus-pair[data-shape='both'] { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); }
+.focus-layout[data-columns='2'] .focus-pair[data-shape='before'] { grid-template-columns: minmax(0, 1fr) 240px; }
+.focus-layout[data-columns='2'] .focus-pair[data-shape='after'] { grid-template-columns: 240px minmax(0, 1fr); }
+.focus-pair > [data-testid='slide-preview'] { width: 100% !important; flex: none !important; max-width: calc((100cqh - 90px) * 16 / 9 + 24px); }
+/* Text diffs in columns across the body, each under 80 characters: freed width goes to the renders and more fields, not longer lines. */
+.focus-diffs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 14px 32px; align-items: start; }
+/*
+ * A move: main's whole strip over the lane's, the moved slide twice its neighbours and each strip scrolled to it. One
+ * unit (a neighbour's width in the lane strip) fits both strips, the reason line and their gaps in the body's height,
+ * and stays under 31% of the body's width so neighbours show on each side; main's strip is 0.7 of the lane's.
+ */
+.focus-move {
+  display: flex; flex-direction: column; gap: 12px;
+  --move-u: max(96px, min(calc((100cqh - 120px) / 1.92), calc((100cqw - 108px) * 0.31)));
+}
+.move-strip { margin: 0; display: grid; grid-template-columns: 96px minmax(0, 1fr); column-gap: 12px; align-items: center; }
+.move-strip[data-side='main'] { --move-s: 0.7; }
+.move-strip[data-side='lane'] { --move-s: 1; }
+.move-caption { font-size: var(--fs-meta); line-height: 16px; color: var(--grey); }
+.move-strip[data-side='lane'] .move-caption { color: var(--ink); font-weight: 500; }
+.move-strip-list { position: relative; display: flex; align-items: flex-end; gap: var(--col-gap); overflow-x: auto; padding: 6px 6px 4px; scrollbar-width: thin; }
+.move-strip-item { flex: none; --thumb-w: calc(var(--move-u) * var(--move-s) * var(--move-k, 1)); --thumb-h: calc(var(--thumb-w) * 9 / 16); }
