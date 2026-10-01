@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { contextHeader, replyInstruction, replyLanguage, SYSTEM_APPEND, themeClasses } from '../../src/agent/prompts.js';
 import type { Brief, Lane, Remark, Slide, Snapshot } from '../../src/model/types.js';
+import { DEFAULT_THEME_CSS } from '../../src/render/defaultTheme.js';
 
 const brief: Brief = { title: 'Deck', audience: 'devs', message: 'one log', pattern: 'solution-first', abstract: 'abs', design: { rules: '', imageStyle: '' } };
 const slide = (id: string): Slide => ({ id, title: `Title ${id}`, story: `story of ${id}`, notes: '', body: `<p>${id}</p>`, assets: [], kind: 'text' });
@@ -176,11 +177,11 @@ describe('design rules', () => {
     expect(h.indexOf('Design rules')).toBeLessThan(h.indexOf('Deck outline'));
   });
 
-  it('no Design rules block when the brief has no rules', () => {
+  it('no Design rules block when the brief has no rules, but the theme classes are still listed (a new deck drafts with them)', () => {
     const blank = { ...brief, design: { rules: '  \n', imageStyle: 'x' } };
     const h = contextHeader({ thread: 'global', anchor: null, snapshot, brief: blank, themeCss: css });
     expect(h).not.toContain('Design rules');
-    expect(h).not.toContain('Theme classes');
+    expect(h).toContain('Theme classes in theme.css (reuse them instead of inline styles): .big, .cap, .code, .kw, .st, .strata, .thin\n');
   });
 
   it('lane, remark and slide threads carry the same block', () => {
@@ -221,5 +222,81 @@ describe('reply language, decided per message', () => {
     expect(replyLanguage('shorter title', fr)).toBe('fr');
     expect(replyLanguage('titre court', en)).toBe('en');
     expect(replyLanguage('ok', { ...brief, message: '' })).toBe('en');
+  });
+});
+
+describe('an empty deck', () => {
+  const empty: Snapshot = { order: [], slides: {} };
+  const newDeck: Brief = {
+    title: 'Quarterly planning',
+    audience: 'the product team',
+    message: 'Fewer bets, finished',
+    pattern: 'problem-driven',
+    abstract: 'Why we drop half the roadmap.',
+    design: { rules: '', imageStyle: '' },
+  };
+
+  it('the header says the deck has no slides yet, with the whole brief and a drafting instruction', () => {
+    const h = contextHeader({ thread: 'global', anchor: null, snapshot: empty, brief: newDeck, themeCss: '.big{}.cap{}' });
+    expect(h).toContain('This deck has no slides yet.');
+    expect(h).toContain('Brief: "Quarterly planning" for the product team. Message: Fewer bets, finished. Pattern: problem-driven.');
+    expect(h).toContain('Abstract: Why we drop half the roadmap.');
+    expect(h).toContain('Theme classes in theme.css (reuse them instead of inline styles): .big, .cap');
+    expect(h).not.toContain('Deck outline');
+    expect(h).toMatch(/Instruction: .*draft.*propose_lane once on the arc.*8 to 15 inserts/i);
+    expect(h).not.toContain('six sentences');
+  });
+
+  it('a deck with slides keeps its outline and gets no drafting instruction', () => {
+    const h = contextHeader({ thread: 'global', anchor: null, snapshot, brief });
+    expect(h).toContain('Deck outline');
+    expect(h).not.toContain('no slides yet');
+    expect(h).not.toMatch(/8 to 15 inserts/);
+  });
+
+  it('SYSTEM_APPEND has the drafting rule: one arc lane of 8 to 15 chained inserts, full slides, a titles-only reply', () => {
+    const at = SYSTEM_APPEND.indexOf('# Drafting');
+    expect(at).toBeGreaterThan(0);
+    const rule = SYSTEM_APPEND.slice(at, SYSTEM_APPEND.indexOf('\n# ', at + 1));
+    expect(rule).toMatch(/no slides yet, or the creator asks for an outline, a draft or a skeleton/);
+    expect(rule).toMatch(/propose_lane once, anchored on the arc, with 8 to 15 inserts/);
+    expect(rule).toMatch(/first insert has after: null/);
+    expect(rule).toMatch(/after set to the ref of the insert before it/);
+    expect(rule).toMatch(/claim title in sentence case, a story line, speaker notes and a body/);
+    expect(rule).toMatch(/theme classes/);
+    expect(rule).toMatch(/default theme: a \.content block holding a \.big claim and a \.cap line/);
+    expect(rule).toMatch(/\.code card when the creator asks for code/);
+    expect(rule).toMatch(/never a bullet list and never markdown/i);
+    expect(rule).toMatch(/images only when the creator asks for them \(generate_image\), or when a slide is a diagram by nature and the brief has an image style/i);
+    expect(rule).toMatch(/names the outline in one line, then gives the slide titles in deck order, one per line, and nothing else/);
+    expect(rule).toMatch(/audience, its message, its pattern and its abstract/);
+  });
+});
+
+describe('the default theme', () => {
+  it('has the classes a drafted text slide uses: a content area under the title, a claim, a caption, a code card', () => {
+    expect(themeClasses(DEFAULT_THEME_CSS)).toEqual(expect.arrayContaining(['content', 'big', 'cap', 'code']));
+    expect(DEFAULT_THEME_CSS).toMatch(/\.content\{position:absolute;left:96px;right:96px;top:186px;bottom:96px;/);
+  });
+});
+
+describe('no topic of a particular deck in the prompts', () => {
+  // Words of the deck the product was first built on: none of them may leak into what every deck's co-author reads.
+  const TOPIC = /kafka|flink|summit|share group|interactive quer|compacted topic|trigger sub-caption|san francisco/i;
+
+  it('SYSTEM_APPEND and every thread header are topic-free', () => {
+    expect(SYSTEM_APPEND).not.toMatch(TOPIC);
+    for (const thread of ['global', 'lane:l1', 'remark:r1', 'slide:s3'] as const) {
+      expect(contextHeader({ thread, anchor: null, snapshot, lane, remark, brief })).not.toMatch(TOPIC);
+    }
+  });
+
+  it('no source file of the co-author or the checks names a topic', async () => {
+    const { readdir, readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const root = join(import.meta.dirname, '..', '..', 'src', 'agent');
+    const files = (await readdir(root, { recursive: true })).filter((f) => f.endsWith('.ts'));
+    expect(files.length).toBeGreaterThan(5);
+    for (const f of files) expect([f, (await readFile(join(root, f), 'utf8')).match(TOPIC)?.[0] ?? null]).toEqual([f, null]);
   });
 });

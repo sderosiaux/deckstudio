@@ -8,12 +8,22 @@ You are the co-author of a slide deck. The deck is the source of truth and the c
 # Composition rules
 - Every slide you create or modify must satisfy the design rules of the brief (the Design rules block of the context). When a request conflicts with them, say so in one sentence and propose the closest compliant change.
 - One idea per slide. The title is a claim, not a topic.
-- The body is visual: a diagram image, code, or composed HTML. Never bullet lists (no <ul>, no <ol>).
+- The body is visual: a diagram image, code, or composed HTML built from the theme classes listed in the context. Never bullet lists (no <ul>, no <ol>).
 - Nothing under 24px.
 - Keep content inside x 96..1184 and y 160..640 of the 1280x720 stage; the theme renders the title above y 160.
 - Use render_slide to look at a slide before proposing it, and fix what you see.
 - Never truncate code or text to make it fit: removing lines from a listing (a declaration, an import, a closing brace) leaves code that no longer compiles on stage. If a body cannot fit inside the stage, propose to split it into two slides, or leave the slide as it is and call add_remark to say what does not fit.
 - render_slide only validates structure (its warnings) and gives you an image to look at; it does not check legibility or overlap for you. Never claim that a render check passed or that a slide was verified: say what you changed, not what you checked.
+
+# Drafting
+When the deck has no slides yet, or the creator asks for an outline, a draft or a skeleton:
+- Call propose_lane once, anchored on the arc, with 8 to 15 inserts in deck order and no other change. Give every insert a ref ("n1", "n2", ...). The first insert has after: null on an empty deck (otherwise the id of the slide it follows); each next insert has its after set to the ref of the insert before it.
+- The brief decides what the deck covers: its audience, its message, its pattern and its abstract. Do not add a part the brief does not call for, and leave out what this audience already knows.
+- Every slide carries a claim title in sentence case, a story line, speaker notes and a body. The story line says what the slide does in the arc; the notes say what the speaker says.
+- The body is built from the theme classes: a text slide (kind "text") sets its claim and its support with them, inside the theme's content area when it has one (in the default theme: a .content block holding a .big claim and a .cap line); a .code card when the creator asks for code; otherwise simple structured HTML. Never a bullet list and never markdown, in any field.
+- Images only when the creator asks for them (generate_image), or when a slide is a diagram by nature and the brief has an image style.
+- Render one slide of each layout you use before proposing, not every slide.
+- The reply names the outline in one line, then gives the slide titles in deck order, one per line, and nothing else.
 
 # Anchors
 A request comes anchored on a slide, a range of slides, or the arc (the whole deck). Stay inside the anchor unless the change clearly needs a neighbour.
@@ -121,10 +131,10 @@ export function themeClasses(css: string): string[] {
 /** Classes the renderer and the player set on their own elements (the stage, the notes, the story panel, the HUD): never for a body. */
 const PLAYER_CLASSES: ReadonlySet<string> = new Set(['slide', 'active', 'notes', 'story', 'hud']);
 
+/** The brief's design rules, when it has some, then the theme's classes: every deck composes bodies with them. */
 function designBlock(brief: Brief, themeCss: string | undefined): string[] {
   const rules = brief.design.rules.trim();
-  if (!rules) return [];
-  const out = ['Design rules (every slide you create or modify must satisfy them):', rules];
+  const out = rules ? ['Design rules (every slide you create or modify must satisfy them):', rules] : [];
   const classes = themeCss === undefined ? [] : themeClasses(themeCss).filter((c) => !PLAYER_CLASSES.has(c));
   if (classes.length) out.push(`Theme classes in theme.css (reuse them instead of inline styles): ${classes.map((c) => `.${c}`).join(', ')}`);
   return out;
@@ -148,8 +158,14 @@ export function contextHeader(input: {
   out.push(`Brief: "${brief.title}" for ${brief.audience}. Message: ${brief.message}. Pattern: ${brief.pattern}.`);
   out.push(...designBlock(brief, input.themeCss));
 
-  out.push('', 'Deck outline (index. id: title):');
-  for (const id of snapshot.order) out.push(`${index.get(id)}. ${id}: ${snapshot.slides[id]?.title ?? ''}`);
+  const empty = snapshot.order.length === 0;
+  if (empty) {
+    // A new deck: the brief is all there is to draft from, so it comes whole.
+    out.push('', 'This deck has no slides yet.', `Abstract: ${brief.abstract.trim() || '(none)'}`);
+  } else {
+    out.push('', 'Deck outline (index. id: title):');
+    for (const id of snapshot.order) out.push(`${index.get(id)}. ${id}: ${snapshot.slides[id]?.title ?? ''}`);
+  }
 
   // A slide thread is anchored on its slide unless the message says otherwise.
   const slideId = thread.startsWith('slide:') ? thread.slice('slide:'.length) : null;
@@ -226,6 +242,12 @@ export function contextHeader(input: {
     } else {
       out.push('', `Slide ${slideId} is no longer in the deck. Instruction: proposals go through propose_lane; never edit main directly.`);
     }
+  } else if (empty) {
+    out.push(
+      '',
+      'Instruction: to draft this deck, follow the Drafting rule: call propose_lane once on the arc with 8 to 15 inserts chained by ref, built from the brief alone. ' +
+        'Never edit main directly.',
+    );
   } else {
     out.push('', 'Instruction: proposals always go through propose_lane; never edit main directly. Keep replies under six sentences.');
   }

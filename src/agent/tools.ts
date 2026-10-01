@@ -31,11 +31,28 @@ export const LinkRemarkLaneInputSchema = z.object({ remarkId: z.string().min(1),
 
 const changeId = { id: z.string().min(1).optional().describe('id of the lane change this one revises; omit to match by kind and target slide') };
 const [insertIn, modifyIn, removeIn, moveIn] = NewChangeSchema.options;
-/** A NewChange that may name the lane change it revises. */
-export const RevisedChangeSchema = z.discriminatedUnion('kind', [insertIn.extend(changeId), modifyIn.extend(changeId), removeIn.extend(changeId), moveIn.extend(changeId)]);
+/** A ref names, inside one call, a slide an insert of that call creates: the model cannot know its id beforehand. */
+const REF = /^[A-Za-z][\w-]{0,31}$/;
+const AFTER_DESCRIPTION =
+  'the slide this one goes right after: an existing slide id, the ref of an insert listed earlier in this call, the slideId returned for an insert of this lane, or null for the first position';
+const insertTool = insertIn.extend({
+  ref: z
+    .string()
+    .regex(REF, 'a ref is a short name like "n1": a letter, then letters, digits, _ or -')
+    .optional()
+    .describe('a short name for the slide this insert creates ("n1"); a later change of the same call may use it as its after'),
+  after: z.string().nullable().describe(AFTER_DESCRIPTION),
+});
+const moveTool = moveIn.extend({ after: z.string().nullable().describe(AFTER_DESCRIPTION) });
+/** A NewChange as the co-author writes it: an insert may carry a ref that later changes of the call use as their after. */
+export const ToolChangeSchema = z.discriminatedUnion('kind', [insertTool, modifyIn, removeIn, moveTool]);
+export type ToolChange = z.infer<typeof ToolChangeSchema>;
+/** A ToolChange that may name the lane change it revises. */
+export const RevisedChangeSchema = z.discriminatedUnion('kind', [insertTool.extend(changeId), modifyIn.extend(changeId), removeIn.extend(changeId), moveTool.extend(changeId)]);
 export type RevisedChange = z.infer<typeof RevisedChangeSchema>;
 /** propose_lane's input: a lane, and whether the creator asked for an alternative to an existing lane. */
 export const ProposeLaneToolSchema = ProposeLaneInputSchema.extend({
+  changes: z.array(ToolChangeSchema).min(1),
   alternative: z
     .boolean()
     .optional()
@@ -106,10 +123,23 @@ function anchorProblem(snap: Snapshot, anchor: Anchor): string | null {
   return unknown.length ? `anchor references unknown slide id(s): ${unknown.join(', ')}. Call get_deck for the current ids.` : null;
 }
 
-function refProblems(snap: Snapshot, c: NewChange): string[] {
+/** What the lane inserts, as seen from one of its changes. */
+interface LaneSlides {
+  /** Slides inserted by earlier changes of the lane: an `after` may name them. */
+  inserted: ReadonlySet<string>;
+  /** Slides inserted by changes listed after this one. */
+  later?: ReadonlySet<string>;
+  /** Slide id -> the ref the model wrote for it, so errors use the model's own words. */
+  names?: ReadonlyMap<string, string>;
+}
+
+function refProblems(snap: Snapshot, c: NewChange | Change, lane: LaneSlides = { inserted: new Set() }): string[] {
   const reasons: string[] = [];
-  const ref = (id: string | null, role: string) => {
-    if (id !== null && !has(snap, id)) reasons.push(`${role} slide "${id}" does not exist in the current deck`);
+  const ref = (id: string | null, role: 'after' | 'target') => {
+    if (id === null || has(snap, id) || (role === 'after' && lane.inserted.has(id))) return;
+    const name = lane.names?.get(id) ?? id;
+    if (role === 'after' && lane.later?.has(id)) reasons.push(`after slide "${name}" is inserted later in this lane: list each insert after the one it follows`);
+    else reasons.push(`${role} slide "${name}" does not exist in the current deck`);
   };
   switch (c.kind) {
     case 'insert': {
@@ -139,12 +169,12 @@ function refProblems(snap: Snapshot, c: NewChange): string[] {
   return reasons;
 }
 
-/** Gives ids and a pending status to AI-proposed changes. */
-function materialize(c: NewChange): Change {
+/** Gives ids and a pending status to AI-proposed changes; an insert takes `slideId` when its id was given up front. */
+function materialize(c: NewChange, slideId: string = newId('s')): Change {
   const base = { id: newId('c'), status: 'pending' as const, reason: c.reason };
   switch (c.kind) {
     case 'insert':
-      return { ...base, kind: 'insert', after: c.after, slide: { id: newId('s'), ...c.slide } };
+      return { ...base, kind: 'insert', after: c.after, slide: { id: slideId, ...c.slide } };
     case 'modify':
       return { ...base, kind: 'modify', slide: c.slide, patch: c.patch };
     case 'remove':
@@ -154,23 +184,77 @@ function materialize(c: NewChange): Change {
   }
 }
 
+interface BoundRefs {
+  /** The input without refs, each `after` that named a ref now naming that insert's slide id. */
+  changes: RevisedChange[];
+  /** The slide id each insert of the input will create (undefined for other kinds). */
+  slideIds: (string | undefined)[];
+  /** Slide id -> ref, for error messages. */
+  names: Map<string, string>;
+  /** Per input index, what is wrong with its ref, if anything. */
+  problems: (string | null)[];
+}
+
+/**
+ * Gives every insert its slide id up front and rewrites each `after` that names a ref of the call to that id, so a
+ * chain of inserts (an outline: n1 first, n2 after n1, ...) is proposed in one call. A ref is unique in the call and
+ * never shadows a slide id of the deck, so an `after` reads one way only.
+ */
+function bindRefs(snap: Snapshot, input: readonly RevisedChange[]): BoundRefs {
+  const byRef = new Map<string, string>();
+  const names = new Map<string, string>();
+  const problems: (string | null)[] = input.map(() => null);
+  const slideIds = input.map((c, i) => {
+    if (c.kind !== 'insert') return undefined;
+    const id = newId('s');
+    if (c.ref === undefined) return id;
+    if (byRef.has(c.ref)) problems[i] = `ref "${c.ref}" is already used by another insert of this call; give each insert its own ref`;
+    else if (Object.hasOwn(snap.slides, c.ref) || snap.order.includes(c.ref)) problems[i] = `ref "${c.ref}" is the id of a slide of the deck; pick another ref`;
+    else {
+      byRef.set(c.ref, id);
+      names.set(id, c.ref);
+    }
+    return id;
+  });
+  const resolve = (after: string | null): string | null => (after !== null ? (byRef.get(after) ?? after) : null);
+  const changes = input.map((c): RevisedChange => {
+    if (c.kind === 'insert') {
+      const { ref: _ref, ...rest } = c;
+      return { ...rest, after: resolve(c.after) };
+    }
+    return c.kind === 'move' ? { ...c, after: resolve(c.after) } : c;
+  });
+  return { changes, slideIds, names, problems };
+}
+
+/** `text` with every slide id of `names` replaced by the ref the model wrote for it. */
+const named = (text: string, names: ReadonlyMap<string, string>): string => [...names].reduce((t, [id, ref]) => t.replaceAll(id, `"${ref}"`), text);
+
 /**
  * Checks each change against the current deck, then replays them in order so a lane that
  * contradicts itself (remove s3, then modify s3) is caught before the creator sees it.
+ * An insert may follow a slide inserted by an earlier change of the same lane (by ref).
  */
-function checkChanges(snap: Snapshot, input: NewChange[]): { changes: Change[]; invalid: Invalid[] } {
-  const changes = input.map(materialize);
+function checkChanges(snap: Snapshot, input: readonly RevisedChange[]): { changes: Change[]; invalid: Invalid[] } {
+  const bound = bindRefs(snap, input);
+  const changes = bound.changes.map((c, i) => materialize(c, bound.slideIds[i]));
+  const later = new Set(bound.slideIds.filter((id): id is string => id !== undefined));
+  const inserted = new Set<string>();
   const invalid: Invalid[] = [];
   let sim = snap;
-  input.forEach((c, index) => {
-    const reasons = refProblems(snap, c);
+  bound.changes.forEach((c, index) => {
+    const id = bound.slideIds[index];
+    if (id !== undefined) later.delete(id);
+    const problem = bound.problems[index];
+    const reasons = [...(problem ? [problem] : []), ...refProblems(snap, c, { inserted, later, names: bound.names })];
+    if (id !== undefined) inserted.add(id);
     if (reasons.length) {
       invalid.push({ index, reason: reasons.join('; ') });
       return;
     }
     const r = applyChange(sim, changes[index]!);
     if (r.ok) sim = r.next;
-    else invalid.push({ index, reason: `conflicts with an earlier change in this lane: ${r.error}` });
+    else invalid.push({ index, reason: named(`conflicts with an earlier change in this lane: ${r.error}`, bound.names) });
   });
   return { changes, invalid };
 }
@@ -187,6 +271,10 @@ function summarize(c: Change): string {
       return `move ${c.slide} ${c.after ? `after ${c.after}` : 'to the start'}`;
   }
 }
+
+/** One line per change in a tool result; an insert also gives the id of the slide it creates (a later after may name it). */
+const described = (c: Change): { id: string; summary: string; slideId?: string } =>
+  c.kind === 'insert' ? { id: c.id, summary: summarize(c), slideId: c.slide.id } : { id: c.id, summary: summarize(c) };
 
 /** The slide a change is about: what a revision without an id is matched on, with its kind. */
 function targetOf(c: NewChange | Change): string | null {
@@ -221,7 +309,7 @@ const stripId = <T extends object>(o: T): Omit<T, 'id'> => {
  * pending (or orphan) change it names by id, else the first one of the same kind on the same target, else it is new.
  * Unmentioned pending changes stay with their ids, unless `replace` drops them.
  */
-function planRevision(lane: Lane, input: RevisedChange[], replace: boolean): RevisionPlan {
+function planRevision(lane: Lane, input: RevisedChange[], replace: boolean, slideIds: readonly (string | undefined)[] = []): RevisionPlan {
   const open = lane.changes.filter((c) => c.status === 'pending' || c.status === 'orphan');
   const invalid: Invalid[] = [];
   const matched = new Map<string, number>();
@@ -267,12 +355,20 @@ function planRevision(lane: Lane, input: RevisedChange[], replace: boolean): Rev
   const added: string[] = [];
   input.forEach((c, index) => {
     if (used.has(index)) return;
-    const fresh = materialize(stripId(c) as NewChange);
+    const fresh = materialize(stripId(c) as NewChange, slideIds[index]);
     changes.push(fresh);
     sourceIndex.push(index);
     added.push(fresh.id);
   });
-  return { changes, sourceIndex, kept, updated, added, dropped, invalid };
+  // A revised insert keeps its slide id, not the one given up front: an `after` of this call naming the latter follows it.
+  const renamed = new Map<string, string>();
+  for (const [oldId, index] of matched) {
+    const old = lane.changes.find((x) => x.id === oldId)!;
+    const given = slideIds[index];
+    if (old.kind === 'insert' && given !== undefined) renamed.set(given, old.slide.id);
+  }
+  const follow = (c: Change): Change => ((c.kind === 'insert' || c.kind === 'move') && c.after !== null && renamed.has(c.after) ? { ...c, after: renamed.get(c.after)! } : c);
+  return { changes: changes.map(follow), sourceIndex, kept, updated, added, dropped, invalid };
 }
 
 /**
@@ -321,22 +417,30 @@ async function createLocked(ctx: LockedStore, input: ProposeLaneInput, as: { ori
   };
   await store.putLane(lane);
   bus.emit({ type: 'lane.created', laneId: lane.id });
-  return { laneId: lane.id, changes: changes.map((c) => ({ id: c.id, summary: summarize(c) })) };
+  return { laneId: lane.id, changes: changes.map(described) };
 }
 
 /** Call under the deck lock: merges a revision into a lane that is not closed, validated against current main. */
 async function reviseLocked(ctx: LockedStore, lane: Lane, input: RevisedChange[], replace: boolean): Promise<object> {
   const { store, bus } = ctx;
   const [state, snap] = await Promise.all([store.state(), store.snapshot()]);
-  const plan = planRevision(lane, input, replace);
+  const bound = bindRefs(snap, input);
+  const refErrors = bound.problems.flatMap((reason, index) => (reason ? [{ index, reason }] : []));
+  if (refErrors.length) return rejected(refErrors);
+  const plan = planRevision(lane, bound.changes, replace, bound.slideIds);
   if (plan.invalid.length) return rejected(plan.invalid);
-  const refs = input.flatMap((c, index) => {
-    const reasons = refProblems(snap, c);
+  // An `after` may name any slide the lane inserts; whether it comes before is the replay's call, in lane order.
+  const inserted = new Set([
+    ...plan.changes.flatMap((c) => (c.kind === 'insert' ? [c.slide.id] : [])),
+    ...bound.slideIds.filter((id): id is string => id !== undefined),
+  ]);
+  const refs = bound.changes.flatMap((c, index) => {
+    const reasons = refProblems(snap, c, { inserted, names: bound.names });
     return reasons.length ? [{ index, reason: reasons.join('; ') }] : [];
   });
   if (refs.length) return rejected(refs);
   // The pending changes replay in lane order on current main, so a revision that contradicts a kept change is caught.
-  const conflicts = replay(snap, plan.changes, plan.sourceIndex);
+  const conflicts = replay(snap, plan.changes, plan.sourceIndex).map((x) => ({ ...x, reason: named(x.reason, bound.names) }));
   if (conflicts.length) return rejected(conflicts);
   // Validated against the current main, so the lane now bases on it.
   const next: Lane = { ...lane, baseVersion: state.version, changes: plan.changes };
@@ -348,7 +452,7 @@ async function reviseLocked(ctx: LockedStore, lane: Lane, input: RevisedChange[]
     updated: plan.updated,
     added: plan.added,
     dropped: plan.dropped,
-    changes: plan.changes.map((c) => ({ id: c.id, summary: summarize(c) })),
+    changes: plan.changes.map(described),
   };
 }
 
@@ -545,7 +649,9 @@ export function makeDeckTools(ctx: DeckToolContext): { server: McpSdkServerConfi
       ),
       tool(
         'propose_lane',
-        'Propose a lane: a labelled, coherent set of changes (insert/modify/remove/move) anchored on a slide, a range, or the arc, with a one-line reason per change. Slide ids must exist; insert.after/move.after may be null for "first". Invalid input is rejected with the offending change indexes and nothing is saved. ' +
+        'Propose a lane: a labelled, coherent set of changes (insert/modify/remove/move) anchored on a slide, a range, or the arc, with a one-line reason per change. Slide ids must exist; insert.after/move.after may be null for "first". ' +
+          'To insert several slides in a row (an outline, or a whole deck when it has no slides yet), give each insert a ref ("n1", "n2", ...) and set the after of the next insert to the ref of the one before; the result gives the slideId of every insert. ' +
+          'Invalid input is rejected with the offending change indexes and nothing is saved. ' +
           'A proposal that repeats an open lane (same anchor and label, or the same slide field changed by a recent lane on that anchor) revises that lane instead: the result then says revisedExisting. Set alternative: true only when the creator asked for an alternative.',
         ProposeLaneToolSchema.shape,
         wrap(h.propose_lane),

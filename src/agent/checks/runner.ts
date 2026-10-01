@@ -28,6 +28,8 @@ const DEFAULT_DEBOUNCE_MS = 3000;
 const THUMB_CHECK_MAX_TURNS = 6;
 /** Lanes one check keeps attached to its remarks after a run; the other remarks get no lane. */
 export const MAX_LANES_PER_RUN = 3;
+/** The status note of a run on a deck without slides: nothing to judge, so no model call. */
+export const NO_SLIDES_NOTE = 'no slides yet';
 
 /**
  * What the runner remembers across restarts, in the deck's cache dir: when each check last ended, and for the
@@ -36,6 +38,7 @@ export const MAX_LANES_PER_RUN = 3;
  */
 const MemoSchema = z.object({
   lastRun: z.record(z.string(), z.string().nullable()).default({}),
+  note: z.record(z.string(), z.string().nullable()).default({}),
   render: z.object({ key: z.string(), slides: z.record(z.string(), z.string()) }).nullable().default(null),
 });
 type Memo = z.infer<typeof MemoSchema>;
@@ -185,6 +188,7 @@ export class CheckRunner {
   /** The queued or running deck-wide run of each check, which a new unscoped run of that name joins. */
   private readonly pending = new Map<CheckName, Promise<CheckRunResult>>();
   private readonly lastRun: Record<CheckName, string | null> = { arc: null, order: null, gaps: null, render: null };
+  private readonly note: Record<CheckName, string | null> = { arc: null, order: null, gaps: null, render: null };
   /** Memo reads and writes, in call order. */
   private memoChain: Promise<unknown>;
   /** The after-accept batch queued or running; an accept meanwhile only marks it dirty. */
@@ -199,7 +203,11 @@ export class CheckRunner {
     this.queryImpl = opts.queryImpl ?? query;
     // lastRun from before a restart; a run that ends meanwhile keeps its newer stamp.
     this.memoChain = this.readMemo().then((m) => {
-      for (const name of CHECK_NAMES) this.lastRun[name] ??= m.lastRun[name] ?? null;
+      for (const name of CHECK_NAMES) {
+        if (this.lastRun[name] !== null) continue;
+        this.lastRun[name] = m.lastRun[name] ?? null;
+        this.note[name] = m.note[name] ?? null;
+      }
     });
   }
 
@@ -239,7 +247,7 @@ export class CheckRunner {
 
   /** `running` lists the checks whose run has started; a run queued behind another is not reported. */
   status(): ChecksStatus {
-    return { running: CHECK_NAMES.filter((n) => this.started.has(n)), lastRun: { ...this.lastRun } };
+    return { running: CHECK_NAMES.filter((n) => this.started.has(n)), lastRun: { ...this.lastRun }, note: { ...this.note } };
   }
 
   scheduleAfterAccept(): void {
@@ -372,6 +380,15 @@ export class CheckRunner {
     const { store } = this.opts;
     await this.tidyRemarks();
     const [brief, main] = await Promise.all([store.brief(), store.snapshot()]);
+    if (main.order.length === 0) {
+      // Nothing to judge: no model call. The check's earlier remarks (a failure, findings on slides now gone) are superseded.
+      const target: Target = { def: CHECKS[name], brief, snap: main, validIds: new Set(), order: [], allowLanes: false, laneId: null, scopeIds: null };
+      try {
+        return await this.persist(target, []);
+      } finally {
+        await this.stamp(name, NO_SLIDES_NOTE);
+      }
+    }
     let ids = scope ? slidesInRange(main.order, scope) : main.order;
     let scopeIds: ReadonlySet<SlideId> | null = scope && scope.kind !== 'arc' ? new Set(ids) : null;
     let afterSuccess: (() => Promise<void>) | undefined;
@@ -409,11 +426,12 @@ export class CheckRunner {
     });
   }
 
-  /** Records that `name` just ended a run, in memory and in the memo. Never rejects. */
-  private stamp(name: CheckName): Promise<void> {
+  /** Records that `name` just ended a run, with a status note or none, in memory and in the memo. Never rejects. */
+  private stamp(name: CheckName, note: string | null = null): Promise<void> {
     const at = new Date().toISOString();
     this.lastRun[name] = at;
-    return this.updateMemo((m) => ({ ...m, lastRun: { ...m.lastRun, [name]: at } }));
+    this.note[name] = note;
+    return this.updateMemo((m) => ({ ...m, lastRun: { ...m.lastRun, [name]: at }, note: { ...m.note, [name]: note } }));
   }
 
   /** Render check on the slides a lane changes, as they look with the lane's pending changes applied. */

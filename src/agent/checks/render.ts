@@ -4,7 +4,7 @@ export const render: CheckDef = {
   name: 'render',
   needsThumbs: true,
   system:
-    'You review rendered slides (1280x720 screenshots) of a conference deck for legibility, composition, and the design rules of its creator when given. ' +
+    'You review rendered slides (1280x720 screenshots) of a slide deck for legibility, composition, and the design rules of its creator when given. ' +
     'You look at every image you are given before judging. Your final answer is JSON only.',
   buildPrompt({ brief, snap, deckOrder, thumbs, allowLanes }) {
     const rules = designRulesBlock(brief);
@@ -28,6 +28,11 @@ Read every image path above with the Read tool (several per turn), then judge ea
       rules
         ? '\n- a slide that violates one of the design rules above: a "warn" remark that names the rule it breaks (quote it or paraphrase it closely) and what on the slide breaks it. One remark per rule broken.'
         : ''
+    }
+${
+      rules
+        ? 'Judge colours, fonts and layout only against the design rules above, never against a palette or a style of your own.'
+        : 'The brief has no design rules: judge legibility and composition only, never a palette or a style of your own.'
     }
 One remark per problem, anchored on the slide ({ "kind": "slide", "slide": "<id>" }). Use "warn" for overflow, unreadable text, lists${rules ? ', and broken design rules' : ''}; "info" otherwise. Never report the same problem twice on one slide. Say nothing about slides that are fine.
 ${
