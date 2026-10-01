@@ -1,4 +1,4 @@
-import type { Anchor, Brief, DeckState, DiffEntry, Lane, Remark, Slide, SlideId, Snapshot, ThreadKey, ThreadMessage, Version } from '../../src/model/types.js';
+import type { Anchor, Brief, Change, DeckState, DiffEntry, Lane, Remark, Slide, SlideId, Snapshot, ThreadKey, ThreadMessage, Version } from '../../src/model/types.js';
 import type { BusEvent as ServerBusEvent } from '../../src/server/bus.js';
 import type { DesignInfo } from '../../src/server/routes/brief.js';
 import type { CheckName, ChecksStatus } from '../../src/server/routes/checks.js';
@@ -105,9 +105,16 @@ export function thumbUrl(hash: string): string {
 
 export type LaneFilter = 'draft' | 'open' | 'all';
 
+/**
+ * A change as GET /api/lanes and /api/lanes/:id send it: a pending modify also lists `variantOf`, the ids of the other
+ * open lanes with a pending modify on the same slide and field. Computed by the server at read time, never stored.
+ */
+export type LaneChange = Change & { variantOf?: string[] };
+export type LanePayload = Omit<Lane, 'changes'> & { changes: LaneChange[] };
+
 /** Open lanes by default; `draft` lists the lanes a check proposed that the creator has not opened yet, `all` includes closed ones. */
-export function getLanes(status?: LaneFilter): Promise<Lane[]> {
-  return getJson<Lane[]>(status ? `/api/lanes?status=${status}` : '/api/lanes');
+export function getLanes(status?: LaneFilter): Promise<LanePayload[]> {
+  return getJson<LanePayload[]>(status ? `/api/lanes?status=${status}` : '/api/lanes');
 }
 
 /** Turns a draft lane into an open one; `lane.updated` follows. */
@@ -116,8 +123,8 @@ export async function openLane(laneId: string): Promise<void> {
 }
 
 /** One lane by id, open or closed. */
-export function getLane(laneId: string): Promise<Lane> {
-  return getJson<Lane>(`/api/lanes/${seg(laneId)}`);
+export function getLane(laneId: string): Promise<LanePayload> {
+  return getJson<LanePayload>(`/api/lanes/${seg(laneId)}`);
 }
 
 /** Also enqueues the thumbnails of the lane's changed slides; `thumb.ready` follows for each. */

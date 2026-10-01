@@ -128,7 +128,7 @@ describe('Thread replies carry their proposal', () => {
     const reply = screen.getAllByTestId('thread-message').find((m) => m.getAttribute('data-role') === 'assistant')!;
     const block = within(reply).getByTestId('thread-proposal');
     expect(block.getAttribute('data-lane')).toBe('l1');
-    const title = within(block).getByRole('link', { name: 'Shorter labels on the three jobs' });
+    const title = within(block).getByRole('link', { name: 'lane: Shorter labels on the three jobs' });
     expect(title.getAttribute('href')).toBe('/lane/l1/change/c1');
     fireEvent.click(title);
     expect(t.navigate).toHaveBeenLastCalledWith('/lane/l1/change/c1');
@@ -320,5 +320,63 @@ describe('Thread heading', () => {
     cleanup();
     render(<Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} title="Thread" />);
     expect(screen.getByRole('heading', { name: 'Thread' }).className).toBe('screen-title');
+  });
+});
+
+describe('Thread proposal cards (QA3)', () => {
+  it('a proposal card shows ~200px thumbs and one line per changed field, the arrow a glyph in a span, outside any button', async () => {
+    const both: Change = { id: 'c1', kind: 'modify', slide: 's2', patch: { title: 'One home already exists', notes: 'say it slowly', story: '' }, reason: 'one idea', status: 'pending' };
+    const lane = mkLane('l1', { kind: 'slide', slide: 's2' }, [both]);
+    const t = setup({ l1: lane });
+    const withNotes = { ...slides, s2: { ...slides.s2!, title: 'Two answers, one already exists', notes: 'old notes' } };
+    render(<Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={withNotes} api={t.api} subscribe={t.subscribe} navigate={t.navigate} layout="inline" />);
+    send('one idea');
+    await vi.waitFor(() => expect(t.api.postMessage).toHaveBeenCalled());
+    t.emit({ type: 'lane.created', laneId: 'l1' });
+    t.stored.push({ id: 'm2', thread: 'slide:s2', role: 'assistant', text: 'Proposed.', context: null, at: '2026-09-30T10:00:05.000Z' });
+    t.emit({ type: 'assistant.done', thread: 'slide:s2', messageId: 'm2' });
+    const change = await waitFor(() => screen.queryByTestId('proposal-change'));
+    const lines = within(change).getAllByTestId('field-diff');
+    // story '' equals main's '': no line for it.
+    expect(lines.map((l) => l.getAttribute('data-field'))).toEqual(['title', 'notes']);
+    expect(lines[0]!.textContent).toBe('title: Two answers, one already exists → One home already exists');
+    const arrow = within(lines[0]!).getByTestId('diff-arrow');
+    expect(arrow.tagName).toBe('SPAN');
+    expect(arrow.textContent).toBe('→');
+    expect(arrow.closest('button')).toBeNull();
+    for (const b of within(change).getAllByRole('button')) expect(b.textContent).not.toContain('→');
+    const previews = within(change).getAllByTestId('slide-preview');
+    expect(previews.map((p) => p.style.width)).toEqual(['200px', '200px']);
+  });
+
+  it('with onShowLane, "lane: <label>" is a control that shows the lane row instead of leaving the screen', async () => {
+    const t = setup({ l1: mkLane('l1', { kind: 'slide', slide: 's2' }, [onS2]) });
+    const show = vi.fn();
+    render(<Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} navigate={t.navigate} onShowLane={show} />);
+    send('x');
+    await vi.waitFor(() => expect(t.api.postMessage).toHaveBeenCalled());
+    t.emit({ type: 'lane.created', laneId: 'l1' });
+    t.stored.push({ id: 'm2', thread: 'slide:s2', role: 'assistant', text: 'ok', context: null, at: '2026-09-30T10:00:05.000Z' });
+    t.emit({ type: 'assistant.done', thread: 'slide:s2', messageId: 'm2' });
+    const lane = await waitFor(() => screen.queryByRole('button', { name: 'lane: Shorter labels on the three jobs' }));
+    fireEvent.click(lane);
+    expect(show).toHaveBeenCalledWith('l1');
+    expect(t.navigate).not.toHaveBeenCalled();
+  });
+
+  it('a stored reply gets the card of a lane created during its turn, without live events (a reload keeps it in place)', async () => {
+    const created = { ...mkLane('l1', { kind: 'slide', slide: 's2' }, [onS2]), createdAt: '2026-09-30T10:00:02.000Z' };
+    const older = { ...mkLane('l0', { kind: 'slide', slide: 's2' }, [onS2], 'Older'), createdAt: '2026-09-30T09:00:00.000Z' };
+    const t = setup({ l1: created, l0: older });
+    t.stored.push(
+      { id: 'u1', thread: 'slide:s2', role: 'user', text: 'shorter', context: { kind: 'slide', slide: 's2' }, at: '2026-09-30T10:00:00.000Z' },
+      { id: 'a1', thread: 'slide:s2', role: 'assistant', text: 'Proposed.', context: null, at: '2026-09-30T10:00:05.000Z' },
+    );
+    render(<Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} navigate={t.navigate} knownLanes={[older, created]} />);
+    const card = await waitFor(() => screen.queryByTestId('thread-proposal'));
+    expect(screen.getAllByTestId('thread-proposal')).toHaveLength(1);
+    expect(card.getAttribute('data-lane')).toBe('l1');
+    const reply = screen.getAllByTestId('thread-message').find((m) => m.getAttribute('data-role') === 'assistant')!;
+    expect(reply.contains(card)).toBe(true);
   });
 });

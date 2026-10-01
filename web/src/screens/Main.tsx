@@ -25,11 +25,12 @@ import {
   thumbUrl,
   type BusEvent,
   type DeckPayload,
+  type LanePayload,
   type LanePreviewPayload,
 } from '../api.js';
 import { END_W, EdgeFade, useVisibleColumns, type VisibleColumns } from '../components/EdgeFade.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { FAILED_THUMB, LaneRow, MoveRisers, anchorColumns } from '../components/LaneRow.js';
+import { FAILED_THUMB, LaneRow, MoveRisers, VariantRow, anchorColumns, variantGroups, type VariantGroup } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
 import { RemarkRow } from '../components/RemarkRow.js';
 import { ScreenHeader } from '../components/ScreenHeader.js';
@@ -51,6 +52,8 @@ interface Queued {
 }
 const emptyQueue = (): Queued => ({ deck: false, lanes: false, refresh: new Set(), closed: new Set() });
 const byCreated = (a: Lane, b: Lane): number => a.createdAt.localeCompare(b.createdAt);
+/** A lane with nothing left to decide (every change accepted, refused or stale) has no row on main. */
+const hasPending = (l: Lane): boolean => l.changes.some((c) => c.status === 'pending');
 /** Lane rows read newest first: the work just asked for sits right under the strip. */
 const newestFirst = (a: Lane, b: Lane): number => b.createdAt.localeCompare(a.createdAt);
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -71,17 +74,24 @@ const PANEL_MIN_COLS = 5;
 const PANEL_MAX_COLS = 9;
 /** Room kept between the panel's bottom and the canvas's visible bottom (the versions rail starts there). */
 const PANEL_CLEAR = 16;
+/** What lies above the panel besides the strip: the canvas's 8px top padding, the pin row (8px and its 10px gap), 2px of margin. */
+const PANEL_TOP = 28;
 /** The lane rows' grid starts 6px right of the gutter (their side padding). */
 const ROW_PAD = 6;
-/** sessionStorage key: the creator reopened the whole-deck conversation while a selection holds the panel. */
+/** sessionStorage key: whether the whole-deck bar is open (the default) or folded to its 40px rail. */
 const WHOLE_DECK_KEY = 'deckstudio.wholeDeck';
 const readWholeDeck = (): boolean => {
   try {
-    return sessionStorage.getItem(WHOLE_DECK_KEY) === 'open';
+    return sessionStorage.getItem(WHOLE_DECK_KEY) !== 'closed';
   } catch {
-    return false;
+    return true;
   }
 };
+/** The whole-deck bar's two fixed widths: the strip's columns never move when a slide is selected. */
+const BAR_OPEN_W = 360;
+const BAR_SHUT_W = 40;
+/** Remark cards the panel lists before "N more remarks": the conversation stays the larger part of the panel. */
+const PANEL_REMARKS = 3;
 const SLIDE_HINT = 'Ask the co-author about this slide: a sharper title, a tighter story, a diagram. Its proposal shows here with accept and refuse.';
 const RANGE_HINT = 'Ask the co-author about these slides. Only the messages sent on this range show here; the whole deck keeps its own conversation.';
 const DECK_HINT = 'Ask the co-author about the whole deck: its arc, its order, its pacing. Select a slide to talk about it right under the strip.';
@@ -174,6 +184,66 @@ export function StripPager({ visible, onPage }: { visible: VisibleColumns | null
   );
 }
 
+/**
+ * The selection's remarks: the first three, then "N more remarks" that grows the list in place (never a scroll box
+ * of its own, which cut cards and their actions). Remount it (key) to fold it again for another selection.
+ */
+function PanelRemarks({ remarks, card }: { remarks: readonly Remark[]; card(r: Remark): React.ReactNode }) {
+  const [all, setAll] = useState(false);
+  const shown = all ? remarks : remarks.slice(0, PANEL_REMARKS);
+  const rest = remarks.length - PANEL_REMARKS;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div data-testid="panel-remarks" className="panel-remarks" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {shown.map((r) => (
+          <div key={r.id} style={{ width: 280, maxWidth: '100%' }}>
+            {card(r)}
+          </div>
+        ))}
+      </div>
+      {rest > 0 ? (
+        <button type="button" className="link" aria-expanded={all} onClick={() => setAll((x) => !x)} style={{ alignSelf: 'flex-start', fontSize: 'var(--fs-meta)', color: 'var(--ink)' }}>
+          {all ? 'show fewer' : `${rest} more ${rest === 1 ? 'remark' : 'remarks'}`}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The selection panel's box: it scrolls as a whole past its max height, and while more lies below its visible bottom
+ * a fade says so. Measured after every render, on scroll, and when its content changes (messages arrive).
+ */
+function PanelBox({ style, children, ...rest }: React.HTMLAttributes<HTMLElement> & { 'data-testid': string; 'data-slide': string | undefined; 'data-kind': string }) {
+  const box = useRef<HTMLElement>(null);
+  const [more, setMore] = useState(false);
+  const measure = useCallback(() => {
+    const el = box.current;
+    if (el) setMore(el.scrollHeight - el.clientHeight - el.scrollTop > 1);
+  }, []);
+  useLayoutEffect(measure);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    el.addEventListener('scroll', measure, { passive: true });
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    ro?.observe(el);
+    const mo = typeof MutationObserver === 'undefined' ? null : new MutationObserver(measure);
+    mo?.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => {
+      el.removeEventListener('scroll', measure);
+      ro?.disconnect();
+      mo?.disconnect();
+    };
+  }, [measure]);
+  return (
+    <section ref={box} {...rest} data-overflow={more ? 'true' : undefined} style={style}>
+      {children}
+      {more ? <div data-testid="panel-fade" className="panel-fade" aria-hidden /> : null}
+    </section>
+  );
+}
+
 export function Main() {
   const [load, setLoad] = useState<Load>({ status: 'loading' });
   const [thumbs, setThumbs] = useState<Record<SlideId, string | undefined>>({});
@@ -207,7 +277,7 @@ export function Main() {
       // Storage refused (private mode): the choice holds for this page only.
     }
   }, []);
-  const [lanes, setLanes] = useState<Lane[]>([]);
+  const [lanes, setLanes] = useState<LanePayload[]>([]);
   // Lanes created or revised from a request here, latest first: they lead the lane rows. `flash` outlines one once.
   const [promoted, setPromoted] = useState<readonly string[]>([]);
   const [flash, setFlash] = useState<string | null>(null);
@@ -517,6 +587,8 @@ export function Main() {
 
   const canvas = useRef<HTMLElement>(null);
   const rows = useRef<HTMLDivElement>(null);
+  const contextRef = useRef(context);
+  contextRef.current = context;
   const deckLength = load.status === 'ready' ? load.deck.order.length : 0;
   // Columns of main in sight: the strip ends on a fade and a count, and no remark card runs past the edge.
   const visible = useVisibleColumns(canvas, '[data-strip="main"] [data-testid="thumb"]', [load.status, deckLength, lanes.length]);
@@ -541,11 +613,13 @@ export function Main() {
     history.replaceState(null, '', location.pathname + location.search);
   }, [lanes]);
 
-  // A promoted lane scrolls into view once its row is on screen (its scroll-margin clears the sticky strip).
+  // A promoted lane scrolls into view once its row is on screen (its scroll-margin clears the sticky strip), unless the
+  // selection panel is open: the answer shows there, under the reply, and the row below only mirrors it (flashed).
   useEffect(() => {
     const id = revealLane.current;
     if (!id || !lanes.some((l) => l.id === id)) return;
     revealLane.current = null;
+    if (contextRef.current.kind !== 'arc') return;
     // Vertically only: the strip stays on the columns the creator was looking at.
     const left = canvas.current?.scrollLeft ?? 0;
     document.getElementById(`lane-row-${id}`)?.scrollIntoView?.({ block: 'nearest' });
@@ -671,7 +745,7 @@ export function Main() {
 
   // Clicking empty space (not a thumb, not a button) clears the selection back to the whole deck.
   const clearOnEmpty = (e: MouseEvent<HTMLElement>): void => {
-    if (e.target instanceof Element && e.target.closest('button, a, input, textarea, [data-testid="thumb"], [data-testid="post-it"], [data-testid="selection-panel"]')) return;
+    if (e.target instanceof Element && e.target.closest('button, a, input, textarea, [data-testid="thumb"], [data-testid="post-it"], [data-testid="selection-panel"], [data-testid="panel-bar"]')) return;
     setContext({ kind: 'arc' });
   };
 
@@ -704,10 +778,17 @@ export function Main() {
   const trackedRemarkApi = { proposeRemark: propose, resolveRemark: remarkApi.resolveRemark };
   const draftOf = (r: Remark): string | undefined => (r.laneId && drafts.has(r.laneId) ? r.laneId : undefined);
   // The remark's lane is open on main (opened from its card, or proposed from it): the card names it, linked to its row.
+  // A lane's place on main: its own row, or the variant row it competes in.
+  const showLane = (laneId: string): void => {
+    const row =
+      document.getElementById(`lane-row-${laneId}`) ??
+      document.querySelector(`[data-testid="variant-cell"][data-lane="${CSS.escape(laneId)}"]`)?.closest('[data-testid="variant-row"]');
+    row?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  };
   const openedLane = (r: Remark): { label: string; onShow(): void } | undefined => {
     const lane = r.laneId ? lanes.find((l) => l.id === r.laneId) : undefined;
     if (!lane) return undefined;
-    return { label: lane.label, onShow: () => document.getElementById(`lane-row-${lane.id}`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }) };
+    return { label: lane.label, onShow: () => showLane(lane.id) };
   };
   // Remarks touching the selection: warnings first, then those on exactly the selection, then by where they start.
   const touches = (remark: Remark): { start: number; span: number } | null => {
@@ -728,7 +809,7 @@ export function Main() {
         a.cols.start - b.cols.start,
     )
     .map((x) => x.r);
-  const shownLanes = [...lanes].sort((a, b) => {
+  const shownLanes = lanes.filter(hasPending).sort((a, b) => {
     const rank = (l: Lane): number => {
       const i = promoted.indexOf(l.id);
       return i < 0 ? promoted.length : i;
@@ -748,6 +829,42 @@ export function Main() {
   const reveal = (col: number): void => {
     if (canvas.current) revealColumn(canvas.current, col);
   };
+  // Lanes competing on one slide field share one row, placed where the first of them would sit; a lane with other
+  // pending changes keeps its own row too.
+  const groups = variantGroups(shownLanes).filter((g) => deck.order.includes(g.slide));
+  const groupOf = new Map<string, VariantGroup>(groups.flatMap((g) => g.members.map((m) => [m.lane.id, g] as const)));
+  const placedGroups = new Set<string>();
+  const laneRows = shownLanes.flatMap((l): React.ReactNode[] => {
+    const g = groupOf.get(l.id);
+    const out: React.ReactNode[] = [];
+    if (g && !placedGroups.has(g.key)) {
+      placedGroups.add(g.key);
+      out.push(
+        <VariantRow key={`variants:${g.key}`} group={g} previews={previews} mainOrder={deck.order} mainThumbs={shownThumbs} api={laneApi} failedThumbs={failedLaneThumbs} />,
+      );
+    }
+    if (g && l.changes.filter((c) => c.status === 'pending').length === 1) return out;
+    out.push(
+      <LaneRow
+        key={l.id}
+        lane={l}
+        preview={previews[l.id]}
+        mainOrder={deck.order}
+        mainSlides={deck.slides}
+        mainThumbs={shownThumbs}
+        api={laneApi}
+        failedThumbs={failedLaneThumbs}
+        onRetryThumbs={(id) => void refreshPreview(id)}
+        remarks={openRemarks.filter((r) => r.sourceLaneId === l.id)}
+        remarkApi={trackedRemarkApi}
+        view={view}
+        onReveal={reveal}
+        flash={flash === l.id}
+        onFlashEnd={(id) => setFlash((f) => (f === id ? null : f))}
+      />,
+    );
+    return out;
+  });
   const openCount = mainRemarks.length;
   // The player opens on the selected slide (last of a range); Escape in the player comes back here with it selected.
   const presentSlide = context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : null;
@@ -770,10 +887,11 @@ export function Main() {
       </div>
     </div>
   );
-  const barOpen = context.kind === 'arc' || wholeDeck;
+  // A propose note shows where the creator asked: in the selection panel while there is one, else in the whole-deck bar.
+  const notesInPanel = context.kind !== 'arc';
   const notesBlock =
     notes.length > 0 ? (
-          <div role="status" aria-live="polite" style={{ padding: '12px 20px 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div role="status" aria-live="polite" style={{ padding: notesInPanel ? 0 : '12px 20px 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
             {notes.map((n) => {
               const href = noteHref(n, remarks, lanes);
               return (
@@ -803,14 +921,32 @@ export function Main() {
           </div>
         ) : null;
   const panelCol = selectedCols?.start ?? null;
-  // Anchored on the selection's first column, it runs to the visible right edge; scrolled out of sight, it keeps its column.
-  // Out of view, it is placed without the view: at its own column, nine columns wide, scrolled away with them.
-  const panelView = view && panelCol !== null && panelCol >= view.first && panelCol < view.end ? view : undefined;
+  // Anchored on the selection's first column, it runs to the visible right edge. Once the strip pages its column out
+  // of view it folds to a one-line bar at the strip's left edge: no empty band holds its height, the lanes move up.
+  const panelOff = view !== undefined && panelCol !== null && (panelCol < view.first || panelCol >= view.end);
+  const panelView = view && !panelOff ? view : undefined;
   const panelCols = panelCol === null ? 0 : panelSpan(panelCol, panelView);
-  const panelMax = room.canvas > 0 ? Math.max(160, room.canvas - room.strip - PANEL_CLEAR) : null;
+  const panelMax = room.canvas > 0 ? Math.max(160, room.canvas - PANEL_TOP - room.strip - PANEL_CLEAR) : null;
   const panelSlide = context.kind === 'slide' ? context.slide : context.kind === 'range' ? deck.order[selectedCols?.start ?? 0] : undefined;
+  const panelTitle = context.kind === 'slide' ? 'conversation about this slide' : 'conversation about these slides';
+  const selectionKey = context.kind === 'slide' ? `slide:${context.slide}` : context.kind === 'range' ? `range:${context.from}:${context.to}` : 'arc';
+  const remarkCard = (r: Remark): React.ReactNode => (
+    <RemarkPostIt remark={r} onPropose={propose} onResolve={remarkApi.resolveRemark} draftLaneId={draftOf(r)} onOpenLane={openFromRemark} openedLane={openedLane(r)} expandable />
+  );
+  const panelBar =
+    panelOff && panelCol !== null && context.kind !== 'arc' ? (
+      <div style={{ display: 'flex', marginTop: 2 }}>
+        <div className="gutter" />
+        <div data-testid="panel-bar" className="panel-bar">
+          <span>conversation about {anchorLabel(context, deck.order)}:</span>
+          <button type="button" className="link" onClick={() => reveal(panelCol)} style={{ color: 'var(--ink)' }}>
+            show
+          </button>
+        </div>
+      </div>
+    ) : null;
   const selectionPanel =
-    panelCol !== null && context.kind !== 'arc' ? (
+    panelCol !== null && context.kind !== 'arc' && !panelOff ? (
       <div style={{ display: 'flex', marginTop: 2 }}>
         <div className="gutter" />
         <RemarkRow
@@ -827,18 +963,18 @@ export function Main() {
               selected: true,
               slide: panelSlide,
               card: (
-                <section
+                <PanelBox
                   data-testid="selection-panel"
                   data-slide={panelSlide}
                   data-kind={context.kind}
-                  aria-label={context.kind === 'slide' ? 'conversation about this slide' : 'conversation about these slides'}
+                  aria-label={panelTitle}
                   className="selection-panel"
                   style={{ ...(panelMax === null ? {} : { '--panel-max-h': `${panelMax}px` }), position: 'relative', zIndex: 1, padding: 16, borderRadius: 'var(--radius)', background: 'var(--card)', border: '1px solid var(--line)', boxShadow: 'var(--shadow)', cursor: 'auto' } as CSSProperties}
                 >
                   <Thread
                     key={context.kind === 'slide' ? `slide:${context.slide}` : 'range'}
                     threadKey={context.kind === 'slide' ? `slide:${context.slide}` : 'global'}
-                    title={context.kind === 'slide' ? 'conversation about this slide' : 'conversation about these slides'}
+                    title={panelTitle}
                     hint={context.kind === 'slide' ? SLIDE_HINT : RANGE_HINT}
                     context={context}
                     only={context.kind === 'range' ? context : undefined}
@@ -851,32 +987,18 @@ export function Main() {
                     autoFocus={focusComposer}
                     layout="inline"
                     logMaxHeight={panelMax === null ? 'min(360px, 40vh)' : 'var(--panel-max-h)'}
+                    knownLanes={lanes}
+                    onShowLane={showLane}
                     lead={
-                      panelRemarks.length > 0 || (!barOpen && notesBlock) ? (
+                      panelRemarks.length > 0 || notesBlock ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                          {panelRemarks.length > 0 ? (
-                            <div data-testid="panel-remarks" className="panel-remarks" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                              {panelRemarks.map((r) => (
-                                <div key={r.id} style={{ width: 280, maxWidth: '100%' }}>
-                                  <RemarkPostIt
-                                    remark={r}
-                                    onPropose={propose}
-                                    onResolve={remarkApi.resolveRemark}
-                                    draftLaneId={draftOf(r)}
-                                    onOpenLane={openFromRemark}
-                                    openedLane={openedLane(r)}
-                                    expandable
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          ) : null}
-                          {barOpen ? null : notesBlock}
+                          {panelRemarks.length > 0 ? <PanelRemarks key={selectionKey} remarks={panelRemarks} card={remarkCard} /> : null}
+                          {notesBlock}
                         </div>
                       ) : null
                     }
                   />
-                </section>
+                </PanelBox>
               ),
             },
           ]}
@@ -951,9 +1073,10 @@ export function Main() {
                       )
                     : null}
                 </div>
-                {selectionPanel || remarkError ? (
+                {selectionPanel || panelBar || remarkError ? (
                   <div style={{ marginTop: -24 }}>
                     {selectionPanel}
+                    {panelBar}
                     {remarkError ? (
                       <p style={{ margin: '6px 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>
                         <span>Remarks: {remarkError}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
@@ -966,30 +1089,12 @@ export function Main() {
                   <p role="alert" style={{ margin: '0 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 13 }}>
                     <span>Lanes: {lanesFailed}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
                   </p>
-                ) : lanes.length === 0 ? (
+                ) : laneRows.length === 0 ? (
                   <p className="muted" style={{ margin: '0 0 0 var(--gutter)', fontSize: 13, maxWidth: 520 }}>
                     No open lanes. Ask the co-author in the thread; its proposals appear here, under the slides they touch.
                   </p>
                 ) : (
-                  shownLanes.map((l) => (
-                    <LaneRow
-                      key={l.id}
-                      lane={l}
-                      preview={previews[l.id]}
-                      mainOrder={deck.order}
-                      mainSlides={deck.slides}
-                      mainThumbs={shownThumbs}
-                      api={laneApi}
-                      failedThumbs={failedLaneThumbs}
-                      onRetryThumbs={(id) => void refreshPreview(id)}
-                      remarks={openRemarks.filter((r) => r.sourceLaneId === l.id)}
-                      remarkApi={trackedRemarkApi}
-                      view={view}
-                      onReveal={reveal}
-                      flash={flash === l.id}
-                      onFlashEnd={(id) => setFlash((f) => (f === id ? null : f))}
-                    />
-                  ))
+                  laneRows
                 )}
               </div>
             )}
@@ -1001,14 +1106,21 @@ export function Main() {
           <VersionLine versions={versions} current={deck.state.version} />
         </div>
       </div>
-      {barOpen ? (
-        <aside data-testid="thread-panel" style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          {context.kind !== 'arc' ? (
-            <button type="button" className="link" aria-label="collapse" onClick={() => setWholeDeck(false)} style={{ alignSelf: 'flex-end', margin: '12px 20px 0', fontSize: 12 }}>
-              hide
-            </button>
-          ) : null}
-          {notesBlock}
+      {/* The whole-deck bar has two fixed widths and its own toggle: a selection never resizes the strip. */}
+      {wholeDeck ? (
+        <aside data-testid="thread-panel" style={{ width: BAR_OPEN_W, flex: `0 0 ${BAR_OPEN_W}px`, borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <button
+            type="button"
+            className="link"
+            aria-expanded
+            aria-label="hide the whole-deck conversation"
+            title="Fold the whole-deck conversation to a rail"
+            onClick={() => setWholeDeck(false)}
+            style={{ alignSelf: 'flex-end', margin: '12px 20px 0', fontSize: 'var(--fs-meta)' }}
+          >
+            hide
+          </button>
+          {notesInPanel ? null : notesBlock}
           <div style={{ flex: 1, minHeight: 0 }}>
             <Thread
               threadKey="global"
@@ -1023,8 +1135,15 @@ export function Main() {
           </div>
         </aside>
       ) : (
-        <aside data-testid="thread-rail" style={{ width: 40, flex: '0 0 40px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', display: 'flex', justifyContent: 'center', paddingTop: 16 }}>
-          <button type="button" className="link" onClick={() => setWholeDeck(true)} title="the conversation about the whole deck" style={{ writingMode: 'vertical-rl', fontSize: 12, color: 'var(--ink)' }}>
+        <aside data-testid="thread-rail" style={{ width: BAR_SHUT_W, flex: `0 0 ${BAR_SHUT_W}px`, borderLeft: '1px solid var(--line)', background: 'var(--paper)', display: 'flex', justifyContent: 'center', paddingTop: 16 }}>
+          <button
+            type="button"
+            className="link"
+            aria-expanded={false}
+            onClick={() => setWholeDeck(true)}
+            title="Open the conversation about the whole deck"
+            style={{ writingMode: 'vertical-rl', fontSize: 'var(--fs-meta)', color: 'var(--ink)' }}
+          >
             whole deck
           </button>
         </aside>
