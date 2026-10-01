@@ -141,3 +141,14 @@ Critic: each screen alone is close to the mockups; /slide is the best expression
 Remaining majors: panel composer clipped under the panel edge; lane cells after a decision inside a multi-move lane (unlabeled thumbs, ghost cells, wrong +N); stale lane shown actionable (the rebase runs on accept/refuse/open/restore and before checks, not when main changes or on read); focus seeded with the wrong slide exchange; focus diff says "no text change" while the render changed (footer text in body not captured by plain-text diff); reply describing a main that changed during the turn; narrative-arc remark renumbered but not re-evaluated after a deck change.
 Critic's changes: (1) every reply that creates or revises a lane renders an inline change card (before/after, field diff, why, accept/refuse); (2) main: replace the floating panel with an inline stage (selected slide at ~640px with the conversation beside it, pushing content down); (3) delete the permanent whole-deck rail, one composer with a scope chip; (4) remarks as one-line items, collapsed above the thread; (5) lane lifecycle: scroll and pulse on open, stale/no-op lanes closed in place.
 Architect's read: three rounds at 5.5 with a different layout prescription each time means the fix loop is chasing a moving target on main; the next step is a designed decision on the main stage (mockup validated by the creator), not another fix wave.
+
+## Space loop (overnight), real-DOM coverage above the fold at 1440x900 / 1920x1080
+| screen | round 1 | round 2 | round 3 (before r3 fixes) |
+|---|---|---|---|
+| main, slide selected | 0.31 / 0.27 (render 0.06) | 0.43 / 0.41 (render 0.35) | 0.72 / 0.69 (render 0.66) |
+| main, nothing selected | 0.22 / 0.19 | 0.48 / 0.42 | 0.55 / 0.51 |
+| slide | 0.58 / 0.38 | 0.68 / 0.52 | 0.76 / 0.79 pass |
+| focus (remove) | 0.29 / 0.18 | 0.48 / 0.59 | 0.79 / 0.80 pass |
+| focus (move) | 0.18 / 0.11 (render 0.05) | 0.63 / 0.64 (render 0.42) | 0.82 / 0.82 pass |
+| history | 0.41 / 0.34 | 0.57 / 0.56 | 0.70 / 0.73 |
+Round-3 fixes merged after that measurement (main stage + lane rows, decided-change view in focus, history before/after panels). Not re-measured; QA round 5 screenshots give the final look.
