@@ -601,18 +601,19 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
       </ScreenHeader>
       <div data-testid="slide-layout" className="slide-layout" data-columns={wide ? '2' : '1'}>
         {/* The work column starts on the title's left edge, 24px in: no empty gutter, the render takes that width. */}
+        {/* Wide, the work column is the render at the height the conversation under it leaves, nothing else: the text
+            the render cannot show (story, notes) reads in the side column, under the lanes and remarks, so neither
+            column ends in a band of paper. Narrow, one column in reading order. */}
         <main ref={bodyRef} data-testid="slide-body" className="slide-main">
-          <div className="slide-grid">
-            <div data-testid="slide-work" className="slide-work">
-              {render}
-              {talk}
-            </div>
-            <div data-testid="slide-text" className="slide-text">
-              {text}
-            </div>
+          <div data-testid="slide-work" className="slide-work">
+            {render}
+            {talk}
           </div>
           {wide ? null : (
             <>
+              <div data-testid="slide-text" className="slide-text">
+                {text}
+              </div>
               {lanesSection}
               {remarksSection}
             </>
@@ -623,6 +624,9 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
             <div ref={sideRef} data-testid="slide-side-scroll" className="slide-side-scroll">
               {lanesSection}
               {remarksSection}
+              <div data-testid="slide-text" className="slide-text">
+                {text}
+              </div>
             </div>
           </div>
         ) : null}

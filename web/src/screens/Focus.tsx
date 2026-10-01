@@ -122,10 +122,18 @@ export function laneColumns(lane: Lane, preview: LanePreviewPayload, mainOrder: 
 
 const TEXT_FIELDS = ['title', 'body', 'story', 'notes'] as const;
 
-/** Text fields a modify rewrites, each as before/after lines against main's slide. Empty for other kinds. */
+/** The fields a render cannot show: an insert brings them, a remove takes them away. */
+const OFF_RENDER = ['story', 'notes'] as const;
+
+/**
+ * Text fields a change rewrites, each as before/after lines against main's slide: the fields a modify patches, the
+ * story and notes an insert adds or a remove deletes (the render shows the rest). Empty fields and moves say nothing.
+ */
 export function textChanges(change: Change, before: Slide | undefined): { field: (typeof TEXT_FIELDS)[number]; before: string[]; after: string[] }[] {
-  if (change.kind !== 'modify' || !before) return [];
   const lines = (field: (typeof TEXT_FIELDS)[number], v: string): string[] => (field === 'body' ? plainText(v) : v === '' ? [] : v.split('\n'));
+  if (change.kind === 'insert') return OFF_RENDER.map((field) => ({ field, before: [], after: lines(field, change.slide[field]) })).filter((t) => t.after.length > 0);
+  if (change.kind === 'remove') return before ? OFF_RENDER.map((field) => ({ field, before: lines(field, before[field]), after: [] })).filter((t) => t.before.length > 0) : [];
+  if (change.kind !== 'modify' || !before) return [];
   return TEXT_FIELDS.flatMap((field) => {
     const next = change.patch[field];
     return next === undefined ? [] : [{ field, before: lines(field, before[field]), after: lines(field, next) }];
@@ -161,6 +169,15 @@ const content = (c: Change): string => JSON.stringify({ ...c, status: null });
 
 const navBtn: CSSProperties = { padding: '8px 0' };
 
+/** Where main's slide at `mainAt` would sit in `laneOrder`, which no longer has it: after the nearest earlier slide the lane kept. */
+export function gapIn(laneOrder: readonly SlideId[], mainOrder: readonly SlideId[], mainAt: number): number {
+  for (let i = mainAt - 1; i >= 0; i--) {
+    const at = laneOrder.indexOf(mainOrder[i]!);
+    if (at >= 0) return at + 1;
+  }
+  return 0;
+}
+
 /** The accent line under the columns a strip's lane covers, named by a 12px grey line at its left end. */
 function RangeUnderline({ count, cols, label }: { count: number; cols: { start: number; span: number } | null; label: string }) {
   if (!cols) return null;
@@ -178,37 +195,82 @@ function RangeUnderline({ count, cols, label }: { count: number; cols: { start: 
 }
 
 /**
- * A move as structure: one side's whole order as a strip of renders, the moved slide twice its neighbours' width and
- * ringed; the strip scrolls so the moved slide sits in its middle. The theme sizes the thumbs from the body's height.
+ * Where each slide of a move strip sits on its two-row grid (1-based CSS lines): the moved slide spans both rows, its
+ * neighbours pair up in columns from it outwards, read top then bottom; a neighbour left without a pair, at a far
+ * end, centres in its column. No paper above the small renders, whatever the strip's length.
  */
-function MoveStrip({ side, caption, order, slides, slide, url }: { side: 'main' | 'lane'; caption: string; order: SlideId[]; slides: Record<SlideId, Slide>; slide: SlideId; url(id: SlideId): string | undefined }) {
+export function moveGrid(count: number, at: number): { column: number; row: string }[] {
+  const before = at;
+  const lead = Math.ceil(before / 2);
+  return Array.from({ length: count }, (_, i) => {
+    if (i === at) return { column: lead + 1, row: '1 / span 2' };
+    if (i < at) {
+      const d = at - 1 - i;
+      const alone = before % 2 === 1 && i === 0;
+      return { column: lead - Math.floor(d / 2), row: alone ? '1 / span 2' : d % 2 === 0 ? '2' : '1' };
+    }
+    const j = i - at - 1;
+    const alone = j % 2 === 0 && i === count - 1;
+    return { column: lead + 2 + Math.floor(j / 2), row: alone ? '1 / span 2' : String((j % 2) + 1) };
+  });
+}
+
+/** What a structure strip centres on: a slide, twice its neighbours' size (struck when the lane removes it), or the gap a removed slide leaves. */
+type StripFocus = { kind: 'slide'; id: SlideId; removed?: string } | { kind: 'gap'; at: number; label: string };
+
+/**
+ * A move or a remove as structure: one side's whole order as a strip of renders in two rows, centred on the slide the
+ * change is about (twice its neighbours' size and ringed) or on the gap it leaves; the strip scrolls so that column
+ * sits in its middle. The theme sizes the thumbs from the body's height; `size` says which strip is the larger.
+ */
+function StructureStrip({ side, size, caption, order, slides, focus, url }: { side: 'main' | 'lane'; size: 'large' | 'small'; caption: string; order: SlideId[]; slides: Record<SlideId, Slide>; focus: StripFocus; url(id: SlideId): string | undefined }) {
   const list = useRef<HTMLDivElement>(null);
-  const at = order.indexOf(slide);
+  const at = focus.kind === 'gap' ? focus.at : order.indexOf(focus.id);
+  const entries: (SlideId | null)[] = focus.kind === 'gap' ? [...order.slice(0, at), null, ...order.slice(at)] : order;
+  const cells = moveGrid(entries.length, at);
   useLayoutEffect(() => {
     const box = list.current;
     if (!box) return;
     const centre = (): void => {
-      const item = box.children[at] as HTMLElement | undefined;
+      const item = box.querySelectorAll<HTMLElement>('[role="listitem"]')[at];
       if (item) box.scrollLeft = Math.max(0, item.offsetLeft + item.offsetWidth / 2 - box.clientWidth / 2);
     };
     centre();
     if (typeof ResizeObserver !== 'function') return;
-    // The thumbs follow the viewport: a resize moves the moved slide, so it is centred again.
+    // The thumbs follow the viewport: a resize moves the centred column, so it is centred again.
     const ro = new ResizeObserver(centre);
     ro.observe(box);
     return () => ro.disconnect();
-  }, [at, order.length]);
+  }, [at, entries.length]);
   return (
-    <figure data-testid="move-strip" data-side={side} className="move-strip">
+    <figure data-testid="move-strip" data-side={side} data-size={size} className="move-strip">
       <figcaption data-testid="move-caption" className="move-caption">
         {caption}
       </figcaption>
       <div ref={list} role="list" className="move-strip-list">
-        {order.map((id, i) => (
-          <div role="listitem" key={id} className="move-strip-item" data-moved={id === slide ? 'true' : undefined} style={{ ['--move-k' as string]: id === slide ? '2' : '1' }}>
-            <Thumb slideId={id} n={i + 1} title={slides[id]?.title ?? id} url={url(id)} selected={id === slide} hoverTitle={false} onClick={() => undefined} />
-          </div>
-        ))}
+        {entries.map((id, i) => {
+          const place = { gridColumn: String(cells[i]!.column), gridRow: cells[i]!.row };
+          if (id === null) {
+            return (
+              <div role="listitem" key="gap" data-testid="move-gap" className="move-gap" style={place}>
+                <span className="move-gap-line" aria-hidden />
+                <span className="move-gap-label">{focus.kind === 'gap' ? focus.label : ''}</span>
+              </div>
+            );
+          }
+          const big = focus.kind === 'slide' && id === focus.id;
+          const removed = big && focus.kind === 'slide' ? focus.removed : undefined;
+          return (
+            <div role="listitem" key={id} className="move-strip-item" data-moved={big ? 'true' : undefined} data-removed={removed ? 'true' : undefined} style={{ ['--move-k' as string]: big ? '2' : '1', ...place }}>
+              <Thumb slideId={id} n={order.indexOf(id) + 1} title={slides[id]?.title ?? id} url={url(id)} selected={big} hoverTitle={false} onClick={() => undefined} />
+              {removed ? (
+                <span data-testid="removed-overlay" className="move-removed">
+                  <span>{removed}</span>
+                </span>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
     </figure>
   );
@@ -463,9 +525,11 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
   const skipped = change ? preview.skipped.includes(change.id) : false;
   const mainAt = target ? deck.order.indexOf(target) : -1;
   const laneAt = target ? preview.order.indexOf(target) : -1;
-  // A move shows as structure: the slide among its neighbours on each side, not two identical renders.
+  // A move or a remove shows as structure: the slide among its neighbours on each side, not two identical renders.
+  // Once decided, the pair says what became of it.
   const asMove = change?.kind === 'move' && !skipped && mainAt >= 0 && laneAt >= 0 && !acked;
-  if (change && target && !asMove) {
+  const asRemove = change?.kind === 'remove' && !skipped && mainAt >= 0 && laneAt < 0 && !acked;
+  if (change && target) {
     left =
       change.kind === 'insert'
         ? { label: 'main', variant: 'missing', missingText: 'not in main' }
@@ -474,7 +538,10 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
           : { label: `main, slide ${mainAt + 1}`, variant: 'main', title: deck.slides[target]?.title ?? target, url: mainUrl(target) };
     right = skipped
       ? { label: 'this lane', variant: 'missing', missingText: 'no longer applies on main' }
-      : change.kind === 'remove' || laneAt < 0
+      : change.kind === 'remove' && mainAt >= 0
+        ? // The slide it deletes, at the same size as main's, under a dashed note: never an empty box.
+          { label: `this lane, slide ${mainAt + 1} removed`, variant: 'lane', title: deck.slides[target]?.title ?? target, url: mainUrl(target), overlay: 'removed in this lane' }
+        : change.kind === 'remove' || laneAt < 0
         ? { label: 'this lane', variant: 'missing', missingText: 'removed' }
         : {
             label: `this lane, slide ${laneAt + 1}${change.kind === 'move' && mainAt >= 0 ? ` (was ${mainAt + 1})` : ''}`,
@@ -504,14 +571,15 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
         status = `accepted (v${res.version.n})`;
         next = pathAfter(res.lane, change.id, target, res.version.order);
         nextLabel = labelFor(next, res.version.order);
-        if (before) pair = [{ ...before[0], label: mainAt >= 0 ? `before, slide ${mainAt + 1}` : 'before' }, before[1].variant === 'lane' ? { ...before[1], variant: 'main', label: text.replace('accepted into', 'now in') } : { ...before[1], label: `${before[1].label}, accepted` }];
+        const now = change.kind === 'remove' ? `removed from main in v${res.version.n}` : text.replace('accepted into', 'now in');
+        if (before) pair = [{ ...before[0], label: mainAt >= 0 ? `before, slide ${mainAt + 1}` : 'before' }, before[1].variant === 'lane' ? { ...before[1], variant: 'main', label: now } : { ...before[1], label: `${before[1].label}, accepted` }];
       } else {
         const after = await api.refuseChange(lane.id, change.id);
         text = 'refused';
         status = 'refused';
         next = pathAfter(after, change.id, target, deck.order);
         nextLabel = labelFor(next, deck.order);
-        if (before) pair = [{ ...before[0], label: `${before[0].label}, kept` }, before[1].variant === 'lane' ? { ...before[1], variant: 'main', label: 'refused proposal' } : { ...before[1], label: 'refused' }];
+        if (before) pair = [{ ...before[0], label: `${before[0].label}, kept` }, before[1].variant === 'lane' ? { ...before[1], variant: 'main', label: change.kind === 'remove' ? 'refused removal' : 'refused proposal' } : { ...before[1], label: 'refused' }];
       }
       const at = new Date().toISOString();
       setNotes((n) => [...n, { id: `decision-${change.id}`, text, at }]);
@@ -636,6 +704,38 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
 
   const toggleStrip = (): void => setExpanded((x) => !x);
 
+  // Every change of the lane, above its conversation: what each does and why, the one on screen marked, the pending
+  // ones a click away (previous and next only step one at a time), the decided ones with their outcome.
+  const changeList = (
+    <section data-testid="focus-changes" aria-label="changes in this lane" className="focus-changes">
+      <h2 className="row-label" style={{ margin: 0 }}>changes in this lane</h2>
+      <ol className="focus-change-list">
+        {lane.changes.map((c, i) => {
+          const { outcome } = outcomeOf(lane, c);
+          const current = c.id === changeId;
+          const path = focusPath(lane.id, c.id);
+          const what = `${c.kind} ${describeTarget(c)}`;
+          return (
+            <li key={c.id} data-change={c.id} data-outcome={outcome} aria-current={current ? 'true' : undefined} className="focus-change">
+              <span className="focus-change-head">
+                <span className="meta">{i + 1}</span>
+                {outcome === 'pending' && !current ? (
+                  <a href={path} onClick={go(path)} className="link focus-change-what">
+                    {what}
+                  </a>
+                ) : (
+                  <span className="focus-change-what">{what}</span>
+                )}
+                {outcome === 'pending' ? null : <span className="meta">{outcome}</span>}
+              </span>
+              <span className="focus-change-reason">{nameSlides(c.reason, deck.order, { ...preview.slides, ...deck.slides })}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+
   return (
     <div data-testid="focus-layout" className="focus-layout" data-columns={wide ? '2' : '1'}>
       <div data-testid="focus-work" className="focus-work">
@@ -674,9 +774,15 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
                   </p>
                 ) : null}
                 {asMove && target ? (
-                  <div data-testid="focus-pair" className="focus-move">
-                    <MoveStrip side="main" caption={`main, was ${mainAt + 1}`} order={deck.order} slides={deck.slides} slide={target} url={mainUrl} />
-                    <MoveStrip side="lane" caption={`this lane, now ${laneAt + 1}`} order={preview.order} slides={preview.slides} slide={target} url={laneUrl} />
+                  <div data-testid="focus-pair" className="focus-move" data-kind="move">
+                    <StructureStrip side="main" size="small" caption={`main, was ${mainAt + 1}`} order={deck.order} slides={deck.slides} focus={{ kind: 'slide', id: target }} url={mainUrl} />
+                    <StructureStrip side="lane" size="large" caption={`this lane, now ${laneAt + 1}`} order={preview.order} slides={preview.slides} focus={{ kind: 'slide', id: target }} url={laneUrl} />
+                  </div>
+                ) : asRemove && target ? (
+                  // The question a remove asks is whether the deck still reads: main around the slide, the lane closing the gap.
+                  <div data-testid="focus-pair" className="focus-move" data-kind="remove">
+                    <StructureStrip side="main" size="large" caption={`main, slide ${mainAt + 1}`} order={deck.order} slides={deck.slides} focus={{ kind: 'slide', id: target, removed: 'removed in this lane' }} url={mainUrl} />
+                    <StructureStrip side="lane" size="small" caption={`this lane, without slide ${mainAt + 1}`} order={preview.order} slides={preview.slides} focus={{ kind: 'gap', at: gapIn(preview.order, deck.order, mainAt), label: `${mainAt + 1} removed` }} url={laneUrl} />
                   </div>
                 ) : (
                   <div data-testid="focus-pair" className="focus-pair" data-shape={left?.variant === 'missing' ? 'after' : right?.variant === 'missing' ? 'before' : 'both'}>
@@ -784,6 +890,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
       </div>
       {wide ? (
         <section data-testid="focus-side" aria-label="lane thread" className="focus-side">
+          {changeList}
           {thread}
         </section>
       ) : null}

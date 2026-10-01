@@ -146,7 +146,7 @@ describe('Focus', () => {
     expect(api.thumbFor).toHaveBeenCalledWith('s3');
   });
 
-  it('an insert shows a dashed "not in main" card on the left, a remove a "removed" card on the right', async () => {
+  it('an insert shows a dashed "not in main" card on the left; a remove shows main around the slide, struck, over the lane closing the gap', async () => {
     const api = stubApi();
     const { rerender } = render(<Focus laneId="l1" changeId="c3" api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryAllByTestId('slide-preview').length === 2);
@@ -157,10 +157,35 @@ describe('Focus', () => {
 
     rerender(<Focus laneId="l1" changeId="c5" api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => crumb().includes('change 3 of 3'));
-    [left, right] = screen.getAllByTestId('slide-preview');
-    expect(left!.getAttribute('data-variant')).toBe('main');
-    expect(right!.getAttribute('data-variant')).toBe('missing');
-    expect(right!.textContent).toContain('removed');
+    // Never an empty "removed" box: main's strip, the larger, centres the slide under a dashed note; the lane's shows the gap.
+    expect(screen.queryAllByTestId('slide-preview')).toHaveLength(0);
+    expect(screen.getByTestId('focus-pair').getAttribute('data-kind')).toBe('remove');
+    const [main, laneSide] = screen.getAllByTestId('move-strip');
+    expect(main!.getAttribute('data-size')).toBe('large');
+    expect(laneSide!.getAttribute('data-size')).toBe('small');
+    expect(within(main!).getByTestId('move-caption').textContent).toBe('main, slide 4');
+    const big = within(main!).getAllByRole('listitem').find((li) => li.getAttribute('data-moved'))!;
+    expect(within(big).getByTestId('thumb').getAttribute('data-slide')).toBe('s4');
+    expect(within(big).getByTestId('removed-overlay').textContent).toBe('removed in this lane');
+    expect(within(laneSide!).getByTestId('move-caption').textContent).toBe('this lane, without slide 4');
+    // The lane is s1 s2 n1 s3 s5: s4 was after s3, so the gap sits between s3 and s5, spanning both rows.
+    const items = within(laneSide!).getAllByRole('listitem');
+    expect(items.map((li) => li.getAttribute('data-testid') === 'move-gap' ? 'gap' : within(li).getByTestId('thumb').getAttribute('data-slide'))).toEqual(['s1', 's2', 'n1', 's3', 'gap', 's5']);
+    expect(items[4]!.textContent).toBe('4 removed');
+    expect(items[4]!.style.gridRow).toBe('1 / span 2');
+  });
+
+  it('accepting a remove names the pair for what it now is: main before, removed from main after', async () => {
+    const api = stubApi();
+    api.acceptChange.mockResolvedValueOnce({ version: { n: 9, order: order.filter((x) => x !== 's4'), slides: {}, cause: { kind: 'import' }, createdAt: '' }, lane: lane([c1, c2, c3, c4, { ...c5, status: 'accepted' }]) });
+    render(<Focus laneId="l1" changeId="c5" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => crumb().includes('change 3 of 3'));
+    fireEvent.click(screen.getByRole('button', { name: 'accept' }));
+    await waitFor(() => screen.queryByTestId('decide-ack'));
+    const [left, right] = screen.getAllByTestId('slide-preview');
+    expect(left!.getAttribute('aria-label')).toBe('before, slide 4');
+    expect(right!.getAttribute('aria-label')).toBe('removed from main in v9');
+    expect(within(right!).getByTestId('removed-overlay')).toBeTruthy();
   });
 
   it('accept acknowledges in place and stays put: no timed move, "next change" is the way on', async () => {
@@ -322,6 +347,32 @@ describe('Focus', () => {
     expect(side.contains(document.querySelector('.screen-header'))).toBe(false);
   });
 
+  it('the side column lists every change of the lane above its conversation: the one on screen marked, the pending ones a click away', async () => {
+    const navigate = vi.fn();
+    render(<Focus laneId="l1" changeId="c3" api={stubApi()} subscribe={noEvents} navigate={navigate} />);
+    await waitFor(() => screen.queryByTestId('focus-changes') && crumb().includes('change 2 of 3'));
+    const side = screen.getByTestId('focus-side');
+    const list = screen.getByTestId('focus-changes');
+    expect(side.contains(list)).toBe(true);
+    expect(list.compareDocumentPosition(screen.getByTestId('thread')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const rows = within(list).getAllByRole('listitem');
+    expect(rows.map((r) => r.getAttribute('data-change'))).toEqual(['c1', 'c2', 'c3', 'c4', 'c5']);
+    expect(rows.map((r) => r.getAttribute('aria-current'))).toEqual([null, null, 'true', null, null]);
+    expect(rows[0]!.textContent).toContain('modify slide 3, Title s3');
+    expect(rows[0]!.textContent).toContain('tighter title');
+    expect(rows[2]!.textContent).toContain('insert new slide, Hook');
+    // Decided ones say how; the pending ones link to their own focus screen.
+    expect(rows[1]!.textContent).toContain('accepted');
+    expect(rows[3]!.textContent).toContain('refused');
+    expect(within(rows[1]!).queryByRole('link')).toBeNull();
+    const link = within(rows[4]!).getByRole('link');
+    expect(link.getAttribute('href')).toBe('/lane/l1/change/c5');
+    fireEvent.click(link);
+    expect(navigate).toHaveBeenLastCalledWith('/lane/l1/change/c5');
+    // The one on screen is no link to itself.
+    expect(within(rows[2]!).queryByRole('link')).toBeNull();
+  });
+
   it('below the breakpoint the thread follows the renders in the scrolling body; the bar sits outside it, under', async () => {
     narrow();
     render(<Focus laneId="l1" changeId="c1" api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
@@ -455,15 +506,24 @@ describe('Focus text diff and layout', () => {
     expect(same()).toBeNull();
   });
 
-  it('no text diff for an insert, a remove, or a modify that only touches assets', async () => {
+  it('an insert shows the new slide\'s story and notes as added text, a remove the story and notes it deletes; a modify of assets only, no diff', async () => {
     const assetsOnly: Change = { id: 'c1', kind: 'modify', slide: 's3', patch: { assets: [] }, reason: 'r', status: 'pending' };
-    const api = stubApi(lane([assetsOnly, c3, c5]));
+    const added: Change = { ...c3, slide: { ...slide('n1', 'Hook'), story: 'why it opens', notes: 'say it fast\nthen pause' } };
+    const api = stubApi(lane([assetsOnly, added, c5]));
+    api.getDeck.mockResolvedValue({ ...deck, slides: { ...mainSlides, s4: { ...slide('s4'), story: 'the old point', notes: '' } } });
     const { rerender } = render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryAllByTestId('slide-preview').length === 2);
     expect(screen.queryAllByTestId('text-diff')).toHaveLength(0);
     rerender(<Focus laneId="l1" changeId="c3" api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => crumb().includes('change 2 of 3'));
-    expect(screen.queryAllByTestId('text-diff')).toHaveLength(0);
+    expect(screen.getAllByTestId('text-diff').map((d) => d.getAttribute('data-field'))).toEqual(['story', 'notes']);
+    expect(lines('story')).toEqual(['add:why it opens']);
+    expect(lines('notes')).toEqual(['add:say it fast', 'add:then pause']);
+    rerender(<Focus laneId="l1" changeId="c5" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => crumb().includes('change 3 of 3'));
+    // Empty fields say nothing: only the story the slide had.
+    expect(screen.getAllByTestId('text-diff').map((d) => d.getAttribute('data-field'))).toEqual(['story']);
+    expect(lines('story')).toEqual(['del:the old point']);
   });
 
   it('previews sit side by side as long as two fit; the decision bar sits under the scrolling body, never over it', async () => {
@@ -484,22 +544,22 @@ describe('Focus text diff and layout', () => {
 });
 
 describe('Focus fills the body', () => {
-  it('the pair spans the body: the lane side larger, a side missing slims to a narrow column', async () => {
+  it('the pair spans the body, two equal renders; an insert slims its empty main side to a narrow column', async () => {
     const api = stubApi();
     const shape = () => screen.getByTestId('focus-pair').getAttribute('data-shape');
     const { rerender } = render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryAllByTestId('slide-preview').length === 2);
     expect(shape()).toBe('both');
-    // an insert has no main side, a remove no lane side
+    // an insert has no main side; a remove shows as strips
     rerender(<Focus laneId="l1" changeId="c3" api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => crumb().includes('change 2 of 3'));
     expect(shape()).toBe('after');
     rerender(<Focus laneId="l1" changeId="c5" api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => crumb().includes('change 3 of 3'));
-    expect(shape()).toBe('before');
+    expect(screen.getByTestId('focus-pair').getAttribute('data-kind')).toBe('remove');
     const css = themeCss();
     expect(css).not.toMatch(/\.focus-pair \{[^}]*max-width/);
-    expect(css).toMatch(/\.focus-pair\[data-shape='both'\] \{[^}]*5fr\) minmax\(0, 7fr/);
+    expect(css).toMatch(/\.focus-pair\[data-shape='both'\] \{[^}]*grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\)/);
     // No empty 120px gutter on this screen: the body starts at the screen edge padding.
     expect(css).not.toMatch(/\.focus-scroll \{[^}]*var\(--gutter\)/);
   });
@@ -544,8 +604,13 @@ describe('Focus move changes', () => {
     expect(sel(laneSide!)).toEqual(['s2']);
     expect(scale(laneSide!)).toEqual(['1', '1', '1', '1', '2']);
     expect(within(laneSide!).getByTestId('move-caption').textContent).toBe('this lane, now 5');
+    // Two rows of neighbours beside the moved slide, which spans both: no paper above the neighbours.
+    const place = (el: HTMLElement) => within(el).getAllByRole('listitem').map((li) => `${li.style.gridColumn}|${li.style.gridRow}`);
+    expect(place(main!)).toEqual(['1|1 / span 2', '2|1 / span 2', '3|1', '3|2', '4|1 / span 2']);
+    expect(place(laneSide!)).toEqual(['1|1', '1|2', '2|1', '2|2', '3|1 / span 2']);
     // The thumbs size from the viewport-filling unit in the theme, the lane side larger than main's.
     expect(themeCss()).toMatch(/\.move-strip-item \{[^}]*--move-k/);
+    expect(themeCss()).toMatch(/\.move-strip-list \{[^}]*grid-template-rows: repeat\(2/);
     expect(themeCss()).toMatch(/\.focus-move \{[^}]*--move-u:[^;]*cqh/);
   });
 

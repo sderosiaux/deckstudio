@@ -283,7 +283,7 @@ describe('Slide screen', () => {
     fireEvent.click(screen.getByRole('link', { name: 'back to main' }));
     expect(t.navigate).toHaveBeenLastCalledWith('/');
   });
-  it('two columns: the render, the conversation under it, then story and notes on the left; only lanes and remarks on the right', async () => {
+  it('two columns: the render and the conversation under it on the left; lanes, remarks, then story and notes on the right', async () => {
     const t = setup({ remarks: [remark('r1', { kind: 'slide', slide: 's3' })] });
     render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
     await waitFor(() => laneRows().length === 2 && screen.queryAllByTestId('post-it').length === 1);
@@ -292,36 +292,39 @@ describe('Slide screen', () => {
     expect(document.querySelector('style')).toBeNull();
     const left = screen.getByTestId('slide-body');
     const right = screen.getByTestId('slide-side');
-    const seq = ['slide-toggle', 'slide-stage', 'thread', 'slide-story', 'slide-notes'].map((id) => screen.getByTestId(id));
-    for (const el of seq) expect(left.contains(el)).toBe(true);
-    for (let i = 1; i < seq.length; i++) expect(seq[i - 1]!.compareDocumentPosition(seq[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const work = ['slide-toggle', 'slide-stage', 'thread'].map((id) => screen.getByTestId(id));
+    for (const el of work) expect(left.contains(el)).toBe(true);
+    for (let i = 1; i < work.length; i++) expect(work[i - 1]!.compareDocumentPosition(work[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // The conversation grows in the work column with the same composer as main's panel; never in the side column.
     const thread = screen.getByTestId('thread');
     expect(thread.getAttribute('data-layout')).toBe('inline');
     expect(thread.lastElementChild!.tagName).toBe('FORM');
     expect(right.contains(thread)).toBe(false);
     expect(right.querySelector('[aria-label="conversation about this slide"]')).toBeNull();
-    for (const id of ['slide-lanes', 'slide-remarks']) expect(right.contains(screen.getByTestId(id))).toBe(true);
-    expect(screen.getByTestId('slide-lanes').compareDocumentPosition(screen.getByTestId('slide-remarks')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The side column fills its height: what to decide first, then the text the render cannot show.
+    const side = ['slide-lanes', 'slide-remarks', 'slide-story', 'slide-notes'].map((id) => screen.getByTestId(id));
+    for (const el of side) expect(right.contains(el)).toBe(true);
+    for (let i = 1; i < side.length; i++) expect(side[i - 1]!.compareDocumentPosition(side[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(left.contains(screen.getByTestId('slide-story'))).toBe(false);
     // The side column is one scroll area at full height.
     expect(right.contains(screen.getByTestId('slide-side-scroll'))).toBe(true);
     expect(themeCss()).not.toMatch(/\.slide-side-talk/);
     expect(themeCss()).not.toMatch(/\.slide-side-scroll \{[^}]*max-height/);
   });
 
-  it('the work column holds the render and its conversation, the text beside or under them; the render fills it up to 1100px', async () => {
+  it('the work column holds only the render and its conversation; the render takes its width or the height the conversation leaves', async () => {
     const t = setup();
     render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
     await waitFor(() => laneRows().length === 2);
     const work = screen.getByTestId('slide-work');
-    const text = screen.getByTestId('slide-text');
     for (const id of ['slide-toggle', 'slide-stage', 'thread']) expect(work.contains(screen.getByTestId(id))).toBe(true);
-    for (const id of ['slide-story', 'slide-notes']) expect(text.contains(screen.getByTestId(id))).toBe(true);
-    expect(work.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(work.contains(screen.getByTestId('slide-text'))).toBe(false);
     const css = themeCss();
-    expect(css).toMatch(/\.slide-stage \{[^}]*1100px/);
-    // Wide enough, the text column moves beside the render instead of leaving a band right of it.
-    expect(css).toMatch(/@container slide-body \(min-width: [0-9]+px\) \{\s*\.slide-grid \{[^}]*grid-template-columns/);
+    // The body is a size container; the stage is a 16:9 frame as tall as the height left under it, at most the column's width.
+    expect(css).toMatch(/\.slide-main \{[^}]*container: slide-body \/ size/);
+    expect(css).toMatch(/--slide-stage-w: [^;]*100cqh[^;]*16 \/ 9/);
+    expect(css).toMatch(/\.slide-stage \{[^}]*width: min\(100%, var\(--slide-stage-w\)\)/);
+    expect(css).not.toMatch(/\.slide-stage \{[^}]*1100px/);
     // No empty 120px gutter on this screen.
     expect(css).not.toMatch(/\.slide-main \{[^}]*var\(--gutter\)/);
   });
