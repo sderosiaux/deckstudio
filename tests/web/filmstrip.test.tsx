@@ -44,4 +44,17 @@ describe('Filmstrip', () => {
     const selected = screen.getAllByTestId('thumb').filter((el) => el.getAttribute('aria-pressed') === 'true');
     expect(selected.map((el) => el.getAttribute('data-slide'))).toEqual(['s3']);
   });
+
+  it('a count dot per slide with open remarks: the number, coloured by the worst severity, named in the thumb', () => {
+    render(<Filmstrip order={order} slides={slides} thumbs={{}} onSelect={() => {}} remarkDots={{ s2: { count: 3, severity: 'warn' }, s4: { count: 1, severity: 'info' } }} />);
+    const dots = screen.getAllByTestId('remark-dot');
+    expect(dots.map((d) => `${d.closest('[data-testid="thumb"]')!.getAttribute('data-slide')}:${d.textContent}:${d.getAttribute('data-severity')}`)).toEqual(['s2:3:warn', 's4:1:info']);
+    expect(screen.getAllByTestId('thumb')[1]!.getAttribute('aria-label')).toBe('Slide 2: The problem, 3 open remarks');
+    expect(screen.getAllByTestId('thumb')[3]!.getAttribute('aria-label')).toBe('Slide 4: Some code, 1 open remark');
+  });
+
+  it('while a range is selected no hover title is drawn: the range caption is the only label under the strip', () => {
+    render(<Filmstrip order={order} slides={slides} thumbs={{}} onSelect={() => {}} selected={['s2', 's3', 's4']} />);
+    expect(document.querySelectorAll('.thumb-title')).toHaveLength(0);
+  });
 });

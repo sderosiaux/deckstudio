@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import type React from 'react';
-import type { Anchor, Lane, Remark, SlideId, Version } from '../../../src/model/types.js';
+import type { Anchor, Lane, Remark, SlideId, ThreadKey, ThreadMessage, Version } from '../../../src/model/types.js';
 import {
   BRIEF_PATH,
   focusPath,
@@ -27,13 +27,14 @@ import {
   type DeckPayload,
   type LanePreviewPayload,
 } from '../api.js';
-import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
+import { END_W, EdgeFade, useVisibleColumns, type VisibleColumns } from '../components/EdgeFade.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { FAILED_THUMB, LaneRow, MoveRisers, anchorColumns, movedColumns } from '../components/LaneRow.js';
+import { FAILED_THUMB, LaneRow, MoveRisers, anchorColumns } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
-import { RemarkRow, placeCards, type Pinned } from '../components/RemarkRow.js';
+import { RemarkRow } from '../components/RemarkRow.js';
 import { ScreenHeader } from '../components/ScreenHeader.js';
 import { Thread } from '../components/Thread.js';
+import type { RemarkDot } from '../components/Thumb.js';
 import { VersionLine } from '../components/VersionLine.js';
 import { modified, typingIn } from '../keys.js';
 
@@ -50,6 +51,8 @@ interface Queued {
 }
 const emptyQueue = (): Queued => ({ deck: false, lanes: false, refresh: new Set(), closed: new Set() });
 const byCreated = (a: Lane, b: Lane): number => a.createdAt.localeCompare(b.createdAt);
+/** Lane rows read newest first: the work just asked for sits right under the strip. */
+const newestFirst = (a: Lane, b: Lane): number => b.createdAt.localeCompare(a.createdAt);
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** A "propose" sent from this screen, waiting for the co-author's lane. */
@@ -63,10 +66,13 @@ interface ProposeNote {
   touched: ReadonlySet<string>;
 }
 const MAX_NOTES = 5;
-/** Rows of remark cards under the filmstrip. */
-const REMARK_ROWS = 1;
-/** The selection panel is never narrower than this many columns; it runs on to the visible right edge of the canvas. */
+/** The selection panel runs from its column to the visible right edge, never narrower than 5 columns nor wider than 9. */
 const PANEL_MIN_COLS = 5;
+const PANEL_MAX_COLS = 9;
+/** Room kept between the panel's bottom and the canvas's visible bottom (the versions rail starts there). */
+const PANEL_CLEAR = 16;
+/** The lane rows' grid starts 6px right of the gutter (their side padding). */
+const ROW_PAD = 6;
 /** sessionStorage key: the creator reopened the whole-deck conversation while a selection holds the panel. */
 const WHOLE_DECK_KEY = 'deckstudio.wholeDeck';
 const readWholeDeck = (): boolean => {
@@ -90,6 +96,83 @@ export function noteHref(note: ProposeNote, remarks: readonly Remark[], lanes: r
 }
 
 const WHOLE_DECK: Anchor = { kind: 'arc' };
+
+/**
+ * The whole-deck conversation without the turns about a slide or a range: a user message with such a context and the
+ * replies up to the next user message belong to that selection's panel. A message with no context is the whole deck's.
+ */
+export function deckTurns(messages: readonly ThreadMessage[]): ThreadMessage[] {
+  let scoped = false;
+  return messages.filter((m) => {
+    if (m.role === 'user') scoped = m.context !== null && m.context.kind !== 'arc';
+    return !scoped;
+  });
+}
+
+/** Width of the selection panel in columns, from its 0-based column: to the visible end, clamped to 5..9 (9 when its column is out of view). */
+export function panelSpan(col: number, view: { first: number; end: number } | undefined): number {
+  const toEdge = view && col >= view.first && col < view.end ? view.end - col : PANEL_MAX_COLS;
+  return Math.min(PANEL_MAX_COLS, Math.max(PANEL_MIN_COLS, toEdge));
+}
+
+/** Scrolls `canvas` sideways so that main's column `col` (0-based) is the first one right of the gutter. */
+export function revealColumn(canvas: HTMLElement, col: number): void {
+  const thumb = canvas.querySelectorAll('[data-strip="main"] [data-testid="thumb"]')[col];
+  if (!thumb) return;
+  const edge = (canvas.querySelector('.gutter') ?? canvas).getBoundingClientRect().right + ROW_PAD;
+  canvas.scrollLeft += thumb.getBoundingClientRect().left - edge;
+}
+
+/** Remark counts per main slide: a remark on a range counts on every slide of it; the colour is the worst severity. */
+function remarkDots(remarks: readonly Remark[], order: SlideId[]): Record<SlideId, RemarkDot> {
+  const dots: Record<SlideId, RemarkDot> = {};
+  for (const r of remarks) {
+    const cols = r.anchor.kind === 'arc' ? null : anchorColumns(r.anchor, order);
+    if (!cols) continue;
+    for (const id of order.slice(cols.start, cols.start + cols.span)) {
+      const d = dots[id];
+      dots[id] = { count: (d?.count ?? 0) + 1, severity: d?.severity === 'warn' || r.severity === 'warn' ? 'warn' : 'info' };
+    }
+  }
+  return dots;
+}
+
+/**
+ * The "+N" ends of main's strip as buttons that page it: on the left, the count of slides scrolled past (drawn here,
+ * over the gutter's right end); on the right, a button over the count EdgeFade prints. Nothing while all fits.
+ * Place it in the positioned box that holds the canvas; the canvas's 24px left padding is assumed.
+ */
+export function StripPager({ visible, onPage }: { visible: VisibleColumns | null; onPage(dir: -1 | 1): void }) {
+  const row = visible?.rows[0];
+  if (!visible || !row) return null;
+  const box: CSSProperties = { position: 'absolute', top: row.top, width: END_W, height: 40, transform: 'translateY(-50%)' };
+  return (
+    <>
+      {visible.first > 0 ? (
+        <button
+          type="button"
+          className="strip-more"
+          aria-label={`show the previous slides (${visible.first} more)`}
+          title="Page back"
+          onClick={() => onPage(-1)}
+          style={{ ...box, left: `calc(24px + var(--gutter) - ${END_W}px)` }}
+        >
+          +{visible.first}
+        </button>
+      ) : null}
+      {row.hidden > 0 ? (
+        <button
+          type="button"
+          className="strip-more strip-more-over"
+          aria-label={`show the next slides (${row.hidden} more)`}
+          title="Page on"
+          onClick={() => onPage(1)}
+          style={{ ...box, left: visible.cut }}
+        />
+      ) : null}
+    </>
+  );
+}
 
 export function Main() {
   const [load, setLoad] = useState<Load>({ status: 'loading' });
@@ -125,6 +208,17 @@ export function Main() {
     }
   }, []);
   const [lanes, setLanes] = useState<Lane[]>([]);
+  // Lanes created or revised from a request here, latest first: they lead the lane rows. `flash` outlines one once.
+  const [promoted, setPromoted] = useState<readonly string[]>([]);
+  const [flash, setFlash] = useState<string | null>(null);
+  const revealLane = useRef<string | null>(null);
+  // Threads with a request sent from the selection panel and no reply yet: a lane event meanwhile answers it.
+  const asking = useRef(new Set<string>());
+  const promote = useCallback((laneId: string) => {
+    setPromoted((prev) => [laneId, ...prev.filter((id) => id !== laneId)]);
+    setFlash(laneId);
+    revealLane.current = laneId;
+  }, []);
   // Lanes a check proposed that the creator has not opened: kept off main, reachable from their remark's post-it.
   const [drafts, setDrafts] = useState<ReadonlySet<string>>(new Set());
   const [notes, setNotes] = useState<ProposeNote[]>([]);
@@ -355,8 +449,13 @@ export function Main() {
         void reloadRemarks();
       } else if (e.type === 'remarks.changed') {
         void reloadRemarks();
+      } else if (e.type === 'assistant.done' || e.type === 'agent.error') {
+        asking.current.delete(e.thread);
       } else if (e.type === 'lane.created' || e.type === 'lane.updated') {
         schedule((q) => q.refresh.add(e.laneId));
+        // The answer to a request from the panel (or a lane appearing for a propose): first among the lanes, flashed.
+        const proposing = e.type === 'lane.created' && notesRef.current.length > 0;
+        if (asking.current.size > 0 || proposing) promote(e.laneId);
         // A lane answering a propose from here is linked to its remark (remark.laneId): look for the link.
         if (notesRef.current.length > 0) {
           setNotes((prev) => prev.map((n) => (n.touched.has(e.laneId) ? n : { ...n, touched: new Set(n.touched).add(e.laneId) })));
@@ -414,7 +513,7 @@ export function Main() {
       timer.current = null;
       queued.current = emptyQueue();
     };
-  }, [reloadAll, reloadRemarks, refreshThumb, schedule]);
+  }, [reloadAll, reloadRemarks, refreshThumb, schedule, promote]);
 
   const canvas = useRef<HTMLElement>(null);
   const rows = useRef<HTMLDivElement>(null);
@@ -442,6 +541,35 @@ export function Main() {
     history.replaceState(null, '', location.pathname + location.search);
   }, [lanes]);
 
+  // A promoted lane scrolls into view once its row is on screen (its scroll-margin clears the sticky strip).
+  useEffect(() => {
+    const id = revealLane.current;
+    if (!id || !lanes.some((l) => l.id === id)) return;
+    revealLane.current = null;
+    // Vertically only: the strip stays on the columns the creator was looking at.
+    const left = canvas.current?.scrollLeft ?? 0;
+    document.getElementById(`lane-row-${id}`)?.scrollIntoView?.({ block: 'nearest' });
+    if (canvas.current) canvas.current.scrollLeft = left;
+  }, [lanes, promoted]);
+
+  // The panel's threads tell the screen when a request leaves; the whole-deck bar reads only whole-deck turns.
+  const panelApi = useMemo(
+    () => ({
+      ...threadApi,
+      postMessage: async (key: ThreadKey, text: string, ctx: Anchor | null): Promise<void> => {
+        asking.current.add(key);
+        try {
+          await threadApi.postMessage(key, text, ctx);
+        } catch (err) {
+          asking.current.delete(key);
+          throw err;
+        }
+      },
+    }),
+    [],
+  );
+  const deckApi = useMemo(() => ({ ...threadApi, getThread: async (key: ThreadKey) => deckTurns(await threadApi.getThread(key)) }), []);
+
   const select = useCallback((id: SlideId) => {
     const extend = shift.current;
     setContext((c) => {
@@ -461,7 +589,10 @@ export function Main() {
     if (context.kind !== 'slide') return;
     const id = context.slide;
     const onKey = (e: KeyboardEvent): void => {
-      if (e.defaultPrevented || modified(e) || typingIn(e.target)) return;
+      // Enter in the panel's empty composer: nothing to send, so it opens the slide (click a thumb, then Enter).
+      const t = e.target;
+      const emptyComposer = e.key === 'Enter' && t instanceof HTMLInputElement && t.value === '' && t.closest('[data-testid="selection-panel"]') !== null;
+      if (e.defaultPrevented || modified(e) || (typingIn(e.target) && !emptyComposer)) return;
       if (e.key !== 'Enter' && e.key !== 'e') return;
       if (e.key === 'Enter' && e.target instanceof Element && e.target.closest('button, a') && !e.target.closest('[data-testid="thumb"]')) return;
       e.preventDefault();
@@ -522,6 +653,22 @@ export function Main() {
     return () => ro?.disconnect();
   }, [load.status]);
 
+  // The strip header stays on top of the canvas: the selection panel never grows past the space left under it, so its
+  // composer stays above the versions rail; the log scrolls inside.
+  const stripHeader = useRef<HTMLDivElement>(null);
+  const [room, setRoom] = useState<{ canvas: number; strip: number }>({ canvas: 0, strip: 0 });
+  useLayoutEffect(() => {
+    const el = canvas.current;
+    const head = stripHeader.current;
+    if (!el || !head) return;
+    const measure = (): void => setRoom((prev) => (prev.canvas === el.clientHeight && prev.strip === head.offsetHeight ? prev : { canvas: el.clientHeight, strip: head.offsetHeight }));
+    measure();
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    ro?.observe(el);
+    ro?.observe(head);
+    return () => ro?.disconnect();
+  }, [load.status]);
+
   // Clicking empty space (not a thumb, not a button) clears the selection back to the whole deck.
   const clearOnEmpty = (e: MouseEvent<HTMLElement>): void => {
     if (e.target instanceof Element && e.target.closest('button, a, input, textarea, [data-testid="thumb"], [data-testid="post-it"], [data-testid="selection-panel"]')) return;
@@ -542,10 +689,11 @@ export function Main() {
   const { deck, versions } = load;
   const shownThumbs = failed.size === 0 ? thumbs : Object.fromEntries(deck.order.map((id) => [id, failed.has(id) ? FAILED_THUMB : thumbs[id]]));
   const selectedCols = context.kind === 'arc' ? null : anchorColumns(context, deck.order);
-  // One card per open remark anchored on main, pinned to the first column of its anchor.
-  // Remarks from a lane-scoped check describe that lane's preview, not main: they go on the lane row.
+  // Remarks on main are count dots on their slides; the selected slides' own remarks open in the panel.
+  // Remarks from a lane-scoped check describe that lane's preview, not main: they stay with the lane row.
   const openRemarks = remarks.filter((r) => r.status === 'open');
   const mainRemarks = openRemarks.filter((r) => !r.sourceLaneId);
+  const dots = remarkDots(mainRemarks, deck.order);
   const propose = async (id: string): Promise<void> => {
     const r = remarks.find((x) => x.id === id);
     await remarkApi.proposeRemark(id);
@@ -561,52 +709,45 @@ export function Main() {
     if (!lane) return undefined;
     return { label: lane.label, onShow: () => document.getElementById(`lane-row-${lane.id}`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }) };
   };
-  // The selection's own remarks (anchored inside it) live in its panel, not on a post-it.
-  const insideSelection = (remark: Remark): boolean => {
+  // Remarks touching the selection: warnings first, then those on exactly the selection, then by where they start.
+  const touches = (remark: Remark): { start: number; span: number } | null => {
     const cols = remark.anchor.kind === 'arc' ? null : anchorColumns(remark.anchor, deck.order);
-    return !!cols && !!selectedCols && cols.start >= selectedCols.start && cols.start + cols.span <= selectedCols.start + selectedCols.span;
+    if (!cols || !selectedCols) return null;
+    return cols.start < selectedCols.start + selectedCols.span && selectedCols.start < cols.start + cols.span ? cols : null;
   };
-  const panelRemarks = selectedCols ? mainRemarks.filter(insideSelection) : [];
-  const pinned: Pinned[] = mainRemarks.flatMap((remark) => {
-    if (remark.anchor.kind === 'arc' || insideSelection(remark)) return [];
-    const cols = anchorColumns(remark.anchor, deck.order);
-    if (!cols) return [];
-    // Selected: the current selection starts inside the remark's columns.
-    const selected = selectedCols !== null && selectedCols.start >= cols.start && selectedCols.start < cols.start + cols.span;
-    return [
-      {
-        id: remark.id,
-        col: cols.start,
-        span: cols.span,
-        selected,
-        card: (
-          <div
-            onClick={(e) => {
-              setFocusComposer(e.detail > 0);
-              setContext(remark.anchor);
-            }}
-            style={{ cursor: 'pointer' }}
-          >
-            <RemarkPostIt
-              remark={remark}
-              onPropose={propose}
-              onResolve={remarkApi.resolveRemark}
-              draftLaneId={draftOf(remark)}
-              onOpenLane={openLane}
-              selected={selected}
-              openedLane={openedLane(remark)}
-            />
-          </div>
-        ),
-      },
-    ];
+  const exact = (c: { start: number; span: number }): boolean => !!selectedCols && c.start === selectedCols.start && c.span === selectedCols.span;
+  const panelRemarks = mainRemarks
+    .flatMap((r) => {
+      const cols = touches(r);
+      return cols ? [{ r, cols }] : [];
+    })
+    .sort(
+      (a, b) =>
+        Number(b.r.severity === 'warn') - Number(a.r.severity === 'warn') ||
+        Number(exact(b.cols)) - Number(exact(a.cols)) ||
+        a.cols.start - b.cols.start,
+    )
+    .map((x) => x.r);
+  const shownLanes = [...lanes].sort((a, b) => {
+    const rank = (l: Lane): number => {
+      const i = promoted.indexOf(l.id);
+      return i < 0 ? promoted.length : i;
+    };
+    return rank(a) - rank(b) || newestFirst(a, b);
   });
-  // Moved hairlines run from main's thumbs down to their lane: the remark cards they pass keep clear of their columns.
-  const movedByLane = lanes.map((l) => movedColumns(l, previews[l.id], deck.order));
-  const movedBelow = (i: number): ReadonlySet<number> => new Set(movedByLane.slice(i).flat());
-  const mainAvoid = movedBelow(0);
-  // Main keeps its lanes in view: one row of cards, the selection's own remarks first; the pins still mark every slide.
-  const hiddenRemarks = pinned.length - placeCards(pinned, deck.order.length, REMARK_ROWS, view, mainAvoid).length;
+  const openFromRemark = (laneId: string): Promise<void> => {
+    promote(laneId);
+    return openLane(laneId);
+  };
+  const page = (dir: -1 | 1): void => {
+    const el = canvas.current;
+    if (!el || !visible) return;
+    const per = Math.max(1, visible.end - visible.first);
+    revealColumn(el, dir > 0 ? Math.min(deck.order.length - 1, visible.end) : Math.max(0, visible.first - per));
+  };
+  const reveal = (col: number): void => {
+    if (canvas.current) revealColumn(canvas.current, col);
+  };
   const openCount = mainRemarks.length;
   // The player opens on the selected slide (last of a range); Escape in the player comes back here with it selected.
   const presentSlide = context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : null;
@@ -663,8 +804,10 @@ export function Main() {
         ) : null;
   const panelCol = selectedCols?.start ?? null;
   // Anchored on the selection's first column, it runs to the visible right edge; scrolled out of sight, it keeps its column.
+  // Out of view, it is placed without the view: at its own column, nine columns wide, scrolled away with them.
   const panelView = view && panelCol !== null && panelCol >= view.first && panelCol < view.end ? view : undefined;
-  const panelSpan = panelCol === null ? 0 : Math.max(PANEL_MIN_COLS, (panelView?.end ?? deck.order.length) - panelCol);
+  const panelCols = panelCol === null ? 0 : panelSpan(panelCol, panelView);
+  const panelMax = room.canvas > 0 ? Math.max(160, room.canvas - room.strip - PANEL_CLEAR) : null;
   const panelSlide = context.kind === 'slide' ? context.slide : context.kind === 'range' ? deck.order[selectedCols?.start ?? 0] : undefined;
   const selectionPanel =
     panelCol !== null && context.kind !== 'arc' ? (
@@ -680,7 +823,7 @@ export function Main() {
             {
               id: 'selection',
               col: panelCol,
-              span: panelSpan,
+              span: panelCols,
               selected: true,
               slide: panelSlide,
               card: (
@@ -689,7 +832,8 @@ export function Main() {
                   data-slide={panelSlide}
                   data-kind={context.kind}
                   aria-label={context.kind === 'slide' ? 'conversation about this slide' : 'conversation about these slides'}
-                  style={{ position: 'relative', zIndex: 1, padding: 16, borderRadius: 'var(--radius)', background: 'var(--card)', border: '1px solid var(--line)', boxShadow: 'var(--shadow)', cursor: 'auto' }}
+                  className="selection-panel"
+                  style={{ ...(panelMax === null ? {} : { '--panel-max-h': `${panelMax}px` }), position: 'relative', zIndex: 1, padding: 16, borderRadius: 'var(--radius)', background: 'var(--card)', border: '1px solid var(--line)', boxShadow: 'var(--shadow)', cursor: 'auto' } as CSSProperties}
                 >
                   <Thread
                     key={context.kind === 'slide' ? `slide:${context.slide}` : 'range'}
@@ -700,18 +844,18 @@ export function Main() {
                     only={context.kind === 'range' ? context : undefined}
                     order={deck.order}
                     slides={deck.slides}
-                    api={threadApi}
+                    api={panelApi}
                     subscribe={fanout}
                     onClearContext={() => setContext({ kind: 'arc' })}
                     onEditContext={editSlide}
                     autoFocus={focusComposer}
                     layout="inline"
-                    logMaxHeight="min(360px, 40vh)"
+                    logMaxHeight={panelMax === null ? 'min(360px, 40vh)' : 'var(--panel-max-h)'}
                     lead={
                       panelRemarks.length > 0 || (!barOpen && notesBlock) ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                           {panelRemarks.length > 0 ? (
-                            <div data-testid="panel-remarks" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                            <div data-testid="panel-remarks" className="panel-remarks" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                               {panelRemarks.map((r) => (
                                 <div key={r.id} style={{ width: 280, maxWidth: '100%' }}>
                                   <RemarkPostIt
@@ -719,8 +863,9 @@ export function Main() {
                                     onPropose={propose}
                                     onResolve={remarkApi.resolveRemark}
                                     draftLaneId={draftOf(r)}
-                                    onOpenLane={openLane}
+                                    onOpenLane={openFromRemark}
                                     openedLane={openedLane(r)}
+                                    expandable
                                   />
                                 </div>
                               ))}
@@ -766,16 +911,20 @@ export function Main() {
             data-testid="canvas"
             className="fit-columns"
             onClick={clearOnEmpty}
-            style={{ flex: 1, minHeight: 0, overflow: 'auto', paddingTop: 8, paddingRight: 24, paddingLeft: 24, paddingBottom: railHeight }}
+            style={{ '--strip-h': `${room.strip}px`, flex: 1, minHeight: 0, overflow: 'auto', paddingTop: 8, paddingRight: 24, paddingLeft: 24, paddingBottom: railHeight } as CSSProperties}
           >
             {deck.order.length === 0 ? (
               <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
             ) : (
               // max-content: the filmstrip and the lane rows scroll together, so lane columns stay under main's.
               // z-index 0: a stacking context, so the moved hairlines pass under the rows and the remark cards.
-              <div ref={rows} style={{ position: 'relative', zIndex: 0, width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 24 }}>
+              // END_W of right padding: scrolled to the end, the last slide clears the "+N" slot instead of hiding behind it.
+              <div ref={rows} style={{ position: 'relative', zIndex: 0, width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 24, paddingRight: END_W }}>
                 <MoveRisers root={rows} deps={[deck.order, lanes, previews]} />
                 <div
+                  ref={stripHeader}
+                  data-testid="strip-header"
+                  className="strip-sticky"
                   onClickCapture={(e) => {
                     shift.current = e.shiftKey;
                     pointer.current = e.detail > 0;
@@ -789,10 +938,11 @@ export function Main() {
                     onSelect={onSelect}
                     onOpen={presentFrom}
                     titleLink={context.kind === 'slide' ? editLink : undefined}
+                    remarkDots={dots}
                   />
                   {rangeCols
                     ? gridRow(
-                        <div style={{ gridColumn: `${rangeCols.start + 1} / span ${rangeCols.span}`, marginTop: -16 }}>
+                        <div style={{ gridColumn: `${rangeCols.start + 1} / span ${rangeCols.span}`, marginTop: -16, paddingBottom: 4 }}>
                           <div data-testid="range-selection" style={{ height: 2, borderRadius: 1, background: 'var(--accent)' }} />
                           <span data-testid="range-caption" className="meta" style={{ display: 'block', marginTop: 2, color: 'var(--ink)', fontWeight: 500, whiteSpace: 'nowrap' }}>
                             {anchorLabel(context, deck.order)}
@@ -800,25 +950,17 @@ export function Main() {
                         </div>,
                       )
                     : null}
-                  {selectionPanel}
-                  {pinned.length > 0 ? (
-                    <div style={{ display: 'flex', marginTop: 2 }}>
-                      <div className="gutter" style={{ paddingTop: 14 }}>
-                        {hiddenRemarks > 0 ? (
-                          <span className="meta" data-testid="remarks-more" style={{ display: 'block' }}>
-                            {hiddenRemarks} more {hiddenRemarks === 1 ? 'remark' : 'remarks'}: select a slide
-                          </span>
-                        ) : null}
-                      </div>
-                      <RemarkRow testId="post-its" items={pinned} columns={deck.order.length} maxRows={REMARK_ROWS} view={view} avoid={mainAvoid} />
-                    </div>
-                  ) : null}
-                  {remarkError ? (
-                    <p style={{ margin: '6px 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>
-                      <span>Remarks: {remarkError}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
-                    </p>
-                  ) : null}
                 </div>
+                {selectionPanel || remarkError ? (
+                  <div style={{ marginTop: -24 }}>
+                    {selectionPanel}
+                    {remarkError ? (
+                      <p style={{ margin: '6px 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>
+                        <span>Remarks: {remarkError}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
                 {laneError && !lanesFailed ? <p style={{ margin: '0 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>Lanes: {laneError}</p> : null}
                 {lanesFailed ? (
                   <p role="alert" style={{ margin: '0 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 13 }}>
@@ -829,12 +971,13 @@ export function Main() {
                     No open lanes. Ask the co-author in the thread; its proposals appear here, under the slides they touch.
                   </p>
                 ) : (
-                  lanes.map((l, i) => (
+                  shownLanes.map((l) => (
                     <LaneRow
                       key={l.id}
                       lane={l}
                       preview={previews[l.id]}
                       mainOrder={deck.order}
+                      mainSlides={deck.slides}
                       mainThumbs={shownThumbs}
                       api={laneApi}
                       failedThumbs={failedLaneThumbs}
@@ -842,7 +985,9 @@ export function Main() {
                       remarks={openRemarks.filter((r) => r.sourceLaneId === l.id)}
                       remarkApi={trackedRemarkApi}
                       view={view}
-                      avoid={movedBelow(i + 1)}
+                      onReveal={reveal}
+                      flash={flash === l.id}
+                      onFlashEnd={(id) => setFlash((f) => (f === id ? null : f))}
                     />
                   ))
                 )}
@@ -850,6 +995,7 @@ export function Main() {
             )}
           </main>
           <EdgeFade visible={visible} />
+          <StripPager visible={visible} onPage={page} />
         </div>
         <div ref={rail} data-testid="versions-rail" style={{ flex: '0 0 auto', padding: '16px 24px', borderTop: '1px solid var(--line)', background: 'var(--paper)' }}>
           <VersionLine versions={versions} current={deck.state.version} />
@@ -871,7 +1017,7 @@ export function Main() {
               context={WHOLE_DECK}
               order={deck.order}
               slides={deck.slides}
-              api={threadApi}
+              api={deckApi}
               subscribe={fanout}
             />
           </div>
