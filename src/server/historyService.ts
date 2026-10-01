@@ -1,6 +1,8 @@
+import { z } from 'zod';
 import { newId } from '../model/ids.js';
 import { diffVersions } from '../model/ops.js';
 import type { Change, DiffEntry, Lane, Slide, SlideId, SlidePatch, Snapshot, Version } from '../model/types.js';
+import { SlidePatchSchema } from '../model/schema.js';
 import type { DeckStore } from '../store/deckStore.js';
 import type { Bus } from './bus.js';
 import { emitLaneRebase, rebaseOpenLanesAfterMain } from './laneService.js';
@@ -13,6 +15,28 @@ export class HistoryError extends Error {
   ) {
     super(message);
     this.name = 'HistoryError';
+  }
+}
+
+const Index = z.number().int().nonnegative();
+const SlideIdSchema = z.string().min(1);
+const PatchKeySchema = SlidePatchSchema.keyof();
+
+/** A diff entry as the restore route receives it and as a restore version stores it (JSON in cause.entry). */
+export const DiffEntrySchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('added'), slide: SlideIdSchema, at: Index }),
+  z.object({ kind: z.literal('removed'), slide: SlideIdSchema, wasAt: Index }),
+  z.object({ kind: z.literal('modified'), slide: SlideIdSchema, fields: z.array(PatchKeySchema) }),
+  z.object({ kind: z.literal('moved'), slide: SlideIdSchema, from: Index, to: Index }),
+]);
+
+/** The entry a restore version stored, or null when it does not read as one. */
+export function storedEntry(raw: string): DiffEntry | null {
+  try {
+    const parsed = DiffEntrySchema.safeParse(JSON.parse(raw));
+    return parsed.success ? (parsed.data as DiffEntry) : null;
+  } catch {
+    return null;
   }
 }
 
@@ -39,6 +63,29 @@ const pick = (patch: SlidePatch, fields: readonly (keyof SlidePatch)[]): SlidePa
 function placeAt(order: readonly SlideId[], id: SlideId, at: number): SlideId[] {
   const i = Math.max(0, Math.min(at, order.length));
   return [...order.slice(0, i), id, ...order.slice(i)];
+}
+
+/**
+ * What a restore did, for the version line: the slide by its number and title, and the version it went back to.
+ * `before` is main just before the restore, `after` the restore version. A removed slide is numbered where it was;
+ * the others where they are after the restore.
+ */
+export function describeRestore(from: number, entry: DiffEntry, before: Snapshot, after: Snapshot): string {
+  const ref = (s: Snapshot): string => {
+    const i = s.order.indexOf(entry.slide);
+    const title = s.slides[entry.slide]?.title;
+    return i < 0 || title === undefined ? 'a slide' : `slide ${i + 1} (${title})`;
+  };
+  switch (entry.kind) {
+    case 'added':
+      return `removed ${ref(before)}, back to v${from}`;
+    case 'removed':
+      return `brought back ${ref(after)} from v${from}`;
+    case 'modified':
+      return `reverted ${entry.fields.join(', ') || 'content'} of ${ref(after)} to v${from}`;
+    case 'moved':
+      return `moved ${ref(after)} back to v${from}`;
+  }
 }
 
 export class HistoryService {

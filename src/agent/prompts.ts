@@ -29,6 +29,45 @@ Reply in the language the creator writes in: the language of the creator's last 
 Never write a lane id, a change id, a slide id or a tool name in a reply: the creator sees none of them. Name a lane by its label ("lane: Shorter hook title"), a change by what it does, and a slide as "slide N (title)" with its current position in the deck. Plain sentences, no markdown headings, no bullet lists, no bold. Never mention pixel sizes, coordinates or layout rules in a reply: describe the narrative intent of the change in one or two sentences. Keep replies short: the lane is the deliverable, not the chat.
 `.trim();
 
+export type ReplyLanguage = 'en' | 'fr';
+
+// Function words only: they carry the language whatever the topic, and deck jargon (slide, lane, log) is in neither list.
+const EN_WORDS = new Set(
+  'the a an of to in on and or but is are was be it this that these those with for from by as at not no do does make keep can could would should please what why how which my your its their than then there here more less only also just one two'.split(' '),
+);
+const FR_WORDS = new Set(
+  "le la les un une des du de d l au aux et ou mais est sont était être ce cet cette ces avec pour par dans sur sous pas ne plus moins que qui quoi pourquoi comment mon ma mes ton ta tes son sa ses leur leurs je tu il elle on nous vous ils elles fais garde peux veux merci aussi juste trop très".split(' '),
+);
+const FR_LETTERS = /[àâæçéèêëîïôœùûüÿ]/i;
+/** Fewer words than this and the message says nothing reliable about its language ("shorter title", "ok"). */
+const MIN_WORDS = 3;
+
+function detect(text: string): ReplyLanguage | null {
+  const words = text.toLowerCase().split(/[^\p{L}]+/u).filter(Boolean);
+  if (words.length < MIN_WORDS) return null;
+  let en = 0;
+  let fr = 0;
+  for (const w of words) {
+    if (EN_WORDS.has(w)) en++;
+    if (FR_WORDS.has(w)) fr++;
+    if (FR_LETTERS.test(w)) fr++;
+  }
+  return en > fr ? 'en' : fr > en ? 'fr' : null;
+}
+
+/**
+ * The language the reply must use: the creator's message's own, or, when the message is too short or too mixed to
+ * tell, the language of the brief's message (then its abstract), then English.
+ */
+export function replyLanguage(text: string, brief: Pick<Brief, 'message' | 'abstract'>): ReplyLanguage {
+  return detect(text) ?? detect(brief.message) ?? detect(brief.abstract) ?? 'en';
+}
+
+/** The last line of every message sent to the model: the system rule alone was ignored (French replies to English). */
+export function replyInstruction(lang: ReplyLanguage): string {
+  return lang === 'fr' ? 'Réponds en français.' : 'Reply in English.';
+}
+
 function anchorLabel(a: Anchor): string {
   switch (a.kind) {
     case 'slide':

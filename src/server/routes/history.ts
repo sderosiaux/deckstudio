@@ -1,20 +1,10 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { SlidePatchSchema } from '../../model/schema.js';
 import type { DiffEntry } from '../../model/types.js';
-import { HistoryError, type HistoryService } from '../historyService.js';
+import { DiffEntrySchema, HistoryError, type HistoryService } from '../historyService.js';
 
-const SlideIdSchema = z.string().min(1);
-const Index = z.number().int().nonnegative();
 const VersionN = z.number().int().nonnegative();
-const PatchKeySchema = SlidePatchSchema.keyof();
 
-const DiffEntrySchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('added'), slide: SlideIdSchema, at: Index }),
-  z.object({ kind: z.literal('removed'), slide: SlideIdSchema, wasAt: Index }),
-  z.object({ kind: z.literal('modified'), slide: SlideIdSchema, fields: z.array(PatchKeySchema) }),
-  z.object({ kind: z.literal('moved'), slide: SlideIdSchema, from: Index, to: Index }),
-]);
 const RestoreBody = z.object({ from: VersionN, entry: DiffEntrySchema });
 const OpenAsLaneBody = z.object({ n: VersionN });
 

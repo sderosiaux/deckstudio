@@ -6,7 +6,7 @@ import type { Bus } from '../server/bus.js';
 import type { DeckStore } from '../store/deckStore.js';
 import { nameSlides } from './checks/index.js';
 import { canUseTool } from './permissions.js';
-import { contextHeader, SYSTEM_APPEND } from './prompts.js';
+import { contextHeader, replyInstruction, replyLanguage, SYSTEM_APPEND } from './prompts.js';
 import { DECK_TOOL_NAMES, type makeDeckTools } from './tools.js';
 
 export type AgentEvent =
@@ -54,20 +54,46 @@ const idPattern = (prefix: 'l' | 'c', known: readonly string[]): RegExp => {
 };
 const TOOL_MENTION = new RegExp(`\\s*\`(?:mcp__deck__)?(?:${DECK_TOOL_NAMES.join('|')})(?:\\(\\))?\``, 'g');
 
+const OPEN_Q = '[«"“]';
+const CLOSE_Q = '[»"”]';
+/** Markdown bold or italics the model wraps a name in. */
+const EMPH = '(?:\\*{1,2})?';
+/** "Lane X — « X » : …" → "Lane X: …": the model names the lane, then quotes its label again. */
+const collapseRepeat = (text: string, label: string): string => {
+  const l = escapeRe(label);
+  const first = `${EMPH}(?:${OPEN_Q}\\s*)?${l}(?:\\s*${CLOSE_Q})?${EMPH}`;
+  const again = `${EMPH}${OPEN_Q}\\s*${l}\\s*${CLOSE_Q}${EMPH}`;
+  const re = new RegExp(`\\b([Ll]ane)\\s+${first}\\s*[—–:,-]\\s*${again}(\\s*:)?`, 'g');
+  return text.replace(re, (_m, word: string, colon: string | undefined) => `${word} ${label}${colon ? ':' : ''}`);
+};
+/** "Lane opened:", "Lane ouverte :", "New lane:" and the like, at the very start of a reply. */
+const OPENED_PREFIX = /^\s*(?:(?:new|nouvelle)\s+lane|lane\s+(?:opened|created|proposed|ouverte|créée|proposée))\s*[:—–-]\s*/iu;
+/** The first sentence: up to the first . ! ? followed by a space or the end. */
+const firstSentence = (text: string): string => /^[\s\S]*?[.!?](?=\s|$)/.exec(text)?.[0] ?? text;
+/** The prefix says a lane exists; when the same sentence names the lane, it only repeats that. */
+const dropOpenedPrefix = (text: string, labels: readonly string[]): string => {
+  const m = OPENED_PREFIX.exec(text);
+  if (!m) return text;
+  const rest = text.slice(m[0].length);
+  if (!labels.some((l) => l !== '' && firstSentence(rest).includes(l))) return text;
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+};
+
 /**
  * What the creator reads of a reply: lane ids become the lane's label, change ids "this change", slide ids
- * "slide N (title)" on current main, and backticked tool names go. The model is told the same; this is the guard.
+ * "slide N (title)" on current main, and backticked tool names go. A lane named twice in a row is named once, and a
+ * "lane opened:" prefix goes when the sentence names the lane. The model is told the same; this is the guard.
  */
 export function scrubReply(text: string, ctx: { snapshot: Snapshot; lanes: readonly Lane[] }): string {
   const labels = new Map(ctx.lanes.map((l) => [l.id, l.label]));
   const changeIds = ctx.lanes.flatMap((l) => l.changes.map((c) => c.id));
-  return nameSlides(
-    text
-      .replace(TOOL_MENTION, '')
-      .replace(idPattern('l', [...labels.keys()]), (id) => labels.get(id) ?? 'this lane')
-      .replace(idPattern('c', changeIds), 'this change'),
-    ctx.snapshot,
-  );
+  const named = text
+    .replace(TOOL_MENTION, '')
+    .replace(idPattern('l', [...labels.keys()]), (id) => labels.get(id) ?? 'this lane')
+    .replace(idPattern('c', changeIds), 'this change');
+  const names = [...new Set(labels.values())];
+  const once = names.reduce(collapseRepeat, named);
+  return nameSlides(dropOpenedPrefix(once, names), ctx.snapshot);
 }
 
 /**
@@ -134,7 +160,7 @@ export class AgentSession {
       remark = (await store.remarks()).find((r) => r.id === id);
     }
     const header = contextHeader({ thread, anchor: context, snapshot, brief, themeCss, ...(lane ? { lane } : {}), ...(remark ? { remark } : {}) });
-    return `${header}\n\n${text}`;
+    return `${header}\n\n${text}\n\n${replyInstruction(replyLanguage(text, brief))}`;
   }
 
   private async run(thread: ThreadKey, text: string, context: Anchor | null): Promise<void> {
