@@ -167,6 +167,22 @@ describe('lanes API', () => {
     expect(events).toContainEqual({ type: 'lane.closed', laneId: 'l_b' });
   });
 
+  it('after an accept, a move that became a no-op is orphaned; its lane stays open while it has other pending changes', async () => {
+    const move = (id: string, target: string, after: string | null): Change => ({ id, kind: 'move', slide: target, after, reason: 'r', status: 'pending' });
+    await store.putLane(lane('l_a', [move('c_a', 's4', 's1')]));
+    await store.putLane(lane('l_b', [move('c_b', 's4', 's1'), modify('c_m5', 's5', 'y')]));
+    await store.putLane(lane('l_c', [move('c_c', 's4', 's1')]));
+    expect((await accept('l_a', 'c_a')).statusCode).toBe(200);
+    expect((await deck()).order).toEqual(['s1', 's4', 's2', 's3', 's5']);
+    const b = await getLane('l_b');
+    expect(b.changes.map((c) => [c.id, c.status])).toEqual([
+      ['c_b', 'orphan'],
+      ['c_m5', 'pending'],
+    ]);
+    expect(b.status).toBe('open');
+    expect((await getLane('l_c')).status).toBe('closed');
+  });
+
   it('refuse marks the change refused without committing, and closes the lane once nothing is pending', async () => {
     await store.putLane(lane('l_a', [modify('c_1', 's1', 'x'), modify('c_2', 's2', 'y')]));
 

@@ -56,7 +56,8 @@ describe('contextHeader', () => {
     expect(h).toContain('Anchor slides: "Title s4" (s4)');
     expect(h).toContain('call propose_lane with anchor {"kind":"slide","slide":"s4"}');
     expect(h).toContain('link_remark_lane({"remarkId":"r1","laneId":<the new lane id>})');
-    expect(h).toContain('mention the lane id');
+    expect(h).toContain('name the lane by its label');
+    expect(h).not.toContain('mention the lane id');
     expect(h).not.toContain('revise_lane on it');
   });
 
@@ -122,6 +123,17 @@ describe('reply rules', () => {
     const { SYSTEM_APPEND } = await import('../../src/agent/prompts.js');
     expect(SYSTEM_APPEND).toMatch(/language the creator writes in/);
     expect(SYSTEM_APPEND).toMatch(/Never mention pixel sizes/);
+  });
+
+  it('answer in the language of the last message, whatever the deck or earlier messages use', () => {
+    expect(SYSTEM_APPEND).toMatch(/language of the creator's last message/);
+    expect(SYSTEM_APPEND).toMatch(/even if the deck or earlier messages are in another language/);
+  });
+
+  it('never write ids or tool names in a reply: lanes by label, slides by number and title', () => {
+    expect(SYSTEM_APPEND).toMatch(/Never write a lane id, a change id, a slide id or a tool name in a reply/);
+    expect(SYSTEM_APPEND).toContain('lane: Shorter hook title');
+    expect(SYSTEM_APPEND).toContain('slide N (title)');
   });
 });
 

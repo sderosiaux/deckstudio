@@ -87,6 +87,36 @@ export function slideName(deckOrder: readonly SlideId[], id: SlideId, title: str
   return `slide ${deckOrder.indexOf(id) + 1} (${title})`;
 }
 
+/** A slide id as newId('s') makes it, not glued to a longer token. */
+const SLIDE_ID_SOURCE = 's_[A-Za-z0-9_-]{10}';
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** What naming a slide needs: the order that numbers it and its title. */
+export interface SlideBook {
+  order: readonly SlideId[];
+  slides: Readonly<Record<SlideId, { title: string } | undefined>>;
+}
+
+/**
+ * Replaces slide ids in prose (any newId('s') id, and every id of `book`) by "slide N (title)" in `book`'s order,
+ * or "slide N" with `titles: false`. A "slide"/"slides" word right before the id is absorbed, so "slide s_x" never
+ * reads "slide slide 3". An id not in the order reads "a removed slide": the creator never sees ids, nor "slide ?".
+ */
+export function nameSlides(text: string, book: SlideBook, opts: { titles?: boolean } = {}): string {
+  const titles = opts.titles ?? true;
+  const known = book.order.filter((id) => !new RegExp(`^${SLIDE_ID_SOURCE}$`).test(id)).sort((a, b) => b.length - a.length);
+  const ids = [SLIDE_ID_SOURCE, ...known.map(escapeRe)].join('|');
+  const re = new RegExp(`(\\b[Ss]lides?\\s+)?(?<![A-Za-z0-9_-])(${ids})(?![A-Za-z0-9_-])`, 'g');
+  return text.replace(re, (_m, word: string | undefined, id: string) => {
+    const capital = word !== undefined && word.startsWith('S');
+    const i = book.order.indexOf(id);
+    if (i < 0) return capital ? 'A removed slide' : 'a removed slide';
+    const title = book.slides[id]?.title;
+    const name = titles && title ? `slide ${i + 1} (${title})` : `slide ${i + 1}`;
+    return capital ? `S${name.slice(1)}` : name;
+  });
+}
+
 /** One entry per slide in deck order: "slide N (title)", id, kind, story, and optionally the body text. */
 export function deckOutline(snap: Snapshot, deckOrder: readonly SlideId[], opts: { bodies: boolean }): string {
   const lines = ['<slides>'];
@@ -123,6 +153,6 @@ NewChange is one of:
   { "kind": "move", "slide": "<slide id>", "after": "<slide id>" | null, "reason": "one line" }
 
 Rules: use only the slide ids listed above ("after": null means first position). Every remark has all four keys. ${laneRule}
-Slide ids only go in "anchor", "slide" and "after" fields. In "text" and "label", name a slide as it is listed above, "slide N (title)"; never write a slide id there: the creator does not see ids.
+In "text", refer to a slide by its id alone (e.g. "the claim of s_AbCdEfGhIj comes too late"): the creator reads it as "slide N (title)" in the deck order of the moment, so numbers stay right when slides move. In "label", name a slide as it is listed above, "slide N (title)", never by its id.
 If there is nothing to report, return { "remarks": [] }.`.trim();
 }

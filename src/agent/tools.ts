@@ -6,13 +6,7 @@ import { z } from 'zod';
 import { newId } from '../model/ids.js';
 import { imageStyleFor, type ImageGen } from './imageGen.js';
 import { applyChange, validateBody } from '../model/ops.js';
-import {
-  AddRemarkInputSchema,
-  ProposeLaneInputSchema,
-  ReviseLaneInputSchema,
-  SlideKindSchema,
-  type NewChange,
-} from '../model/schema.js';
+import { AddRemarkInputSchema, NewChangeSchema, ProposeLaneInputSchema, SlideKindSchema, type NewChange } from '../model/schema.js';
 import type { Anchor, Change, Lane, Origin, Remark, Snapshot } from '../model/types.js';
 import { loadThemeCss } from '../render/defaultTheme.js';
 import { assembleSlideHtml } from '../render/theme.js';
@@ -35,6 +29,18 @@ export const GenerateImageInputSchema = z.object({ prompt: z.string().min(1), si
 export const RunCheckInputSchema = z.object({ name: z.string().min(1) });
 export const LinkRemarkLaneInputSchema = z.object({ remarkId: z.string().min(1), laneId: z.string().min(1) });
 
+const changeId = { id: z.string().min(1).optional().describe('id of the lane change this one revises; omit to match by kind and target slide') };
+const [insertIn, modifyIn, removeIn, moveIn] = NewChangeSchema.options;
+/** A NewChange that may name the lane change it revises. */
+export const RevisedChangeSchema = z.discriminatedUnion('kind', [insertIn.extend(changeId), modifyIn.extend(changeId), removeIn.extend(changeId), moveIn.extend(changeId)]);
+export type RevisedChange = z.infer<typeof RevisedChangeSchema>;
+export const ReviseLaneInputSchema = z.object({
+  laneId: z.string().min(1),
+  changes: z.array(RevisedChangeSchema).min(1),
+  keep: z.boolean().optional().describe('default true: pending changes you do not mention stay as they are, with their ids'),
+  replace: z.boolean().optional().describe('true: pending changes you do not mention are discarded'),
+});
+
 export interface Invalid {
   index: number;
   reason: string;
@@ -50,16 +56,18 @@ export const GENERATE_IMAGE_DESCRIPTION =
   'Returns the asset path to use in a slide body.';
 
 type Handler = (args: unknown) => Promise<object>;
-export type DeckToolName =
-  | 'get_deck'
-  | 'get_slide'
-  | 'render_slide'
-  | 'propose_lane'
-  | 'revise_lane'
-  | 'add_remark'
-  | 'generate_image'
-  | 'run_check'
-  | 'link_remark_lane';
+export const DECK_TOOL_NAMES = [
+  'get_deck',
+  'get_slide',
+  'render_slide',
+  'propose_lane',
+  'revise_lane',
+  'add_remark',
+  'generate_image',
+  'run_check',
+  'link_remark_lane',
+] as const;
+export type DeckToolName = (typeof DECK_TOOL_NAMES)[number];
 export type DeckToolHandlers = Record<DeckToolName, Handler>;
 
 // ---------------------------------------------------------------------------
@@ -171,6 +179,109 @@ function summarize(c: Change): string {
   }
 }
 
+/** The slide a change is about: what a revision without an id is matched on, with its kind. */
+function targetOf(c: NewChange | Change): string | null {
+  return c.kind === 'insert' ? c.after : c.slide;
+}
+
+interface RevisionPlan {
+  changes: Change[];
+  /** changes[i] came from input[sourceIndex[i]]; -1 for a change kept as it was. */
+  sourceIndex: number[];
+  kept: string[];
+  updated: string[];
+  added: string[];
+  dropped: string[];
+  invalid: Invalid[];
+}
+
+/** The revised version of an existing change: same id (and inserted slide id), new content, pending again. */
+function revised(old: Change, c: NewChange): Change {
+  const base = { id: old.id, status: 'pending' as const, reason: c.reason };
+  if (c.kind === 'modify' && old.kind === 'modify') return { ...base, kind: 'modify', slide: c.slide, patch: { ...old.patch, ...c.patch } };
+  if (c.kind === 'insert' && old.kind === 'insert') return { ...base, kind: 'insert', after: c.after, slide: { id: old.slide.id, ...stripId(c.slide) } };
+  return { ...materialize(c), id: old.id };
+}
+const stripId = <T extends object>(o: T): Omit<T, 'id'> => {
+  const { id: _id, ...rest } = o as T & { id?: unknown };
+  return rest;
+};
+
+/**
+ * Merges a revision into a lane. Decided changes (accepted, refused) always stay. Each input change revises the
+ * pending (or orphan) change it names by id, else the first one of the same kind on the same target, else it is new.
+ * Unmentioned pending changes stay with their ids, unless `replace` drops them.
+ */
+function planRevision(lane: Lane, input: RevisedChange[], replace: boolean): RevisionPlan {
+  const open = lane.changes.filter((c) => c.status === 'pending' || c.status === 'orphan');
+  const invalid: Invalid[] = [];
+  const matched = new Map<string, number>();
+  input.forEach((c, index) => {
+    if (c.id !== undefined) {
+      const old = lane.changes.find((x) => x.id === c.id);
+      if (!old) invalid.push({ index, reason: `change "${c.id}" is not in this lane` });
+      else if (old.status === 'accepted' || old.status === 'refused') invalid.push({ index, reason: `change "${c.id}" is already ${old.status}; it cannot be revised` });
+      else if (old.kind !== c.kind) invalid.push({ index, reason: `change "${c.id}" is a ${old.kind}, not a ${c.kind}` });
+      else if (matched.has(old.id)) invalid.push({ index, reason: `change "${c.id}" is revised twice` });
+      else matched.set(old.id, index);
+      return;
+    }
+    const old = open.find((x) => !matched.has(x.id) && x.kind === c.kind && targetOf(x) === targetOf(c));
+    if (old) matched.set(old.id, index);
+  });
+  const empty = { changes: [], sourceIndex: [], kept: [], updated: [], added: [], dropped: [] };
+  if (invalid.length) return { ...empty, invalid };
+
+  const changes: Change[] = [];
+  const sourceIndex: number[] = [];
+  const kept: string[] = [];
+  const updated: string[] = [];
+  const dropped: string[] = [];
+  for (const c of lane.changes) {
+    const index = matched.get(c.id);
+    if (index !== undefined) {
+      changes.push(revised(c, stripId(input[index]!) as NewChange));
+      sourceIndex.push(index);
+      updated.push(c.id);
+    } else if (c.status === 'accepted' || c.status === 'refused') {
+      changes.push(c);
+      sourceIndex.push(-1);
+    } else if (replace) {
+      dropped.push(c.id);
+    } else {
+      changes.push(c);
+      sourceIndex.push(-1);
+      kept.push(c.id);
+    }
+  }
+  const used = new Set(matched.values());
+  const added: string[] = [];
+  input.forEach((c, index) => {
+    if (used.has(index)) return;
+    const fresh = materialize(stripId(c) as NewChange);
+    changes.push(fresh);
+    sourceIndex.push(index);
+    added.push(fresh.id);
+  });
+  return { changes, sourceIndex, kept, updated, added, dropped, invalid };
+}
+
+/**
+ * Replays the pending changes on `snap` in lane order. A failing change that came from the input is reported at its
+ * input index; a kept change that no longer applies is left to the rebase (it shows as skipped, as before).
+ */
+function replay(snap: Snapshot, changes: Change[], sourceIndex: number[]): Invalid[] {
+  const invalid: Invalid[] = [];
+  let sim = snap;
+  changes.forEach((c, i) => {
+    if (c.status !== 'pending') return;
+    const r = applyChange(sim, c);
+    if (r.ok) sim = r.next;
+    else if (sourceIndex[i]! >= 0) invalid.push({ index: sourceIndex[i]!, reason: `conflicts with another change in this lane: ${r.error}` });
+  });
+  return invalid;
+}
+
 const rejected = (invalid: Invalid[]): ToolError => ({
   error: `Rejected: ${invalid.length} change(s) invalid; nothing was saved. Fix the listed changes (index is 0-based in the changes array) and call again.`,
   invalid,
@@ -260,22 +371,35 @@ export function makeDeckToolHandlers(ctx: DeckToolContext): DeckToolHandlers {
     async revise_lane(args) {
       const p = parse(ReviseLaneInputSchema, args);
       if (!p.ok) return p.err;
-      const { laneId, replaceChanges } = p.value;
+      const { laneId, changes: input, replace } = p.value;
       return store.withLock(async () => {
         const lane = await store.lane(laneId);
         if (!lane) return { error: `lane "${laneId}" does not exist.` };
         // A draft (proposed by a check) can be revised too; it stays a draft until the creator opens it.
         if (lane.status === 'closed') return { error: `lane "${laneId}" is closed; call propose_lane for a new proposal.` };
         const [state, snap] = await Promise.all([store.state(), store.snapshot()]);
-        const { changes, invalid } = checkChanges(snap, replaceChanges);
-        if (invalid.length) return rejected(invalid);
-        // Decisions the creator already made stay; pending (and orphaned) proposals are superseded.
-        const kept = lane.changes.filter((c) => c.status === 'accepted' || c.status === 'refused');
-        // New changes were validated against the current main, so the lane now bases on it.
-        const next: Lane = { ...lane, baseVersion: state.version, changes: [...kept, ...changes] };
+        const plan = planRevision(lane, input, replace === true);
+        if (plan.invalid.length) return rejected(plan.invalid);
+        const refs = input.flatMap((c, index) => {
+          const reasons = refProblems(snap, c);
+          return reasons.length ? [{ index, reason: reasons.join('; ') }] : [];
+        });
+        if (refs.length) return rejected(refs);
+        // The pending changes replay in lane order on current main, so a revision that contradicts a kept change is caught.
+        const conflicts = replay(snap, plan.changes, plan.sourceIndex);
+        if (conflicts.length) return rejected(conflicts);
+        // Validated against the current main, so the lane now bases on it.
+        const next: Lane = { ...lane, baseVersion: state.version, changes: plan.changes };
         await store.putLane(next);
         bus.emit({ type: 'lane.updated', laneId });
-        return { laneId, changes: changes.map((c) => ({ id: c.id, summary: summarize(c) })) };
+        return {
+          laneId,
+          kept: plan.kept,
+          updated: plan.updated,
+          added: plan.added,
+          dropped: plan.dropped,
+          changes: plan.changes.map((c) => ({ id: c.id, summary: summarize(c) })),
+        };
       });
     },
 
@@ -368,7 +492,9 @@ export function makeDeckTools(ctx: DeckToolContext): { server: McpSdkServerConfi
       ),
       tool(
         'revise_lane',
-        'Replace the pending changes of an open lane (accepted and refused changes are kept). Use when asked to modify an existing lane.',
+        'Revise an open lane. Each change revises the pending change it names by id (or, without an id, the one of the same kind on the same slide; a modify patch merges into the old one), or is added. ' +
+          'Pending changes you do not mention stay as they are with their ids (keep, the default); replace: true discards them. Accepted and refused changes always stay. ' +
+          'Returns the kept, updated, added and dropped change ids. Use when asked to modify an existing lane.',
         ReviseLaneInputSchema.shape,
         wrap(h.revise_lane),
       ),

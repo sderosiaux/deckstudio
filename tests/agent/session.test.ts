@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { query, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { FastifyInstance } from 'fastify';
-import { AgentSession } from '../../src/agent/session.js';
+import { AgentSession, scrubReply } from '../../src/agent/session.js';
 import { makeDeckTools } from '../../src/agent/tools.js';
 import { ThumbService } from '../../src/render/thumbs.js';
 import { buildApp } from '../../src/server/app.js';
@@ -160,6 +160,31 @@ describe('AgentSession', () => {
     await s.send('global', 'and now?', { kind: 'slide', slide: 's1' });
     expect(fake.calls[1]!.options.resume).toBe('sess-1');
     expect(fake.calls[1]!.prompt).toContain('Selected: slide s1');
+  });
+
+  it('a reply naming ids and tool names is stored with lane labels, slide names and no tool names', async () => {
+    const raw = 'Lane l1 : `propose_lane` done, c2 dropped on slide s3 and s_ghost00000; see `mcp__deck__render_slide`.';
+    const fake = fakeQuery(async function* () {
+      yield delta(raw);
+      yield assistant(raw);
+      yield success('sess-x');
+    });
+    await session(fake.impl).send('global', 'Make it shorter', null);
+    const [, reply] = await store.thread('global');
+    expect(reply!.text).toBe('Lane Tighter opening : done, this change dropped on slide 3 (Title s3) and a removed slide; see.');
+  });
+
+  it('scrubReply names unknown lanes and changes generically and leaves plain text alone', () => {
+    const order = ['s_AAAAAAAAAA', 's_BBBBBBBBBB'];
+    const ctx = {
+      snapshot: { order, slides: Object.fromEntries(order.map((id, i) => [id, slide(id, { title: `T${i + 1}` })])) },
+      lanes: [{ ...lane, id: 'l__w9KF0bWiS', label: 'Shorter hook title' }],
+    };
+    expect(scrubReply('Lane l__w9KF0bWiS: c_haxIgx-FsA moves s_BBBBBBBBBB, l_unknown123 waits.', ctx)).toBe(
+      'Lane Shorter hook title: this change moves slide 2 (T2), this lane waits.',
+    );
+    expect(scrubReply('Use `revise_lane` then `render_slide` here.', ctx)).toBe('Use then here.');
+    expect(scrubReply('Plain answer, nothing to do.', ctx)).toBe('Plain answer, nothing to do.');
   });
 
   it('lane thread header lists every change and the revise-or-fork instruction', async () => {

@@ -158,6 +158,32 @@ describe('rebaseLane', () => {
     ]);
     expect(rebaseLane(b, fixture()).changes.map((c) => c.status)).toEqual(['pending', 'pending']);
   });
+
+  it('a move whose slide already sits at its target on main becomes orphan; a real move stays pending', () => {
+    // fixture order: s1 s2 s3 s4 s5. s3 already sits after s2; s1 already first.
+    const b = lane([
+      { id: 'b1', kind: 'move', slide: 's3', after: 's2', ...base },
+      { id: 'b2', kind: 'move', slide: 's1', after: null, ...base },
+      { id: 'b3', kind: 'move', slide: 's5', after: 's1', ...base },
+      { id: 'b4', kind: 'modify', slide: 's4', patch: { title: 'x' }, ...base },
+    ]);
+    expect(rebaseLane(b, fixture()).changes.map((c) => [c.id, c.status])).toEqual([
+      ['b1', 'orphan'],
+      ['b2', 'orphan'],
+      ['b3', 'pending'],
+      ['b4', 'pending'],
+    ]);
+  });
+
+  it('a move is judged on main as the earlier pending changes of the lane leave it', () => {
+    // After b1 moves s2 to the end, s3 follows s1: "move s3 after s1" is then a no-op, "move s4 after s1" is not.
+    const b = lane([
+      { id: 'b1', kind: 'move', slide: 's2', after: 's5', ...base },
+      { id: 'b2', kind: 'move', slide: 's3', after: 's1', ...base },
+      { id: 'b3', kind: 'move', slide: 's4', after: 's1', ...base },
+    ]);
+    expect(rebaseLane(b, fixture()).changes.map((c) => c.status)).toEqual(['pending', 'orphan', 'pending']);
+  });
 });
 
 describe('diffVersions', () => {

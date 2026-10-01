@@ -1,12 +1,13 @@
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { newId } from '../model/ids.js';
-import type { Anchor, Lane, Remark, ThreadKey, ThreadMessage } from '../model/types.js';
+import type { Anchor, Lane, Remark, Snapshot, ThreadKey, ThreadMessage } from '../model/types.js';
 import { loadThemeCss } from '../render/defaultTheme.js';
 import type { Bus } from '../server/bus.js';
 import type { DeckStore } from '../store/deckStore.js';
+import { nameSlides } from './checks/index.js';
 import { canUseTool } from './permissions.js';
 import { contextHeader, SYSTEM_APPEND } from './prompts.js';
-import type { makeDeckTools } from './tools.js';
+import { DECK_TOOL_NAMES, type makeDeckTools } from './tools.js';
 
 export type AgentEvent =
   | { type: 'assistant.delta'; thread: ThreadKey; text: string }
@@ -44,6 +45,30 @@ interface TurnOutcome {
 }
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** `id` alone or any id newId(prefix) makes, not glued to a longer token. */
+const idPattern = (prefix: 'l' | 'c', known: readonly string[]): RegExp => {
+  const alts = [`${prefix}_[A-Za-z0-9_-]{10}`, ...[...known].sort((a, b) => b.length - a.length).map(escapeRe)];
+  return new RegExp(`(?<![A-Za-z0-9_-])(?:${alts.join('|')})(?![A-Za-z0-9_-])`, 'g');
+};
+const TOOL_MENTION = new RegExp(`\\s*\`(?:mcp__deck__)?(?:${DECK_TOOL_NAMES.join('|')})(?:\\(\\))?\``, 'g');
+
+/**
+ * What the creator reads of a reply: lane ids become the lane's label, change ids "this change", slide ids
+ * "slide N (title)" on current main, and backticked tool names go. The model is told the same; this is the guard.
+ */
+export function scrubReply(text: string, ctx: { snapshot: Snapshot; lanes: readonly Lane[] }): string {
+  const labels = new Map(ctx.lanes.map((l) => [l.id, l.label]));
+  const changeIds = ctx.lanes.flatMap((l) => l.changes.map((c) => c.id));
+  return nameSlides(
+    text
+      .replace(TOOL_MENTION, '')
+      .replace(idPattern('l', [...labels.keys()]), (id) => labels.get(id) ?? 'this lane')
+      .replace(idPattern('c', changeIds), 'this change'),
+    ctx.snapshot,
+  );
+}
 
 /**
  * One Claude Agent SDK session per deck. Every thread (global, lane:*, remark:*, slide:*) talks to the same
@@ -135,7 +160,8 @@ export class AgentSession {
     }
 
     const { streamed, finalTexts, resultError, failure } = outcome;
-    const reply = finalTexts.length ? finalTexts.join('\n\n') : streamed.join('');
+    const raw = finalTexts.length ? finalTexts.join('\n\n') : streamed.join('');
+    const reply = raw.trim() === '' ? raw : await this.scrub(raw);
     // The SDK throws after yielding an error result; report the result's own reason once, not both.
     const error = resultError ?? failure;
     // A successful turn always ends with assistant.done (even when the model only called tools), so the
@@ -150,6 +176,16 @@ export class AgentSession {
       }
     }
     if (error) emit({ type: 'agent.error', message: error, thread });
+  }
+
+  /** scrubReply against the deck as it is now; a read failure keeps the raw text rather than losing the reply. */
+  private async scrub(text: string): Promise<string> {
+    try {
+      const [snapshot, lanes] = await Promise.all([this.opts.store.snapshot(), this.opts.store.lanes()]);
+      return scrubReply(text, { snapshot, lanes });
+    } catch {
+      return text;
+    }
   }
 
   /** One query. Never throws: a thrown SDK error ends up in `failure`. */

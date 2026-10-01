@@ -179,10 +179,11 @@ describe('CheckRunner', () => {
     const a = r.run('order');
     const b = r.run('gaps');
     expect(r.run('order')).toBe(a);
-    expect(r.status().running).toEqual(['order', 'gaps']);
     await waitFor(() => calls.length === 1);
+    // gaps is queued behind order: it is not reported as running.
+    expect(r.status().running).toEqual(['order']);
     expect(r.start(['order', 'gaps', 'arc'])).toEqual(['arc']);
-    expect(r.status().running).toEqual(['arc', 'order', 'gaps']);
+    expect(r.status().running).toEqual(['order']);
     const done = waitFor(async () => {
       release();
       return r.status().running.length === 0;
@@ -284,9 +285,9 @@ describe('CheckRunner', () => {
     await waitFor(() => calls.length >= 4 && events.filter((e) => e.type === 'checks.status').length >= 8, { timeout: 20_000 });
     expect(calls.map((c) => c.options.systemPrompt)).toEqual([CHECKS.arc.system, CHECKS.order.system, CHECKS.gaps.system, CHECKS.render.system]);
     expect(calls[3]!.options).toMatchObject({ allowedTools: ['Read'], maxTurns: 6 });
-    // All four are queued at once, then each one leaves the list when it ends, in order.
+    // All four are queued at once; each one is reported running only while its own run goes, in order.
     const running = events.flatMap((e) => (e.type === 'checks.status' ? [e.running] : []));
-    expect(running).toEqual([['arc'], ['arc', 'order'], ['arc', 'order', 'gaps'], ['arc', 'order', 'gaps', 'render'], ['order', 'gaps', 'render'], ['gaps', 'render'], ['render'], []]);
+    expect(running).toEqual([['arc'], [], ['order'], [], ['gaps'], [], ['render'], []]);
   });
 
   it('scheduleAfterLane runs the render check on the lane’s changed slides only and tags the remarks with the scanned lane', async () => {
@@ -410,25 +411,83 @@ describe('CheckRunner', () => {
     ]);
   });
 
-  it('writes slides as "slide N" in prompts, remark text and lane labels, never as ids', async () => {
+  it('numbers slides as "slide N (title)" in prompts and lane labels; remark text keeps ids so it can be named at read time', async () => {
     const ids = ['s_AAAAAAAAAA', 's_BBBBBBBBBB', 's_CCCCCCCCCC', 's_DDDDDDDDDD'];
     await store.commit(snap(ids.map((id, i) => slide(id, { title: `T${i + 1}` }))), { kind: 'import' });
-    const { r, calls } = runner([
-      JSON.stringify({
-        remarks: [
-          item('s_BBBBBBBBBB', 's_BBBBBBBBBB uses "offset" before s_DDDDDDDDDD defines it; s_ZZZZZZZZZZ is gone.', move('s_DDDDDDDDDD', 'Move s_DDDDDDDDDD before s_BBBBBBBBBB')),
-        ],
-      }),
-    ]);
+    const text = 's_BBBBBBBBBB uses "offset" before s_DDDDDDDDDD defines it.';
+    const { r, calls } = runner([JSON.stringify({ remarks: [item('s_BBBBBBBBBB', text, move('s_DDDDDDDDDD', 'Move s_DDDDDDDDDD before s_BBBBBBBBBB'))] })]);
     await r.run('order');
     expect(calls[0]!.prompt).toContain('slide 2 (T2)');
-    expect(calls[0]!.prompt).toMatch(/never write a slide id/i);
+    expect(calls[0]!.prompt).toMatch(/In "text", refer to a slide by its id/);
     const [remark] = await store.remarks();
-    expect(remark!.text).toBe('slide 2 uses "offset" before slide 4 defines it; an unknown slide is gone.');
+    expect(remark!.text).toBe(text);
     const [lane] = await store.lanes();
     expect(lane!.label).toBe('Move slide 4 before slide 2');
-    // Anchors keep the ids.
     expect(remark!.anchor).toEqual({ kind: 'slide', slide: 's_BBBBBBBBBB' });
+  });
+
+  it('render skips the slides whose hash did not change since its last good run, and keeps their remarks', async () => {
+    await thumbs.start();
+    const first = runner([remarkJson({ kind: 'slide', slide: 's2' }, 'title overflows')]);
+    await first.r.run('render');
+    expect(first.calls[0]!.prompt).toContain('id=s1');
+    expect(first.calls[0]!.prompt).toContain('id=s5');
+
+    // Nothing changed: no query at all, the remark stays, lastRun is stamped.
+    const idle = runner([JSON.stringify({ remarks: [] })]);
+    await idle.r.run('render');
+    expect(idle.calls).toHaveLength(0);
+    expect(idle.r.status().lastRun.render).toMatch(/^\d{4}-/);
+    expect((await store.remarks()).map((x) => x.text)).toEqual(['title overflows']);
+
+    // One slide changed: only that one is shown, and remarks on the others survive.
+    const main = await store.snapshot();
+    await store.commit({ ...main, slides: { ...main.slides, s4: slide('s4', { body: '<p>changed</p>' }) } }, { kind: 'import' });
+    const next = runner([remarkJson({ kind: 'slide', slide: 's4' }, 'text under 24px')]);
+    await next.r.run('render');
+    expect(next.calls).toHaveLength(1);
+    expect(next.calls[0]!.prompt).toContain('id=s4');
+    expect(next.calls[0]!.prompt).not.toContain('id=s2');
+    expect((await store.remarks()).map((x) => x.text).sort()).toEqual(['text under 24px', 'title overflows']);
+  });
+
+  it('render re-checks every slide after a failed run, and when the design rules change', async () => {
+    await thumbs.start();
+    await runner(['nope', 'nope']).r.run('render');
+    const retry = runner([JSON.stringify({ remarks: [] })]);
+    await retry.r.run('render');
+    expect(retry.calls[0]!.prompt).toContain('id=s1');
+    await store.setBrief({ ...brief, design: { rules: 'One color.', imageStyle: '' } });
+    const again = runner([JSON.stringify({ remarks: [] })]);
+    await again.r.run('render');
+    expect(again.calls).toHaveLength(1);
+    expect(again.calls[0]!.prompt).toContain('id=s5');
+  });
+
+  it('a run drops remarks whose slide left main (unless found on a lane preview) and resolves leftovers of closed lanes', async () => {
+    const base = { origin: 'check:arc' as const, severity: 'warn' as const, status: 'open' as const, laneId: null, createdAt: '2026-09-30T00:00:00.000Z' };
+    await store.putLane({ id: 'l_closed', label: 'x', anchor: { kind: 'arc' }, origin: 'user', baseVersion: 1, changes: [], status: 'closed', createdAt: base.createdAt });
+    await store.putLane({ id: 'l_open', label: 'y', anchor: { kind: 'arc' }, origin: 'user', baseVersion: 1, changes: [], status: 'open', createdAt: base.createdAt });
+    await store.putRemarks([
+      { ...base, id: 'r_gone', anchor: { kind: 'slide', slide: 's9' }, text: 'gone', origin: 'user' },
+      { ...base, id: 'r_leftover', anchor: { kind: 'slide', slide: 'n1' }, text: 'leftover', origin: 'check:render', sourceLaneId: 'l_closed' },
+      { ...base, id: 'r_preview', anchor: { kind: 'slide', slide: 'n2' }, text: 'preview', origin: 'check:render', sourceLaneId: 'l_open' },
+      { ...base, id: 'r_user', anchor: { kind: 'slide', slide: 's2' }, text: 'mine', origin: 'user' },
+    ]);
+    await runner([JSON.stringify({ remarks: [] })]).r.run('order');
+    expect((await store.remarks()).map((x) => [x.id, x.status])).toEqual([
+      ['r_leftover', 'resolved'],
+      ['r_preview', 'open'],
+      ['r_user', 'open'],
+    ]);
+  });
+
+  it('lastRun survives a restart: a new runner on the same deck reads it back', async () => {
+    await runner([JSON.stringify({ remarks: [] })]).r.run('gaps');
+    const { r } = runner([JSON.stringify({ remarks: [] })]);
+    await waitFor(() => r.status().lastRun.gaps !== null);
+    expect(r.status().lastRun.gaps).toMatch(/^\d{4}-/);
+    expect(r.status().lastRun.arc).toBeNull();
   });
 
   it('reads the design rules from the stored brief when it builds a check prompt', async () => {

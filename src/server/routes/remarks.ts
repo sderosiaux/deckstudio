@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { nameSlides, type SlideBook } from '../../agent/checks/index.js';
 import type { AgentSession } from '../../agent/session.js';
 import { newId } from '../../model/ids.js';
 import { AddRemarkInputSchema } from '../../model/schema.js';
@@ -17,6 +18,34 @@ function unknownSlides(order: readonly string[], anchor: Anchor): string[] {
   return ids.filter((id) => !order.includes(id));
 }
 
+/**
+ * Remarks as the creator reads them, computed at read time (the store keeps what was written): slide ids in the
+ * text become "slide N (title)" in the current order, or in the lane preview's order for a remark found on a lane's
+ * preview. A remark anchored on a slide that left main means nothing any more and is left out, unless it describes
+ * a lane preview.
+ */
+export async function presentRemarks(remarks: readonly Remark[], store: DeckStore, lanes: LaneService): Promise<Remark[]> {
+  const main = await store.snapshot();
+  const books = new Map<string, SlideBook>();
+  const bookOf = async (laneId: string | null | undefined): Promise<SlideBook> => {
+    if (!laneId) return main;
+    let book = books.get(laneId);
+    if (!book) {
+      const lane = await store.lane(laneId);
+      book = lane && lane.status !== 'closed' ? await lanes.preview(laneId).catch(() => main) : main;
+      books.set(laneId, book);
+    }
+    return book;
+  };
+  const out: Remark[] = [];
+  for (const r of remarks) {
+    if (!r.sourceLaneId && unknownSlides(main.order, r.anchor).length) continue;
+    const text = nameSlides(r.text, await bookOf(r.sourceLaneId));
+    out.push(text === r.text ? r : { ...r, text });
+  }
+  return out;
+}
+
 /** Open remarks first; creation order inside each group. */
 const openFirst = (rs: Remark[]): Remark[] => [...rs.filter((r) => r.status === 'open'), ...rs.filter((r) => r.status !== 'open')];
 
@@ -28,7 +57,7 @@ export function remarkRoutes(app: FastifyInstance, store: DeckStore, session: Ag
     if (status !== undefined && status !== 'open' && status !== 'resolved') {
       return reply.code(400).send({ error: `invalid status "${status}": expected open or resolved` });
     }
-    const all = openFirst(await store.remarks());
+    const all = openFirst(await presentRemarks(await store.remarks(), store, lanes));
     return status ? all.filter((r) => r.status === status) : all;
   });
 
@@ -70,7 +99,7 @@ export function remarkRoutes(app: FastifyInstance, store: DeckStore, session: Ag
     });
     if (!resolved) return reply.code(404).send({ error: `remark "${id}" not found` });
     bus.emit({ type: 'remarks.changed' });
-    return resolved;
+    return (await presentRemarks([resolved], store, lanes))[0] ?? resolved;
   });
 
   app.post<{ Params: IdParams }>('/api/remarks/:id/propose', async (req, reply) => {

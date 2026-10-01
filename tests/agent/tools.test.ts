@@ -167,7 +167,7 @@ describe('deck tools', () => {
     expect(await laneFiles()).toEqual([]);
   });
 
-  it('revise_lane replaces pending changes and keeps accepted ones', async () => {
+  it('revise_lane with replace: true drops unmentioned pending changes and keeps decided ones', async () => {
     const h = makeDeckToolHandlers(ctx);
     const { laneId } = (await h.propose_lane({
       label: 'l',
@@ -181,14 +181,15 @@ describe('deck tools', () => {
     const accepted = { ...lane.changes[0]!, status: 'accepted' as const };
     await store.putLane({ ...lane, changes: [accepted, lane.changes[1]!] });
 
-    const bad = (await h.revise_lane({ laneId, replaceChanges: [{ kind: 'remove', slide: 'zz', reason: 'r' }] })) as { invalid: unknown[] };
+    const bad = (await h.revise_lane({ laneId, changes: [{ kind: 'remove', slide: 'zz', reason: 'r' }] })) as { invalid: unknown[] };
     expect(bad.invalid).toHaveLength(1);
     expect((await store.lane(laneId))!.changes).toHaveLength(2);
 
     const res = (await h.revise_lane({
       laneId,
-      replaceChanges: [{ kind: 'move', slide: 's5', after: 's1', reason: 'close earlier' }],
-    })) as { laneId: string; changes: { id: string }[] };
+      replace: true,
+      changes: [{ kind: 'move', slide: 's5', after: 's1', reason: 'close earlier' }],
+    })) as { laneId: string; added: string[]; kept: string[]; updated: string[]; dropped: string[] };
     expect(res.laneId).toBe(laneId);
     const after = (await store.lane(laneId))!;
     expect(after.changes.map((c) => [c.kind, c.status])).toEqual([
@@ -196,11 +197,61 @@ describe('deck tools', () => {
       ['move', 'pending'],
     ]);
     expect(after.changes[0]).toEqual(accepted);
+    expect(res).toMatchObject({ kept: [], updated: [], added: [after.changes[1]!.id], dropped: [lane.changes[1]!.id] });
     expect(events).toContainEqual({ type: 'lane.updated', laneId });
 
-    expect(await h.revise_lane({ laneId: 'l_missing', replaceChanges: [{ kind: 'remove', slide: 's1', reason: 'r' }] })).toMatchObject({
+    expect(await h.revise_lane({ laneId: 'l_missing', changes: [{ kind: 'remove', slide: 's1', reason: 'r' }] })).toMatchObject({
       error: expect.stringContaining('l_missing'),
     });
+  });
+
+  it('revise_lane keeps what it is not told to change: one new change keeps the other two with their ids and patches', async () => {
+    const h = makeDeckToolHandlers(ctx);
+    const { laneId } = (await h.propose_lane({
+      label: 'Three edits',
+      anchor: { kind: 'arc' },
+      changes: [
+        { kind: 'modify', slide: 's2', patch: { title: 'A', story: 'sa' }, reason: 'a' },
+        { kind: 'modify', slide: 's3', patch: { title: 'B' }, reason: 'b' },
+      ],
+    })) as { laneId: string };
+    const before = (await store.lane(laneId))!;
+    const res = (await h.revise_lane({ laneId, changes: [{ kind: 'remove', slide: 's5', reason: 'too long' }] })) as {
+      kept: string[];
+      updated: string[];
+      added: string[];
+      dropped: string[];
+    };
+    const after = (await store.lane(laneId))!;
+    expect(after.changes.slice(0, 2)).toEqual(before.changes);
+    expect(after.changes[2]).toMatchObject({ kind: 'remove', slide: 's5', status: 'pending' });
+    expect(res).toEqual({
+      laneId,
+      kept: before.changes.map((c) => c.id),
+      updated: [],
+      added: [after.changes[2]!.id],
+      dropped: [],
+      changes: after.changes.map((c) => ({ id: c.id, summary: expect.any(String) })),
+    });
+
+    // Matched by id: the change keeps its id, its patch merges; matched by (kind, target) without an id too.
+    const [a, b] = before.changes;
+    const res2 = (await h.revise_lane({
+      laneId,
+      changes: [
+        { id: a!.id, kind: 'modify', slide: 's2', patch: { title: 'A2' }, reason: 'a2' },
+        { kind: 'modify', slide: 's3', patch: { body: '<p>b2</p>' }, reason: 'b2' },
+      ],
+    })) as { kept: string[]; updated: string[]; added: string[] };
+    expect(res2).toMatchObject({ kept: [after.changes[2]!.id], updated: [a!.id, b!.id], added: [] });
+    const again = (await store.lane(laneId))!;
+    expect(again.changes.map((c) => c.id)).toEqual(after.changes.map((c) => c.id));
+    expect(again.changes[0]).toMatchObject({ patch: { title: 'A2', story: 'sa' }, reason: 'a2', status: 'pending' });
+    expect(again.changes[1]).toMatchObject({ patch: { title: 'B', body: '<p>b2</p>' }, reason: 'b2' });
+
+    // An id that is not a pending change of the lane is rejected, nothing saved.
+    expect(await h.revise_lane({ laneId, changes: [{ id: 'c_nope', kind: 'remove', slide: 's4', reason: 'r' }] })).toMatchObject({ invalid: [{ index: 0 }] });
+    expect(await store.lane(laneId)).toEqual(again);
   });
 
   it('createLane validates like propose_lane and saves the lane with the given origin and status in one write', async () => {
@@ -218,11 +269,11 @@ describe('deck tools', () => {
   it('revise_lane works on a draft lane and keeps it a draft; a closed lane is refused', async () => {
     const h = makeDeckToolHandlers(ctx);
     const { laneId } = (await createLane(ctx, { label: 'd', anchor: { kind: 'arc' }, changes: [{ kind: 'remove', slide: 's4', reason: 'r' }] }, { origin: 'check:gaps', status: 'draft' })) as { laneId: string };
-    const res = await h.revise_lane({ laneId, replaceChanges: [{ kind: 'remove', slide: 's5', reason: 'r2' }] });
+    const res = await h.revise_lane({ laneId, replace: true, changes: [{ kind: 'remove', slide: 's5', reason: 'r2' }] });
     expect(res).toMatchObject({ laneId });
     expect(await store.lane(laneId)).toMatchObject({ status: 'draft', changes: [{ kind: 'remove', slide: 's5' }] });
     await store.putLane({ ...(await store.lane(laneId))!, status: 'closed' });
-    expect(await h.revise_lane({ laneId, replaceChanges: [{ kind: 'remove', slide: 's5', reason: 'r2' }] })).toMatchObject({ error: expect.stringContaining('closed') });
+    expect(await h.revise_lane({ laneId, changes: [{ kind: 'remove', slide: 's5', reason: 'r2' }] })).toMatchObject({ error: expect.stringContaining('closed') });
   });
 
   it('add_remark appends an open user remark; link_remark_lane sets its lane', async () => {
