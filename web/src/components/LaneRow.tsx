@@ -2,7 +2,7 @@ import { useLayoutEffect, useState, type CSSProperties, type RefObject } from 'r
 import type { Anchor, Change, Lane, Remark, SlideId } from '../../../src/model/types.js';
 import { focusPath, navigate, remarkApi as defaultRemarkApi, thumbUrl, type LaneApi, type LanePreviewPayload, type RemarkApi } from '../api.js';
 import { ChangeButtons } from './ChangeButtons.js';
-import { RemarkPostIt } from './Remark.js';
+import { RemarkPostIt, anchorLabel } from './Remark.js';
 import { RemarkRow, type Pinned } from './RemarkRow.js';
 import { Thumb } from './Thumb.js';
 
@@ -23,8 +23,6 @@ export interface LaneRowProps {
   /** Open remarks raised by a check on this lane's content (`sourceLaneId === lane.id`), pinned under the cell they anchor to. */
   remarks?: readonly Remark[];
   remarkApi?: RemarkApi;
-  /** The lane's letter on main (A, B…), shown before its name in the gutter. */
-  letter?: string;
   /** Deck columns in sight on main: the lane's remark cards stay inside them. */
   view?: { first: number; end: number };
   /** Columns the moved hairlines of lanes below run down: the lane's remark cards keep clear of them. */
@@ -204,10 +202,31 @@ export function shortLabel(label: string, max = SHORT_CHARS): string {
   return out || label.slice(0, max);
 }
 
-/** Letter naming the n-th open lane on main: A, B, … Z, then AA, AB… */
-export function laneLetter(i: number): string {
-  const a = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  return i < a.length ? a[i]! : laneLetter(Math.floor(i / a.length) - 1) + a[i % a.length]!;
+/** The label the history screen gives a lane opened from a past version ("back to v4", historyService.openAsLane). */
+const HISTORY_LABEL = /^back to v(\d+)$/;
+
+/** Where a lane comes from, under its name: "from check: arc", "from history v4", "from your request on slide 2". */
+export function laneOrigin(lane: Pick<Lane, 'origin' | 'label' | 'anchor'>, mainOrder: SlideId[]): string {
+  if (lane.origin.startsWith('check:')) return `from check: ${lane.origin.slice('check:'.length)}`;
+  const past = HISTORY_LABEL.exec(lane.label);
+  if (past && lane.anchor.kind === 'arc') return `from history v${past[1]}`;
+  if (lane.anchor.kind === 'arc') return 'from your request on the whole deck';
+  if (!anchorColumns(lane.anchor, mainOrder)) return 'from your request';
+  return `from your request on ${anchorLabel(lane.anchor, mainOrder)}`;
+}
+
+/**
+ * A change in the creator's words, for the accessible names of its buttons: "modify slide 3, Hook". Main numbers for a
+ * slide on main, the lane's position for an inserted one; never an id.
+ */
+export function describeChange(c: Change, mainOrder: SlideId[], preview: LanePreviewPayload | undefined): string {
+  const id = targetOf(c);
+  const title = c.kind === 'insert' ? c.slide.title : (preview?.slides[id]?.title ?? id);
+  const onMain = mainOrder.indexOf(id);
+  const inLane = preview ? preview.order.indexOf(id) : -1;
+  const at = c.kind === 'insert' ? inLane : onMain;
+  const where = at >= 0 ? `slide ${at + 1}, ${title}` : title;
+  return c.kind === 'move' && inLane >= 0 ? `move ${where}, to ${inLane + 1}` : `${c.kind} ${where}`;
 }
 
 /**
@@ -252,7 +271,6 @@ export function LaneRow({
   onRetryThumbs,
   remarks = NO_REMARKS,
   remarkApi = defaultRemarkApi,
-  letter,
   view,
   avoid,
 }: LaneRowProps) {
@@ -266,7 +284,8 @@ export function LaneRow({
   const cells = lane.anchor.kind === 'arc' && allCells.some((c) => c.mark !== 'none') ? allCells.filter((c) => c.mark !== 'none') : allCells;
   const region = lane.anchor.kind === 'arc' && cells.length > 0 ? regionColumns({ start: cells[0]!.col, span: 1 }, cells) : regionColumns(cols, cells);
   const skipped = preview ? lane.changes.filter((c) => c.status === 'pending' && preview.skipped.includes(c.id)) : [];
-  const tag = originTag(lane.origin);
+  const origin = laneOrigin(lane, mainOrder);
+  const describe = (c: Change): string => describeChange(c, mainOrder, preview);
   // Remarks go on the grid under the cell they point at; the rest (arc, or a slide not in the row) under the first cell.
   const cellCol = new Map(cells.map((c) => [c.id, c.col] as const));
   const pinned: Pinned[] = remarks.map((r) => {
@@ -317,13 +336,22 @@ export function LaneRow({
   return (
     <div id={`lane-row-${lane.id}`} data-testid="lane-row" data-lane={lane.id} style={{ display: 'flex', alignItems: 'stretch' }}>
       <div className="gutter" style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 8 }}>
-        <span className="row-label" title={lane.label} data-testid="lane-name">
-          {letter ? <strong style={{ fontWeight: 700, marginRight: 6 }}>{letter}</strong> : null}
-          {shortLabel(lane.label)}
+        {/* The whole title, wrapped: a lane is what the creator decides on, its name is never cut. */}
+        <span className="row-label" data-testid="lane-name" style={{ overflowWrap: 'anywhere' }}>
+          {lane.label}
         </span>
-        {tag ? <span className="meta">{tag}</span> : null}
+        <span className="meta" data-testid="lane-origin">{origin}</span>
         {anchored ? null : <span className="meta">anchor no longer on main</span>}
-        <button type="button" className="link" disabled={busy} onClick={discard} style={{ fontSize: 12, alignSelf: 'flex-start' }}>
+        <button
+          type="button"
+          className="link"
+          disabled={busy}
+          onClick={(e) => {
+            e.stopPropagation();
+            discard();
+          }}
+          style={{ fontSize: 12, alignSelf: 'flex-start' }}
+        >
           discard lane
         </button>
       </div>
@@ -399,7 +427,7 @@ export function LaneRow({
                     )}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                       {cell.changes.map((c) => (
-                        <ChangeButtons key={c.id} change={c} disabled={busy} onAccept={accept} onRefuse={refuse} />
+                        <ChangeButtons key={c.id} change={c} describe={describe(c)} disabled={busy} onAccept={accept} onRefuse={refuse} />
                       ))}
                     </div>
                   </div>
@@ -410,8 +438,8 @@ export function LaneRow({
               <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6, width: 'max-content' }}>
                 {skipped.map((c) => (
                   <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                    <span className="muted">{c.kind} {targetOf(c)} no longer applies on main</span>
-                    <ChangeButtons change={c} disabled={busy} onAccept={accept} onRefuse={refuse} />
+                    <span className="muted">{describe(c)}: no longer applies on main</span>
+                    <ChangeButtons change={c} describe={describe(c)} disabled={busy} onAccept={accept} onRefuse={refuse} />
                   </div>
                 ))}
               </div>

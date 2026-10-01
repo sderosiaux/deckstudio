@@ -6,6 +6,8 @@ export interface ChangeButtonsProps {
   disabled: boolean;
   onAccept(changeId: string): void;
   onRefuse(changeId: string): void;
+  /** What the change does, in the creator's words ("modify slide 3, Hook"): the buttons' accessible names. */
+  describe?: string;
 }
 
 const btn = (tone: 'ok' | 'warn', disabled: boolean): CSSProperties => ({
@@ -29,14 +31,21 @@ const btn = (tone: 'ok' | 'warn', disabled: boolean): CSSProperties => ({
 const verb: Record<Change['kind'], string> = { insert: 'insert', modify: 'modify', remove: 'remove', move: 'move' };
 
 /** ✓ ✗ for one change of a lane. The reason is the tooltip, so the creator can judge before clicking. */
-export function ChangeButtons({ change, disabled, onAccept, onRefuse }: ChangeButtonsProps) {
+export function ChangeButtons({ change, disabled, onAccept, onRefuse, describe }: ChangeButtonsProps) {
   const hint = `${verb[change.kind]}: ${change.reason}`;
+  const name = (action: 'accept' | 'refuse'): string => (describe ? `${action}: ${describe}` : `${action} change ${change.id}`);
   return (
     <div style={{ display: 'flex', gap: 6 }} data-testid="change-buttons" data-change={change.id}>
-      <button type="button" aria-label={`accept change ${change.id}`} title={`Accept (${hint})`} disabled={disabled} onClick={() => onAccept(change.id)} style={btn('ok', disabled)}>
+      <button type="button" aria-label={name('accept')} title={`Accept (${hint})`} disabled={disabled} onClick={(e) => {
+          e.stopPropagation();
+          onAccept(change.id);
+        }} style={btn('ok', disabled)}>
         ✓
       </button>
-      <button type="button" aria-label={`refuse change ${change.id}`} title={`Refuse (${hint})`} disabled={disabled} onClick={() => onRefuse(change.id)} style={btn('warn', disabled)}>
+      <button type="button" aria-label={name('refuse')} title={`Refuse (${hint})`} disabled={disabled} onClick={(e) => {
+          e.stopPropagation();
+          onRefuse(change.id);
+        }} style={btn('warn', disabled)}>
         ✗
       </button>
     </div>

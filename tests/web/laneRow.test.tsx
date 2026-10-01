@@ -71,8 +71,8 @@ describe('LaneRow', () => {
     expect(within(cells[1]!).getByTestId('modified-dot')).toBeTruthy();
     expect(within(cells[2]!).getByTestId('removed-slot')).toBeTruthy();
     // the removed slot carries its own accept / refuse pair
-    expect(within(cells[2]!).getByRole('button', { name: 'accept change c3' })).toBeTruthy();
-    expect(within(cells[2]!).getByRole('button', { name: 'refuse change c3' })).toBeTruthy();
+    expect(within(cells[2]!).getByRole('button', { name: 'accept: remove slide 4, Title s4' })).toBeTruthy();
+    expect(within(cells[2]!).getByRole('button', { name: 'refuse: remove slide 4, Title s4' })).toBeTruthy();
     expect(within(cells[0]!).queryByRole('button', { name: /accept/ })).toBeNull();
     // the inserted slide shows its ready preview thumb
     expect((within(cells[3]!).getByTestId('thumb-image') as HTMLImageElement).getAttribute('src')).toBe('/api/thumbs/hn1.png');
@@ -81,11 +81,11 @@ describe('LaneRow', () => {
   it('clicking ✓ accepts that change id, ✗ refuses it, discard closes the lane', async () => {
     const api = stubApi();
     render(<LaneRow lane={lane()} preview={preview} mainOrder={order} mainThumbs={{}} api={api} />);
-    fireEvent.click(screen.getByRole('button', { name: 'accept change c1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'accept: modify slide 3, Sharper s3' }));
     await waitFor(() => api.acceptChange.mock.calls.length === 1);
     expect(api.acceptChange).toHaveBeenCalledWith('l1', 'c1');
-    await waitFor(() => !(screen.getByRole('button', { name: 'refuse change c2' }) as HTMLButtonElement).disabled);
-    fireEvent.click(screen.getByRole('button', { name: 'refuse change c2' }));
+    await waitFor(() => !(screen.getByRole('button', { name: 'refuse: insert slide 3, Hook' }) as HTMLButtonElement).disabled);
+    fireEvent.click(screen.getByRole('button', { name: 'refuse: insert slide 3, Hook' }));
     await waitFor(() => api.refuseChange.mock.calls.length === 1);
     expect(api.refuseChange).toHaveBeenCalledWith('l1', 'c2');
     await waitFor(() => !(screen.getByRole('button', { name: 'discard lane' }) as HTMLButtonElement).disabled);
@@ -98,26 +98,46 @@ describe('LaneRow', () => {
     const api = stubApi();
     api.acceptChange.mockRejectedValueOnce(new Error('POST x failed: 409 change c1 is orphan'));
     render(<LaneRow lane={lane()} preview={preview} mainOrder={order} mainThumbs={{}} api={api} />);
-    fireEvent.click(screen.getByRole('button', { name: 'accept change c1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'accept: modify slide 3, Sharper s3' }));
     await waitFor(() => screen.queryByRole('alert'));
     expect(screen.getByRole('alert').textContent).toContain('orphan');
   });
 
-  it('tags a lane from a check as unsolicited; an arc lane starts at the first slide it touches', () => {
+  it('says where a check lane comes from; an arc lane starts at the first slide it touches', () => {
     render(<LaneRow lane={lane({ origin: 'check:order', anchor: { kind: 'arc' } })} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
-    expect(screen.getByText('unsolicited, from check: order')).toBeTruthy();
+    expect(screen.getByTestId('lane-origin').textContent).toBe('from check: order');
     // s3 modified (column 2), s4 removed (column 3), n1 inserted in the next free column (4): untouched s1 and s2 stay on main.
     const region = screen.getByTestId('lane-region');
     expect(region.style.gridColumn).toBe('3 / span 3');
     expect(screen.getAllByTestId('lane-cell').map((c) => c.getAttribute('data-slide'))).toEqual(['s3', 's4', 'n1']);
   });
 
-  it('names the lane in the gutter with its letter and a short label, the full name as tooltip', () => {
+  it('names the lane in the gutter with its full title, no letter, and its origin under it', () => {
     const long = 'Pull the decision-layer detour out of the opening run';
-    render(<LaneRow lane={lane({ label: long })} letter="B" preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
-    const name = screen.getByTestId('lane-name');
-    expect(name.textContent).toBe('BPull the decision-layer');
-    expect(name.getAttribute('title')).toBe(long);
+    const { rerender } = render(<LaneRow lane={lane({ label: long, anchor: { kind: 'slide', slide: 's2' } })} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    expect(screen.getByTestId('lane-name').textContent).toBe(long);
+    expect(screen.getByTestId('lane-origin').textContent).toBe('from your request on slide 2');
+    rerender(<LaneRow lane={lane({ anchor: { kind: 'range', from: 's2', to: 's4' } })} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    expect(screen.getByTestId('lane-origin').textContent).toBe('from your request on slides 2–4');
+    rerender(<LaneRow lane={lane({ label: 'back to v4', anchor: { kind: 'arc' } })} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    expect(screen.getByTestId('lane-origin').textContent).toBe('from history v4');
+  });
+
+  it('names accept and refuse after the change they decide, never by id', () => {
+    render(<LaneRow lane={lane()} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    const names = screen.getAllByRole('button').map((b) => b.getAttribute('aria-label') ?? b.textContent ?? '').filter((n) => /^(accept|refuse)/.test(n));
+    expect(new Set(names)).toEqual(
+      new Set([
+        'accept: insert slide 3, Hook',
+        'refuse: insert slide 3, Hook',
+        'accept: modify slide 3, Sharper s3',
+        'refuse: modify slide 3, Sharper s3',
+        'accept: remove slide 4, Title s4',
+        'refuse: remove slide 4, Title s4',
+      ]),
+    );
+    expect(names.join(' ')).not.toMatch(/\bc[123]\b/);
+    expect(names).toHaveLength(6);
   });
 
   it('a single-slide anchor is one column', () => {
@@ -136,7 +156,7 @@ describe('LaneRow', () => {
     expect(slot.textContent).toContain('moved to 2');
     expect(within(slot).getByTestId('moved-title').textContent).toBe(mainSlides.s4!.title);
     expect(within(slot).getByTestId('move-connector')).toBeTruthy();
-    expect(within(cells[2]!).getByRole('button', { name: 'accept change c9' })).toBeTruthy();
+    expect(within(cells[2]!).getByRole('button', { name: 'accept: move slide 4, Title s4, to 2' })).toBeTruthy();
     expect(screen.getByTestId('lane-region').style.gridColumn).toBe('2 / span 3');
   });
 
@@ -185,8 +205,8 @@ describe('LaneRow', () => {
     const modifyS5: Change = { id: 'c5', kind: 'modify', slide: 's5', patch: { title: 'New s5' }, reason: 'r', status: 'pending' };
     const p: LanePreviewPayload = { order, slides: { ...mainSlides, s5: slide('s5', 'New s5') }, skipped: [], thumbs: {} };
     render(<LaneRow lane={lane({ changes: [modifyS5] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
-    expect(screen.getByRole('button', { name: 'accept change c5' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'refuse change c5' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'accept: modify slide 5, New s5' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'refuse: modify slide 5, New s5' })).toBeTruthy();
     const cell = screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === 's5')!;
     expect(cell.getAttribute('data-col')).toBe('4');
   });
@@ -375,5 +395,7 @@ describe('placeCards', () => {
     ]);
     // Squeezed between two lines, a card comes out narrower rather than cover one.
     expect(placeCards([{ id: 'c', col: 2, span: 1 }], 12, Infinity, undefined, new Set([1, 4]))).toEqual([{ id: 'c', start: 1, width: 3, row: 0, inset: true }]);
+    // Never under two columns: a card squeezed into one column runs over the line into its neighbours instead.
+    expect(placeCards([{ id: 'd', col: 2, span: 1 }], 12, Infinity, undefined, new Set([2, 3]))).toEqual([{ id: 'd', start: 2, width: 4, row: 0, inset: true }]);
   });
 });

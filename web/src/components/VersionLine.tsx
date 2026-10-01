@@ -1,4 +1,4 @@
-import type { CSSProperties, MouseEvent } from 'react';
+import { useLayoutEffect, useRef, type CSSProperties, type MouseEvent } from 'react';
 import type { Version, VersionCause } from '../../../src/model/types.js';
 import { HISTORY_PATH, historyPath, navigate as defaultNavigate } from '../api.js';
 
@@ -67,10 +67,23 @@ const causeStyle: CSSProperties = {
   overflowWrap: 'anywhere',
 };
 
+/** Versions the rail on main shows at most; older ones fold into one "… N earlier" link to the history. */
+export const RAIL_MAX = 6;
+
 /** The versions of main as a thin rail, oldest to newest: a node per version, its name and fingerprint under it. */
 export function VersionLine({ versions, current, selection, onSelect, navigate = defaultNavigate }: VersionLineProps) {
-  const sorted = [...versions].sort((a, b) => a.n - b.n);
+  const all = [...versions].sort((a, b) => a.n - b.n);
   const selectable = onSelect !== undefined;
+  // On main the rail keeps the newest versions (the current one always among them); the history screen, where any
+  // version can be picked, shows them all.
+  const kept = selectable || all.length <= RAIL_MAX ? all : all.slice(-RAIL_MAX);
+  const sorted = kept.some((v) => v.n === current) ? kept : [...all.filter((v) => v.n === current), ...kept.slice(1)];
+  const earlier = all.length - sorted.length;
+  const rail = useRef<HTMLOListElement>(null);
+  // The current version stays in sight: on mount, and whenever main moves to another version.
+  useLayoutEffect(() => {
+    rail.current?.querySelector('[aria-current="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [current]);
   const openHistory = (path: string) => (e: MouseEvent<HTMLAnchorElement>): void => {
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
     e.preventDefault();
@@ -82,7 +95,13 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
       {sorted.length === 0 ? (
         <span className="muted">No versions yet. Importing a deck creates v0.</span>
       ) : (
-        <ol style={{ position: 'relative', listStyle: 'none', margin: 0, padding: '0 6px', display: 'flex', overflowX: 'auto', minWidth: 0, flex: 1 }}>
+        <>
+        {earlier > 0 ? (
+          <a href={HISTORY_PATH} onClick={openHistory(HISTORY_PATH)} data-testid="versions-earlier" className="link" title="open the history" style={{ flex: '0 0 auto', fontSize: 12, lineHeight: `${NODE}px`, paddingLeft: 6, marginRight: 4, whiteSpace: 'nowrap' }}>
+            … {earlier} earlier
+          </a>
+        ) : null}
+        <ol ref={rail} style={{ position: 'relative', listStyle: 'none', margin: 0, padding: '0 6px', display: 'flex', overflowX: 'auto', scrollPaddingInline: 6, minWidth: 0, flex: 1 }}>
           {sorted.map((v, i) => {
             const isCurrent = v.n === current;
             const cause = (v as Version & { label?: string }).label ?? describeCause(v.cause);
@@ -113,7 +132,7 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
                 data-selected={picked}
                 aria-current={isCurrent ? 'true' : undefined}
                 title={`v${v.n}, ${cause}, ${new Date(v.createdAt).toLocaleString()}`}
-                style={{ flex: '0 0 152px', width: 152, paddingRight: 16 }}
+                style={{ flex: '1 0 112px', minWidth: 112, maxWidth: 152, paddingRight: 16 }}
               >
                 {selectable ? (
                   <button type="button" aria-pressed={picked !== undefined} aria-label={`v${v.n}: click to compare from, shift-click to compare to`} onClick={(e) => onSelect(v.n, e.shiftKey ? 'b' : 'a')} style={box}>
@@ -133,6 +152,7 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
             );
           })}
         </ol>
+        </>
       )}
       {!selectable && sorted.length > 1 ? (
         <a href={HISTORY_PATH} onClick={openHistory(HISTORY_PATH)} data-testid="history-link" className="link" style={{ flex: '0 0 auto', fontSize: 12, lineHeight: `${NODE}px`, marginLeft: 12 }}>

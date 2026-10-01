@@ -13,6 +13,8 @@ export interface Pinned {
 
 /** A card is never narrower than this many columns (about 220px or more): remark text needs a measure that breaks on words. */
 export const MIN_CARD_COLS = 4;
+/** Narrowest a card may get to keep clear of a moved hairline: below it, the card covers the line instead. */
+export const MIN_READABLE_COLS = 2;
 
 export interface Placed {
   id: string;
@@ -38,7 +40,8 @@ export const MOVE_CLEAR = 16;
  * With a `view` (the columns in sight of a scrolling canvas), cards anchored outside it are left out and the others
  * stay inside it: a card never runs past the visible right edge.
  * `avoid` lists the columns a moved hairline runs down: a card never covers one, except by starting on it (inset
- * past the line), so the line reads unbroken from main's thumb to its lane slot. Such a card may come out narrower.
+ * past the line), so the line reads unbroken from main's thumb to its lane slot. Such a card may come out narrower,
+ * never under MIN_READABLE_COLS: squeezed more, it ignores the lines.
  */
 export function placeCards(
   items: readonly { id: string; col: number; span: number; selected?: boolean }[],
@@ -57,8 +60,13 @@ export function placeCards(
     .flatMap((it) => {
       // The stretch around the anchor that no line crosses: from the last line at or left of it (the card may start
       // there, inset) to the first line right of it.
-      const from = Math.max(lo, ...lines.filter((c) => c <= it.col));
-      const to = Math.min(hi, ...lines.filter((c) => c > it.col));
+      const clearFrom = Math.max(lo, ...lines.filter((c) => c <= it.col));
+      const clearTo = Math.min(hi, ...lines.filter((c) => c > it.col));
+      // Under MIN_READABLE_COLS between two lines, no text reads and the actions spill out: the card runs over the
+      // lines (it sits above them) rather than shrink to one column.
+      const squeezed = clearTo - clearFrom < MIN_READABLE_COLS;
+      const from = squeezed ? lo : clearFrom;
+      const to = squeezed ? hi : clearTo;
       const width = Math.min(Math.max(it.span, MIN_CARD_COLS), Math.max(to - from, 1));
       const start = Math.max(from, Math.min(it.col, to - width));
       const end = start + width;
