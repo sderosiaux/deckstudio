@@ -9,6 +9,8 @@ import { ApiError, openVersionAsLane, type BusEvent, type DeckPayload, type Hist
 import { diffVersions } from '../../src/model/ops.js';
 import type { Slide, SlideId, Snapshot, Version } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const slide = (id: string, title = `Title ${id}`): Slide => ({ id, title, story: '', notes: '', body: `<p>${id}</p>`, assets: [], kind: 'text' });
 const snap = (slides: Slide[]): Snapshot => ({ order: slides.map((s) => s.id), slides: Object.fromEntries(slides.map((s) => [s.id, s])) });
@@ -795,5 +797,50 @@ describe('History space: the compare fills the viewport', () => {
     fireEvent.mouseEnter(screen.getAllByTestId('diff-entry').find((e) => e.getAttribute('data-kind') === 'removed')!);
     const figs = within(screen.getByTestId('compare-pair')).getAllByTestId('slide-preview');
     expect(figs.map((f) => `${f.getAttribute('data-variant')}:${f.getAttribute('aria-label')}`)).toEqual(['main:v1, slide 4', 'missing:v3, removed']);
+  });
+});
+
+describe('History space round 2: no paper beside or under the compare', () => {
+  const css = (): string => readFileSync(join(process.cwd(), 'web/src/theme.css'), 'utf8');
+
+  it('"what changed" sits beside the strips only; the compare and the versions rail span the whole width under them', async () => {
+    render(<History api={stubApi()} subscribe={noEvents} navigate={vi.fn()} initialPair={{ a: 1, b: 3 }} />);
+    await waitFor(() => screen.queryByTestId('compare-pair') !== null);
+    const panel = screen.getByRole('complementary', { name: 'what changed' });
+    const top = panel.parentElement!;
+    expect(top.className).toBe('history-top');
+    expect(top.contains(screen.getByRole('region', { name: 'compared versions' }))).toBe(true);
+    expect(top.contains(screen.getByTestId('compare-pair'))).toBe(false);
+    expect(top.contains(screen.getAllByTestId('version')[0]!)).toBe(false);
+    // The list scrolls inside the strips' height instead of stretching the band (or leaving paper under its last row).
+    expect(css()).toMatch(/\.history-changes-scroll \{[^}]*position: absolute;[^}]*overflow-y: auto/);
+  });
+
+  it('a slide on one side only: the other side shows where it would sit, two slides there on each side of the gap', async () => {
+    render(<History api={stubApi()} subscribe={noEvents} navigate={vi.fn()} initialPair={{ a: 1, b: 3 }} />);
+    await waitFor(() => screen.queryByTestId('compare-pair') !== null);
+    const thumb = (id: string) => within(screen.getByTestId('row-b')).getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === id)!;
+    fireEvent.click(thumb('s6'));
+    // v3 puts s6 after s2, which is slide 2 of v1: v1's slides 1-2, the gap, then its slides 3-4.
+    const missing = within(screen.getByTestId('compare-pair')).getAllByTestId('slide-preview')[0]!;
+    expect(missing.getAttribute('data-variant')).toBe('missing');
+    await waitFor(() => within(missing).queryAllByTestId('context-thumb').length === 4);
+    expect(within(missing).getAllByTestId('context-thumb').map((t) => t.getAttribute('data-slide'))).toEqual(['s1', 's2', 's3', 's4']);
+    // The gap sits between the two before and the two after, in reading order.
+    const kids = [...within(missing).getByTestId('context-gap').parentElement!.children].map((c) => c.getAttribute('data-testid') ?? '');
+    expect(kids.indexOf('context-gap')).toBe(2);
+    expect(missing.textContent).toContain('not in v1, it comes between slides 2 and 3');
+    // A removed slide: v3's slides around the place it had (after s3, slide 2 of v3).
+    fireEvent.mouseEnter(screen.getAllByTestId('diff-entry').find((e) => e.getAttribute('data-kind') === 'removed')!);
+    const gone = within(screen.getByTestId('compare-pair')).getAllByTestId('slide-preview')[1]!;
+    expect(within(gone).getAllByTestId('context-thumb').map((t) => t.getAttribute('data-slide'))).toEqual(['s1', 's3', 's2', 's6']);
+    expect(gone.textContent).toContain('removed in v3, it sat between slides 2 and 3');
+  });
+
+  it('the ghost of an added slide in the earlier strip shows its later render, faded, not an empty box', () => {
+    render(<DiffFilmstrips a={{ n: 1, snapshot: snaps[1]!, thumbs: {} }} b={{ n: 3, snapshot: snaps[3]!, thumbs: { s6: '/api/thumbs/v3s6.png' } }} entries={diffVersions(snaps[1]!, snaps[3]!)} onFocus={vi.fn()} />);
+    const ghost = screen.getByTestId('ghost-s6');
+    expect(within(ghost).getByTestId('ghost-image').getAttribute('src')).toBe('/api/thumbs/v3s6.png');
+    expect(within(ghost).getByTestId('ghost-image').style.opacity).toBe('0.45');
   });
 });
