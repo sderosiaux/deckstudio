@@ -1,0 +1,830 @@
+{
+ "round": 5,
+ "drives": [
+  {
+   "screen": "main",
+   "completed": true,
+   "steps_done": [
+    "1. Opened /d/dss-sf-2026/ at 1440x900 in an isolated agent-browser session (qa5main). The default session is shared with other QA agents and its snapshot showed another agent's focus page. main-01 was taken before the thumbnails finished loading, so main-01b was taken after they loaded.",
+    "2. Clicked slide 4, then shift-clicked slide 6. agent-browser keydown Shift + click selected only slide 6. A synthetic click event with shiftKey set gave the range 4-6: the context chip reads 'slides 4\u20136', the caption under the filmstrip reads 'slides 4\u20136', and three previews show (main-02).",
+    "3. Pressed End on the canvas: scrollLeft went to 2000 (the max). The filmstrip shows slides 22-30, and '+21' moved to the left side, which is the correct count. Home brings it back to 0 (main-03, main-03b).",
+    "4. Remark cards have no 'info' control. Clicking the remark text expands it (aria-expanded=true) (main-04-info). Resolved the slide 3/4 remark: the header went from 67 to 66 and the badges on slides 4, 5 and 6 each dropped by 1 (main-04).",
+    "5. Clicked 'open lane' on the slide 6 JSON remark. The lane 'Split request and response onto two slides' was created as the first lane row, below the 4-6 previews and off-screen. It only became visible after I scrolled it into view (main-05).",
+    "6. Refused 'modify slide 6': the card greys out with 'refused' and there is no new version (main-06a-refuse). Accepted 'insert slide 7': the rail shows v20 'added \"The response answers in the same shape\"' and the header shows v20 / 31 slides (main-06b-accept). A few seconds later the lane row closed (main-06b-accept-later).",
+    "7. Selected slide 2 and sent 'Make the title of this slide shorter, five words max.' The co-author answered in about 24 s: the title is already 4 words, so it opened no lane, and the thread says so. No lane appeared, which is correct (main-07-before, main-07).",
+    "8. Escape cleared the selection to 'whole deck' (main-08-esc). After reselecting slide 2, a click on empty canvas also cleared it (main-08).",
+    "Caveat: other agents were changing the same deck during this run (v17 to v20, new lanes 'back to v17' and 'Shorter labels on the four layers', remark count 67 to 66 to 67 to 69). Some count changes may come from them."
+   ],
+   "bugs": [
+    {
+     "where": "MAIN canvas, range-selection previews while the canvas is scrolled horizontally",
+     "what": "The selected-slide previews scroll horizontally with the filmstrip instead of staying in place. At the right end, the slide 4 and slide 6 previews are cut off at the left edge ('4: A loop with one slow step', '6: Typed in, typed out' with the left part missing) and now sit under the columns for slides 22-27, which suggests the wrong slides.",
+     "repro": "Open /d/dss-sf-2026/, click slide 4, shift-click slide 6, focus the canvas and press End.",
+     "expected": "Previews stay pinned (or move as one block) and are never cut off. Only the filmstrip and lane columns scroll.",
+     "severity": "major",
+     "screenshot": "main-03.png"
+    },
+    {
+     "where": "MAIN lane row after accepting a change",
+     "what": "Right after a click on accept, the lane row still shows the accepted card with live \u2713/\u2717 buttons and the leftover 'refused' label, for about 3-7 s, until the lane closes. Clicking a second time in that window could accept or refuse something already settled. A red move-connector line is also drawn vertically across the whole canvas (x\u2248838, y 175 to 760), through unrelated lane rows.",
+     "repro": "Open a lane with two changes from a remark ('open lane' on the slide 6 JSON remark). Refuse 'modify slide 6', then accept 'insert slide 7', and take a screenshot within 3 s.",
+     "expected": "The accepted card switches to 'accepted' (or the lane closes) at once, with no active buttons. Connectors stay inside their own lane row.",
+     "severity": "major",
+     "screenshot": "main-06b-accept.png"
+    },
+    {
+     "where": "MAIN lane 'Open the memory answer before the coordination block'",
+     "what": "The lane shows a settled 'accepted' tag for a no-op change. Its title attribute is 'move slide 8, Three read patterns, one log, to 8'. The tag hangs under a context thumbnail, and the lane's change list does not mention it.",
+     "repro": "Open /, look at the 'Open the memory answer\u2026' lane row: the text 'accepted' sits under the slide-8 thumbnail column. Inspect [data-testid=settled-tag]: its title is 'move slide 8 \u2026 to 8'.",
+     "expected": "No move change is created when the target position equals the source. Any accepted change shown in the row should also be listed in the row's text.",
+     "severity": "minor",
+     "screenshot": "main-01b.png"
+    },
+    {
+     "where": "MAIN, 'open lane' from a remark while a slide is selected",
+     "what": "After 'open lane', the new lane is placed as the first lane row, but that row is below the 550px selection previews, under the fold. The canvas does not scroll to it. The only feedback is the remark card switching to 'lane opened: \u2026'; nothing changes on the visible canvas.",
+     "repro": "Select slides 4-6 and click 'open lane' on the slide 6 JSON remark in the thread. The visible canvas still shows only the previews (same view as main-04). Scroll down to find the lane (main-05).",
+     "expected": "The canvas scrolls to the new lane row and briefly highlights it, or the remark's 'lane opened' link jumps there.",
+     "severity": "minor",
+     "screenshot": "main-05.png"
+    },
+    {
+     "where": "Thread history on slide 2",
+     "what": "Earlier co-author replies in this thread (08:07 PM and 08:56 PM) are in French although the user wrote in English. One of them shows a raw internal lane id: 'Lane l__w9KF0bWiS : le titre passe \u00e0 \u00ab One answer already exists \u00bb\u2026'. These messages come from an earlier round, but they are stored and shown to every reader.",
+     "repro": "Select slide 2 and scroll the thread up to the 08:07 PM co-author message.",
+     "expected": "Replies come in the user's language and refer to lanes by name, never by internal id.",
+     "severity": "minor",
+     "screenshot": "main-07.png"
+    },
+    {
+     "where": "MAIN remark counts (header vs filmstrip badges vs thread)",
+     "what": "The counts do not reconcile. The header says 67 open remarks, but the per-slide badges in main-01 add up to 97. With slides 4-6 selected, the badges total 11 while the thread lists 3 + '4 more remarks' = 7. Resolving one remark that names slides 3 and 4 decremented the badges on 4, 5 and 6 but not on 3. About a minute later the header went back to 67 and a reworded slide 3 remark had appeared; other agents running checks may explain part of this.",
+     "repro": "Open / and add up the filmstrip badges, then compare with the header. Select slides 4-6 and compare the badge total with the thread count. Click 'resolve' on 'slide 3 (One log\u2026) states the whole answer\u2026, then slide 4\u2026' and watch the badges on slides 3-6.",
+     "expected": "Each badge counts the remarks that the thread lists for that slide. The header total equals the number of distinct remarks and is labelled as such. Resolving a remark updates exactly the slides it names.",
+     "severity": "minor",
+     "screenshot": "main-04.png"
+    },
+    {
+     "where": "MAIN filmstrip left overflow marker",
+     "what": "When the canvas is scrolled, the '+2' marker on the left overlaps a partly hidden red badge from slide 2 (a half circle with '6' cut at x\u2248148).",
+     "repro": "Select slides 4-6 and scroll the lane 'Split request\u2026' into view: the canvas scrolls left by two columns.",
+     "expected": "The overflow marker hides or masks thumbnails and badges that are partly off-screen.",
+     "severity": "minor",
+     "screenshot": "main-05.png"
+    }
+   ],
+   "frictions": [
+    {
+     "where": "Remark cards (thread)",
+     "what": "There is no 'info' affordance. Details open by clicking the truncated remark text, and nothing tells you that text is clickable: no chevron, no hover state. I found it through aria-expanded.",
+     "expected": "A visible 'more' or chevron control on truncated remarks.",
+     "severity": "minor"
+    },
+    {
+     "where": "Resolve on a remark",
+     "what": "'resolve' takes effect at once, with no undo, toast or confirmation. The card just disappears and the count drops.",
+     "expected": "A short undo toast ('Remark resolved \u00b7 undo').",
+     "severity": "minor"
+    },
+    {
+     "where": "Partial accept inside a lane",
+     "what": "In the 'Split request and response' lane, refusing 'modify slide 6' and accepting 'insert slide 7' is allowed without any warning. The result is a duplicate: slide 6 keeps both JSON cards and the new slide 7 repeats the response. Another open lane ('Drop the classifier wire-format slide') still proposes removing slide 6, and nothing flags the conflict.",
+     "expected": "Warn when the changes in a lane depend on each other, and flag lanes that touch the same slides.",
+     "severity": "major"
+    },
+    {
+     "where": "MAIN canvas with a selection",
+     "what": "Selecting a single slide shows a preview about 550px tall that pushes every lane row below the versions rail. The next lane name ('back to v17') peeks out at y\u2248777, cut off by the rail. With a selection, you cannot see the lanes and the slide at the same time.",
+     "expected": "A smaller preview, or lanes for the selected slide visible next to it.",
+     "severity": "major"
+    },
+    {
+     "where": "MAIN 'all slides' grid",
+     "what": "The 'all slides' grid under the lanes repeats the filmstrip with truncated titles ('2 One home alr\u2026'), and its last row is cut off by the versions rail.",
+     "expected": "One slide index, not two.",
+     "severity": "minor"
+    },
+    {
+     "where": "Lane name column",
+     "what": "The width of the lane name column depends on where the lane's first card is. 'Shorter labels on the four layers' wraps onto 3 lines next to a card at column 5, while other lanes use one line.",
+     "expected": "A fixed-width lane header column.",
+     "severity": "minor"
+    },
+    {
+     "where": "Range selection",
+     "what": "Shift-click sent through agent-browser (keydown Shift + click) selected only slide 6. A range only worked with a synthetic click event that had shiftKey set. This may be a limit of the tool and not of the app, so it is unconfirmed. There is no other visible way to select a range.",
+     "expected": "Shift-click or a drag across the filmstrip reliably selects a range.",
+     "severity": "minor"
+    },
+    {
+     "where": "Thread timestamps",
+     "what": "Messages from different sessions show only times (08:07 PM, 10:29 PM, 12:33 AM) with no date or day separator, so the order across days is unclear.",
+     "expected": "Day separators or dates on older messages.",
+     "severity": "minor"
+    }
+   ],
+   "screenshots": [
+    "/tmp/deckstudio-qa/round-5/main-01.png",
+    "/tmp/deckstudio-qa/round-5/main-01b.png",
+    "/tmp/deckstudio-qa/round-5/main-02.png",
+    "/tmp/deckstudio-qa/round-5/main-03.png",
+    "/tmp/deckstudio-qa/round-5/main-03b.png",
+    "/tmp/deckstudio-qa/round-5/main-04-hover.png",
+    "/tmp/deckstudio-qa/round-5/main-04-info.png",
+    "/tmp/deckstudio-qa/round-5/main-04.png",
+    "/tmp/deckstudio-qa/round-5/main-05.png",
+    "/tmp/deckstudio-qa/round-5/main-06a-refuse.png",
+    "/tmp/deckstudio-qa/round-5/main-06b-accept.png",
+    "/tmp/deckstudio-qa/round-5/main-06b-accept-later.png",
+    "/tmp/deckstudio-qa/round-5/main-07-before.png",
+    "/tmp/deckstudio-qa/round-5/main-07.png",
+    "/tmp/deckstudio-qa/round-5/main-08-esc.png",
+    "/tmp/deckstudio-qa/round-5/main-08.png"
+   ]
+  },
+  {
+   "screen": "slide",
+   "completed": true,
+   "steps_done": [
+    "1. Opened /, clicked slide 5, pressed Enter: /slide/s_LNLSV_dFNk, header 'slide 5 of 30, Few decisions need an LLM', render, story, notes, empty lanes, remarks, empty thread (slide-01)",
+    "2. ArrowRight x2 then ArrowLeft x1: URL went s_DV8xMaExQd \u2192 s_WJND20RDFq \u2192 s_DV8xMaExQd and header followed to 'slide 6 of 30, Typed in, typed out' (slide-02)",
+    "3a. Sent 'Replace the diagram labels with shorter ones, keep the meaning.' on slide 6, where step 2 left off. Answer took about 20 s and opened no lane: slide 6 has no diagram, only JSON. Nothing new under 'lanes on this slide' and the render is unchanged (slide-03-pending, slide-03)",
+    "3b. Sent the same message on slide 5, which has a diagram. Answer took about 80 s and opened lane 'Shorter labels on the four layers'. The lane appeared under 'lanes on this slide', the thread names it and shows a main/proposed render pair with accept/refuse, the big render switched to 'proposed in ...', and story/notes are marked 'in <lane>, unchanged' (slide-03b, slide-03c)",
+    "4. Clicked 'open in focus' on the lane row in the right column: went to /lane/l_Z5Xtq2OzCX/change/c_VUD7mw2xS5 with main and lane side by side, the lane thread carried over, slide 5 highlighted in the strip (slide-04). Browser back returned to /slide/s_LNLSV_dFNk (slide-05)",
+    "5. Escape from the slide page: went to /d/dss-sf-2026/ with slide 5 still selected in the strip, big render and right panel 'slide 5' (slide-06). Scrolled to the lane rows on main (slide-06b)",
+    "6. Opened /slide/s_doesNotExist123: bare page with one sentence and a 'back to main' link (slide-07)"
+   ],
+   "bugs": [
+    {
+     "where": "/slide/<missing id> (slide-07)",
+     "what": "A slide id that never existed gets the message 'This slide is no longer on main: a change removed it, or the link is out of date.' That claims the slide used to exist. The page also has no deck title, no header and no slide count. It is a blank page with one line of text.",
+     "repro": "Open http://127.0.0.1:4177/d/dss-sf-2026/slide/s_doesNotExist123",
+     "expected": "Separate 'no slide with this id in this deck' from 'removed by version vN'. Keep the normal deck header and offer the nearest slide or the strip.",
+     "severity": "minor",
+     "screenshot": "slide-07.png"
+    },
+    {
+     "where": "Lane change text on main, and remarks/lane rows that cite slides",
+     "what": "User-facing change rationales show raw internal slide ids instead of slide numbers and titles. Examples: 'the response JSON cut from s_DV8xMaExQd gets its own stage', 'keeps s_1bPtQ4g3u6 attached to the read-pattern it details', 's_sdB7-sjwth is the code for the private tier of s_1bPtQ4g3u6', 's_q3tV81Agum continues the tiers'. Other rationales on the same screen do resolve ids to 'slide 5, Few decisions need an LLM', so this is inconsistent.",
+     "repro": "Open /, press Escape so nothing is selected, and scroll to the lane rows under the big render. Read the 'Split request and response onto two slides' and 'Open the memory answer before the coordination block' rows.",
+     "expected": "Every s_xxx reference is rendered as 'slide N (Title)'.",
+     "severity": "major",
+     "screenshot": "slide-06b.png"
+    },
+    {
+     "where": "Slide 6 render while a 'remove' lane is pending (slide-02, slide-03-pending)",
+     "what": "The 'removed in lane Drop the classifier wire-format slide' badge sits in the middle of the render and covers the JSON. It hides part of the '\"probabilities\"' key and the '\"choice\"' line. When the page is scrolled the badge sticks to the top of the viewport and keeps covering content.",
+     "repro": "Go to /slide/s_DV8xMaExQd (slide 6) and look at the main render. Then scroll the conversation.",
+     "expected": "Show the removal as a corner tag or in the frame header, not over the slide content.",
+     "severity": "minor",
+     "screenshot": "slide-02.png"
+    },
+    {
+     "where": "Slide-page thread, lane card in the reply (slide-03c)",
+     "what": "The lane card in the co-author reply has an empty 'body:' label with nothing after it. The next line is a raw asset path, 'assets: assets/s04.png \u2192 assets/gen-mup1dlwr-m8p1s0.png', which is internal filesystem noise. The focus view shows the same change as '[image: s04.png] \u2192 [image: gen-...png]'.",
+     "repro": "On /slide/s_LNLSV_dFNk send 'Replace the diagram labels with shorter ones, keep the meaning.', wait for the reply and scroll to its lane card.",
+     "expected": "Hide empty fields. Show 'image regenerated' instead of file paths.",
+     "severity": "minor",
+     "screenshot": "slide-03c.png"
+    },
+    {
+     "where": "Slide 6 thread history (slide-02 snapshot)",
+     "what": "Two older co-author replies to an English message are in French ('Cette slide n'a pas de diagramme\u2026', 'Tu me le redemandes\u2026'). The later replies are in English. The reply language does not follow the user's language.",
+     "repro": "Open /slide/s_DV8xMaExQd and scroll the conversation to the top. The 08:54 PM and 08:56 PM co-author replies are French; the user messages are English.",
+     "expected": "The co-author always answers in the user's language.",
+     "severity": "minor",
+     "screenshot": "slide-02.png"
+    },
+    {
+     "where": "Slide 6 co-author reply at 12:30 AM (slide-03)",
+     "what": "The co-author says 'this is the third time round on the same slide'. The thread shows the identical request 5 times (08:53, 08:54, 09:41, 10:26, 12:29). The reply also never mentions the open lane 'Drop the classifier wire-format slide', which would remove this slide entirely, so it is the most relevant fact.",
+     "repro": "On /slide/s_DV8xMaExQd send 'Replace the diagram labels with shorter ones, keep the meaning.' and read the reply.",
+     "expected": "Count the earlier requests correctly and mention open lanes that touch the slide.",
+     "severity": "minor",
+     "screenshot": "slide-03.png"
+    },
+    {
+     "where": "Slide 5 notes after the label lane (slide-03b)",
+     "what": "Story and notes are marked 'in Shorter labels on the four layers, unchanged'. The lane renames 'generative agent' to 'LLM' and 'learned model' to 'learned', but the notes still describe 'a generative agent' and 'a learned decision model' card by card. The co-author also says the generated image dropped the card panels on 3 of 4 columns and asks the user to re-request. That is a known visual regression shipped inside the proposal.",
+     "repro": "On slide 5 send the label request, then compare the proposed render with main and read the notes.",
+     "expected": "The lane updates the notes wording to match the new labels and does not propose a render with a regression it already detected.",
+     "severity": "minor",
+     "screenshot": "slide-03b.png"
+    }
+   ],
+   "frictions": [
+    {
+     "where": "Slide page, step 3 flow",
+     "what": "Arrow navigation in step 2 lands on slide 6, a JSON slide with no diagram, so 'replace the diagram labels' never produces a lane there. The user has to know which slides have diagrams. The thread also shows 5 identical requests with near-identical refusals, and nothing de-duplicates them or collapses old exchanges.",
+     "expected": "Collapse older exchanges. When the co-author refuses, offer one-click alternatives (e.g. 'propose: drop probabilities block').",
+     "severity": "minor"
+    },
+    {
+     "where": "Slide page after browser back from focus (slide-05)",
+     "what": "Before opening focus, the render toggle showed 'proposed in Shorter labels\u2026'. After browser back it reset to 'main', so the user's place is lost.",
+     "expected": "Keep the render toggle state across back navigation.",
+     "severity": "minor"
+    },
+    {
+     "where": "Slide page remarks column (slide-01, slide-05)",
+     "what": "'remarks on this slide' lists deck-level remarks about slides 2/3 ordering, with 'lane opened: Open the memory answer before the coordination block'. That lane does not touch slide 5, and 'lanes on this slide' says no lane changes it. The remarks list also changed between visits (2 \u2192 3 items, different texts) because background checks were running, with no indication that it refreshed.",
+     "expected": "Show only remarks that concern this slide, or group cross-slide remarks separately. Signal when remarks get regenerated.",
+     "severity": "minor"
+    },
+    {
+     "where": "Slide page conversation column (slide-03c)",
+     "what": "The thread and its lane card are capped at about 600 px while the column is about 1030 px wide, so the main/proposed thumbnails in the reply are tiny and the text wraps early. Once the conversation grows, the big render scrolls out of view and the 'main / proposed in \u2026' toggle disappears with it.",
+     "expected": "Use the available width for render comparisons, or keep the toggle sticky.",
+     "severity": "minor"
+    },
+    {
+     "where": "Slide page lane row accessible names (slide-02)",
+     "what": "On slide 6 the remove-lane buttons are labelled 'accept: remove slide 6, a slide' / 'refuse: remove slide 6, a slide'. The title is replaced by the placeholder 'a slide'. The main page labels the same lane 'remove slide 6, Typed in, typed out'.",
+     "expected": "Use the slide title consistently.",
+     "severity": "minor"
+    },
+    {
+     "where": "Main after Escape (slide-06, slide-06b)",
+     "what": "The deck version moved v17 \u2192 v18 \u2192 v19 under me ('reverted body, assets of slide 9', 'moved Private state, compacted'), with slide numbers in lane rows shifting (slide 9 \u2192 slide 10), and nothing told me. A lane header 'back to v17' with a lone '+1' sits half-hidden behind the fixed versions band.",
+     "expected": "A visible 'deck changed (v19), N slides renumbered' notice. Lanes are not occluded by the versions band.",
+     "severity": "minor"
+    }
+   ],
+   "screenshots": [
+    "/tmp/deckstudio-qa/round-5/slide-01.png",
+    "/tmp/deckstudio-qa/round-5/slide-02.png",
+    "/tmp/deckstudio-qa/round-5/slide-03-pending.png",
+    "/tmp/deckstudio-qa/round-5/slide-03.png",
+    "/tmp/deckstudio-qa/round-5/slide-03b.png",
+    "/tmp/deckstudio-qa/round-5/slide-03c.png",
+    "/tmp/deckstudio-qa/round-5/slide-04.png",
+    "/tmp/deckstudio-qa/round-5/slide-05.png",
+    "/tmp/deckstudio-qa/round-5/slide-06.png",
+    "/tmp/deckstudio-qa/round-5/slide-06b.png",
+    "/tmp/deckstudio-qa/round-5/slide-07.png"
+   ]
+  },
+  {
+   "screen": "focus",
+   "completed": true,
+   "steps_done": [
+    "Opened / at 1440x900 in an isolated agent-browser session (the default session was shared: its URL jumped to /slide/s_LNLSV_dFNk while I was working, so another agent was driving it). Lanes were open: 'Open the memory answer before the coordination block' (moves) and 'Drop the classifier wire-format slide'.",
+    "Tried to click a lane cell for the move lane. Its 4 pending cells are drawn at x=1675-2048 px, off-screen behind the sidebar, so they cannot be clicked. Clicked the change line 'move slide 17 ... to 9' instead and landed on /lane/l_xkkuRHenRf/change/c_UGyg5caeTI (focus-01).",
+    "Read the focus view: a 'main, was 17' row and a 'this lane, now 9' row with neighbours, the diff line 'move keeps slide 17 ... details', the actions (previous change / accept / refuse / next change), the bottom slide strip and the 'changes in this lane' list.",
+    "Clicked next change: now on change 2 of 4, URL c_eiTR9-R0_h (focus-02). Clicked previous change: back to change 1, where 'previous change' is disabled at opacity 0.4 (focus-03).",
+    "Sent 'Also change the story line to mention Kafka Streams.' in the lane thread. A 'co-author is working on slide 17' status with a timer showed while it worked; the reply took about 70 s. The co-author added a 7th change ('modify slide 17') to the same lane and the header count went from 'of 4' to 'of 5' (focus-04).",
+    "Accepted the current change (move 17 to 9). The screen stayed on the same change and showed 'accepted (v19)', before/after cards and a 'next change' button (focus-05; settled state in focus-05b-settled).",
+    "Clicked next change (focus-05c-next) and refused it (move Latest value per key). The screen stayed on the change and showed 'refused' and 'next change' (focus-06). After the refuse, changes 4 and 5 showed 'accepted' even though I never accepted them. Checked them in a second session (focus-06b-change4-false-accepted) and against main's history.",
+    "Set the viewport to 1200x800 and reloaded (focus-07). Scrolled to the lane thread (focus-07b-thread-scrolled). Went back to 1440 and reloaded to compare (focus-07c-1440-reload)."
+   ],
+   "bugs": [
+    {
+     "where": "focus: refuse action / 'changes in this lane' list",
+     "what": "Refusing change 3 (move 'Latest value per key') silently closed changes 4 and 5 (move 'Streams builds, agents read', move 'One KTable, one query') as 'accepted'. Nothing was applied to main: main history has no version for them (v19 is my accept, v20 is an unrelated slide add), and the slides stay at positions 20 and 21. The focus page for change 4 says 'This change is accepted.' and 'main, slide 20, accepted'. The strip still paints 20 and 21 as changed (red). The only explanation is a co-author message at the bottom of the thread: 'Moving slide 20 ...: already on main, nothing to decide.' The user's choice was refuse; the lane's intended order (the Streams tier right after the private tier) was dropped and the change was relabelled as an acceptance.",
+     "repro": "1. Open lane l_xkkuRHenRf ('Open the memory answer before the coordination block') with pending moves 17\u21929, 18\u219210, 19\u219211, 20\u219212. 2. In focus, accept 'move slide 17'. 3. Click next change, then refuse 'move slide 18 (Latest value per key)'. 4. Look at the right list: items 4 and 5 now say 'accepted'. 5. Open /d/dss-sf-2026/lane/l_xkkuRHenRf/change/c_GMhtAwdNKC: header says 'accepted'. 6. Open / and check the versions: no version for these moves; slides 20 and 21 are not moved.",
+     "expected": "Changes made obsolete by a refuse should be marked as such (eg 'dropped: no longer applies after refusing #3') or stay pending for a decision. Never 'accepted' when nothing was written to main. The screen should also say right away which other changes the refuse affected.",
+     "severity": "major",
+     "screenshot": "focus-06.png, focus-06b-change4-false-accepted.png"
+    },
+    {
+     "where": "focus at 1200x800: lane thread",
+     "what": "At 1200x800 the 'changes in this lane' list is gone entirely, with no toggle to bring it back. The conversation drops below the canvas and you only reach it by scrolling the main pane. At 1440 after the same reload, the list is there.",
+     "repro": "1. Open /d/dss-sf-2026/lane/l_xkkuRHenRf/change/c_eiTR9-R0_h. 2. agent-browser set viewport 1200 800, then reload. 3. The snapshot's 'lane thread' region has only 'conversation about this lane'; there is no 'changes in this lane' region. 4. Set the viewport to 1440 900 and reload: the 'changes in this lane' region is back.",
+     "expected": "The list of changes stays available at laptop width (stacked, collapsible, or in a drawer). It is the only way to jump to a specific change or see the accepted/refused state.",
+     "severity": "major",
+     "screenshot": "focus-07.png, focus-07b-thread-scrolled.png"
+    },
+    {
+     "where": "main view: move-lane row (entry point to focus)",
+     "what": "The move lane's 4 pending change cells are rendered at x=1675-2048 px with a 1440 viewport, off-canvas and under the sidebar. The visible row shows only the slide-8 thumbnail, a '+4' that is a plain span (not clickable), and an 'accepted' label floating about 70 px below the thumbnail. You cannot click a pending cell to reach focus.",
+     "repro": "1. At 1440x900 open /d/dss-sf-2026/. 2. Find the lane 'Open the memory answer before the coordination block'. 3. Try to click one of its change cells: only the slide-8 thumbnail and '+4' are visible, and '+4' does nothing. 4. Eval the bounding rects of the a[href*='/lane/'] links: x is at least 1675.",
+     "expected": "Pending change cells are visible or reachable (scroll, or '+4' expands or links to the first pending change).",
+     "severity": "major",
+     "screenshot": "focus-01.png (initial main capture, overwritten by the focus screen; the geometry comes from the DOM eval)"
+    },
+    {
+     "where": "focus header vs 'changes in this lane' list numbering",
+     "what": "The header counts only pending changes ('change 1 of 4') while the list numbers every change (the same change is item '2'), so the two numbers never match. On change 2 the header says 'change 2 of 4' and the list highlights '3'.",
+     "repro": "1. Open /d/dss-sf-2026/lane/l_xkkuRHenRf/change/c_UGyg5caeTI before any decision. 2. The header says 'change 1 of 4' and the highlighted list item is numbered 2.",
+     "expected": "One numbering scheme, or a header that says '1 of 4 pending'.",
+     "severity": "minor",
+     "screenshot": "focus-01.png, focus-02.png"
+    },
+    {
+     "where": "focus right list after accept",
+     "what": "Right after clicking accept, the list item for the accepted change still has no 'accepted' badge and the strip still shows the old positions (17 current). Both update a few seconds later, after the deck renumbers.",
+     "repro": "1. On change 'move slide 17', click accept. 2. Screenshot within about 2 s: the header says 'accepted (v19)' but list item 2 has no badge and the strip marks 17. 3. Snapshot again a few seconds later: item 2 says 'accepted' and the strip shows 9/10.",
+     "expected": "The list, header and strip update together when the accept call returns.",
+     "severity": "minor",
+     "screenshot": "focus-05.png vs focus-05b-settled.png"
+    },
+    {
+     "where": "lane thread: co-author reply rendering",
+     "what": "Markdown is only partly rendered: the blockquote shows as a literal '> Private task state ...' line while the bold inside it renders. Separately, the change cards attached to the reply (main/proposed thumbnails, 'move: keeps s_1bPtQ4g3u6 attached...') are shown live but disappear after a reload. The live card also leaks a raw slide id (s_1bPtQ4g3u6), and the main view's change lines leak ids too (s_sdB7-sjwth, s_q3tV81Agum, s_6q7kZ4ZqHG).",
+     "repro": "1. In the lane thread, send 'Also change the story line to mention Kafka Streams.' 2. Wait for the reply: a literal '>' appears and the cards show a raw id in 'move: keeps s_1bPtQ4g3u6 ...'. 3. Reload: the cards are gone and only text remains.",
+     "expected": "Full markdown rendering, the same message content before and after reload, and slide titles/positions instead of internal ids.",
+     "severity": "minor",
+     "screenshot": "focus-04.png, focus-07b-thread-scrolled.png"
+    },
+    {
+     "where": "focus canvas neighbour rows",
+     "what": "Neighbour thumbnails in the 'this lane' row (and in the 'main' row on the accepted/refused screens) are cut off at the left and right edges ('e log has three jobs', 'ree read patterns, one log', 'Streams builds, agents re', 'vate state, compacted'). The neighbour grid is also ordered column-first (13,15 / 14,16), which is hard to read.",
+     "repro": "Open any change in focus at 1440x900 and look at the left and right neighbour columns of the 'this lane, now N' row.",
+     "expected": "Neighbours fully visible (smaller) and in reading order.",
+     "severity": "minor",
+     "screenshot": "focus-01.png, focus-02.png, focus-06b-change4-false-accepted.png"
+    }
+   ],
+   "frictions": [
+    {
+     "where": "focus after a lane message",
+     "what": "The revision happened in place (same lane, new change #7 'modify slide 17'), but the only signals were the chat text and the header count changing from 'of 4' to 'of 5'. The list did not scroll to or highlight #7, the canvas stayed on the move change, and nothing on the slide-17 card says it now has a second pending change. The thread had auto-scrolled to the middle of the reply, so the 'Added to ... as a seventh change' sentence was off-screen.",
+     "expected": "A visible 'new change #7 added to this lane' toast or highlight with a jump link, and the thread scrolled to the start of the reply.",
+     "severity": "major"
+    },
+    {
+     "where": "focus diff for move changes",
+     "what": "For a move, the before/after cards show the same slide twice. After accepting, 'before, slide 17' and 'now in main as v19' are identical images and neither gives the new position. The change labels also renumber as main changes ('move slide 17' became 'move slide 10', 'move slide 18' became 'move slide 19'), and the 'to N' target is lost from the list.",
+     "expected": "Moves show 'from 17 to 9' explicitly and keep stable labels (title plus from\u2192to).",
+     "severity": "minor"
+    },
+    {
+     "where": "focus action bar",
+     "what": "Enabled 'next change' and 'previous change' are grey text links in the same colour as their disabled state; disabled differs only by opacity 0.4. That is distinguishable but weak, and the enabled ones read as captions rather than buttons.",
+     "expected": "Button styling for the enabled nav and a clearly different disabled state.",
+     "severity": "minor"
+    },
+    {
+     "where": "focus 'changes in this lane' list",
+     "what": "The list scrolls inside a fixed 404 px box (scrollHeight 610) with no scroll cue. Changes #5 to #7, including the refused one and the newly added one, are hidden below the fold.",
+     "expected": "A visible scroll affordance or a count of the hidden items, or auto-scroll to the active and newest items.",
+     "severity": "minor"
+    },
+    {
+     "where": "bottom slide strip",
+     "what": "A struck-through number (21, later 22) marks a refused change, with no legend or tooltip. Accepted and pending changes are painted the same red.",
+     "expected": "A legend or tooltip, and distinct colours for accepted, pending and refused.",
+     "severity": "minor"
+    },
+    {
+     "where": "focus after refuse / reload",
+     "what": "After a refuse the screen shows side-by-side 'main, kept' / 'refused proposal' cards. After a reload, the same URL shows a different layout (strips plus 'This change is refused. Review the first pending change').",
+     "expected": "The same view for the same state with or without a reload.",
+     "severity": "minor"
+    },
+    {
+     "where": "co-author latency",
+     "what": "A one-line story edit took about 70 s to come back.",
+     "expected": "Faster turnaround, or a progress hint with more than a timer.",
+     "severity": "minor"
+    }
+   ],
+   "screenshots": [
+    "/tmp/deckstudio-qa/round-5/focus-01.png",
+    "/tmp/deckstudio-qa/round-5/focus-00-after-line-click.png",
+    "/tmp/deckstudio-qa/round-5/focus-02.png",
+    "/tmp/deckstudio-qa/round-5/focus-03.png",
+    "/tmp/deckstudio-qa/round-5/focus-04-sending.png",
+    "/tmp/deckstudio-qa/round-5/focus-04.png",
+    "/tmp/deckstudio-qa/round-5/focus-05.png",
+    "/tmp/deckstudio-qa/round-5/focus-05b-settled.png",
+    "/tmp/deckstudio-qa/round-5/focus-05c-next.png",
+    "/tmp/deckstudio-qa/round-5/focus-06.png",
+    "/tmp/deckstudio-qa/round-5/focus-06b-change4-false-accepted.png",
+    "/tmp/deckstudio-qa/round-5/focus-07.png",
+    "/tmp/deckstudio-qa/round-5/focus-07b-thread-scrolled.png",
+    "/tmp/deckstudio-qa/round-5/focus-07c-1440-reload.png"
+   ]
+  },
+  {
+   "screen": "home-newdeck",
+   "completed": true,
+   "steps_done": [
+    "Opened http://127.0.0.1:4177/ in an isolated agent-browser session (qa5home), 1440x900. In the shared default session, / landed on /d/dss-sf-2026/slide/... because another agent was driving the same browser, not because the app redirected. home-01",
+    "Opened 'Import a deck.html' (one path field, hint about <section class=slide>) and cancelled. home-01b-import",
+    "Opened the 'New presentation' form. home-01c-newform",
+    "Filled title / audience / message, chose 'problem by problem, build up', left abstract and design rules empty, clicked Create. Landed on /d/onboarding-engineers-in-a-week/ with an empty-state hint. home-01d-filled, home-02",
+    "Sent 'Draft the outline of this talk: 10 slides, one claim per slide.' in the whole-deck composer. It answered after about 5 min (12:30 to 12:35); the status still said 'working... 4:07 proposing a lane' at the 4-minute mark. home-03a-pending, home-03-timeout-4min, home-03, home-03-full, home-03b-conv-lane",
+    "An outline lane appeared in main: 10 insert cards with tiny renders plus check/cross buttons. The same 10 inserts were repeated as full cards in the conversation, each next to an empty 'main / not in main' box. Also 1 info remark about placeholder proportions on slide 4.",
+    "Accepted inserts 1, 2 and 3 in order from the main lane. Each accept made a version (v1, v2, v3), the main strip and the 'all slides' grid updated with real renders, and the lane card turned to 'accepted'. home-04a, home-04b, home-04c",
+    "Clicked slide 2 in the main strip and pressed Enter. The slide screen opened (/slide/s_u1UmsXuBaJ). home-05a-selected, home-05",
+    "Asked for a two-column comparison of mentoring vs a structured plan. Answered in about 1 min, with a pushback note (it breaks the problem-driven arc) plus a modify lane. A main/proposed toggle appeared above the render; story and notes showed as word diffs. home-06, home-06b-reply",
+    "Pressed Escape: back to main with slide 2 focused. home-07a-after-esc",
+    "Clicked Present: opened /d/onboarding-engineers-in-a-week/api/present#2 on slide 2. Escape returned to main. Also checked slides 1 and 3 in present. home-07, home-07b-after-esc, home-07c-present-from-1, home-07d-present-slide3",
+    "Clicked 'decks': the home shows the new card first, '3 slides, v3', 'updated 1 minute ago', with a cover render of slide 1. home-08"
+   ],
+   "bugs": [
+    {
+     "where": "Main screen, whole-deck co-author, outline request",
+     "what": "Drafting a 10-slide outline took about 5 min (sent 12:30, answered 12:35). The status line still read 'co-author is working on whole deck 4:07 proposing a lane' at the 4-minute budget. There is no progress (e.g. slides drafted so far), no partial result and no cancel. A first-time creator stares at an empty deck for 5 minutes.",
+     "repro": "Create a new presentation from the form, then send 'Draft the outline of this talk: 10 slides, one claim per slide.' in the whole-deck composer. Watch the status timer.",
+     "expected": "An outline in under 2 min, or titles streamed first with renders after, and a way to cancel.",
+     "severity": "major",
+     "screenshot": "home-03-timeout-4min.png"
+    },
+    {
+     "where": "Main screen, outline lane strip",
+     "what": "The 10th insert card is cut off at the right edge, under the conversation panel. The lane section's content is 1148px wide in a 945px box; MAIN.fit-columns scrolls sideways but shows no scrollbar or cue. After the first accept the 10th card turns into a '+1' chip instead.",
+     "repro": "Run the outline request on a new deck. Look at the lane row before accepting anything: the 'Time to first merge...' card and its buttons are clipped at x=1080.",
+     "expected": "All inserts fit (wrap or shrink), or the strip shows a visible scroll affordance.",
+     "severity": "minor",
+     "screenshot": "home-03.png"
+    },
+    {
+     "where": "Main screen, lane insert cards",
+     "what": "The lane thumbnails are about 90x50 px, and the orange '+' badge sits on the right end of the slide title. Most titles cannot be read ('Every hire gets a differen[+]', 'Day one ends with a mer[+]'). The only readable list of titles is the plain-text reply in the conversation.",
+     "repro": "Run the outline request, then look at the lane strip (zoom: home-03-zoom-lane.png).",
+     "expected": "The title readable under or beside each insert card, with the badge kept off the text.",
+     "severity": "minor",
+     "screenshot": "home-03-zoom-lane.png"
+    },
+    {
+     "where": "Main screen header",
+     "what": "The slide count is not pluralised correctly: '1 slides' after the first accept.",
+     "repro": "Accept only the first insert of the outline lane and read the header next to v1.",
+     "expected": "'1 slide'.",
+     "severity": "minor",
+     "screenshot": "home-04a.png"
+    },
+    {
+     "where": "Checks / remarks on a partially accepted outline",
+     "what": "The automatic checks run on main only and ignore the open outline lane, so they raise false remarks. After accepting 3 of 10 inserts the deck shows 7 open remarks, including 'The deck is all tension and no resolution' and 'slides 2 and 3 are the deck's only build-up'. The resolution slides (5-10) are sitting in the pending lane. Every slide gets a red '3' badge.",
+     "repro": "Accept inserts 1-3 of the outline lane, leave 4-10 pending, open slide 2 and read 'remarks on this slide', then go back to main and read the header count.",
+     "expected": "Checks skip a deck with an open outline lane, or count the pending inserts, or mark the remark as 'pending lane covers this'.",
+     "severity": "major",
+     "screenshot": "home-07a-after-esc.png"
+    },
+    {
+     "where": "Remark state across screens",
+     "what": "The same remark shows different states on different screens. On the slide screen 'The deck is all tension and no resolution' and 'slides 2 and 3 are the deck's only build-up' show 'draft ready / open lane'. A minute later the main conversation panel shows the same remarks with 'propose' (no draft), while the lane headers say '1 check remark' / '2 check remarks'. One of the two screens shows a stale state.",
+     "repro": "Accept inserts 1-3, open slide 2 (Enter), and send any request so the checks run. Note 'draft ready' on the remarks (home-06). Press Escape and read the same remarks in the right panel (home-07a / home-08 snapshot).",
+     "expected": "One state per remark on every screen.",
+     "severity": "minor",
+     "screenshot": "home-06.png"
+    },
+    {
+     "where": "Present mode, long titles",
+     "what": "Titles run past the right margin that the body respects. 'Improvised onboarding is paid' ends at about x=1408 of 1440, and 'Every hire gets a different first' at about x=1388. The diagram stops at x=1332 and the left margin is 108px, so the title nearly touches the edge.",
+     "repro": "Accept outline inserts 1-3, click Present, then use ArrowRight to reach slide 3.",
+     "expected": "The title wraps inside the same content column as the body (about 108px margin on both sides).",
+     "severity": "minor",
+     "screenshot": "home-07d-present-slide3.png"
+    }
+   ],
+   "frictions": [
+    {
+     "where": "Main screen, conversation panel after the outline",
+     "what": "The co-author reply repeats all 10 inserts as large cards. Each one has an empty 'main / not in main' dashed box next to it, so 10 inserts make a very long scroll. The same lane is also in the main strip with its own check/cross buttons, so the creator does not know which copy to act on.",
+     "expected": "For inserts with nothing in main, a compact list of titles with accept/refuse that points to the strip, and no empty 'not in main' placeholders.",
+     "severity": "major"
+    },
+    {
+     "where": "Outline quality",
+     "what": "Titles are good claims: one sentence each, no bullet lists, and they follow the problem-driven arc (problem, cost, bottleneck, thesis, day 1, days 2-4, day 5, objection, metric). Problems: (a) slides 2, 3 and 4 use invented illustrative data (hire timelines, a senior's interrupted week, waiting proportions), but only slide 4 was flagged as placeholder; (b) slide 1 highlights 'ad-hoc mentoring' in the accent colour, which is the thing the talk argues against; (c) the slide 2 timeline has no time axis, and Hire A's second bar has no label.",
+     "expected": "Every invented number or proportion flagged as a placeholder, the accent on the claim the talk defends, and charts with an axis.",
+     "severity": "minor"
+    },
+    {
+     "where": "Slide screen, two-column comparison proposal",
+     "what": "The 'two-column comparison' is three parallel short phrases per side. It works as a contrast table, but it is close to a bullet list. The pushback (it breaks the problem-driven arc and duplicates slide 9) was useful. Story and notes changes show as word-level diffs where 'the', 'was', 'free' survive between strikethroughs, and the result is hard to read.",
+     "expected": "Old and new story/notes shown as whole sentences when more than about half the words change.",
+     "severity": "minor"
+    },
+    {
+     "where": "Slide screen conversation layout",
+     "what": "The reply and lane card sit in a roughly 600px column in their own scroll area inside the scrolling page, so there are two nested scrollbars. The right half under the render is empty.",
+     "expected": "One scroll, with the conversation using the full width under the render.",
+     "severity": "minor"
+    },
+    {
+     "where": "New presentation form",
+     "what": "There is no speaker name or event field, so the generated title slide has no byline (the existing deck's cover has one). 'design rules: leave empty for the starter rules' does not say what the starter rules are. The 'narrative pattern' radios carry no help.",
+     "expected": "Optional speaker/event fields, and a link or preview of the starter rules.",
+     "severity": "minor"
+    },
+    {
+     "where": "Home deck card",
+     "what": "The card shows '3 slides, v3' and the time only. Nothing says the deck has 2 open lanes with 8 pending changes and 7 open remarks. 'v3' is jargon on a list page. There is no rename, duplicate or delete.",
+     "expected": "A pending-work signal on the card (e.g. '8 proposals waiting'), plus basic deck actions.",
+     "severity": "minor"
+    },
+    {
+     "where": "Empty deck main screen",
+     "what": "'Present' is shown in orange as the primary action on a 0-slide deck. 'No slides yet' sits at x=24 while the title sits at x=144 (misaligned). The empty state says 'Describe the talk to the co-author on the right' but offers no one-click 'Draft an outline from the brief' starter, although the brief is already filled in.",
+     "expected": "Present disabled while the deck is empty, and a starter button that sends the outline request.",
+     "severity": "minor"
+    },
+    {
+     "where": "Present mode entry",
+     "what": "Present opens at the selected slide (#2), not slide 1, and the URL is /api/present, which reads as an internal endpoint. A creator who just wants to rehearse lands in the middle of the deck.",
+     "expected": "Start at 1, or say 'presenting from slide 2'.",
+     "severity": "minor"
+    },
+    {
+     "where": "Main screen after Escape from slide 2",
+     "what": "With a slide focused, the big focus render pushes the outline lane (7 pending inserts) below the fold, behind the versions bar. Only the 'Mentoring' lane header peeks out, so a creator mid-acceptance loses sight of the outline.",
+     "expected": "The open outline lane kept visible, or collapsible, while a slide is focused.",
+     "severity": "minor"
+    }
+   ],
+   "screenshots": [
+    "/tmp/deckstudio-qa/round-5/home-01.png",
+    "/tmp/deckstudio-qa/round-5/home-01b-import.png",
+    "/tmp/deckstudio-qa/round-5/home-01c-newform.png",
+    "/tmp/deckstudio-qa/round-5/home-01d-filled.png",
+    "/tmp/deckstudio-qa/round-5/home-02.png",
+    "/tmp/deckstudio-qa/round-5/home-03a-pending.png",
+    "/tmp/deckstudio-qa/round-5/home-03-timeout-4min.png",
+    "/tmp/deckstudio-qa/round-5/home-03.png",
+    "/tmp/deckstudio-qa/round-5/home-03-full.png",
+    "/tmp/deckstudio-qa/round-5/home-03-zoom-lane.png",
+    "/tmp/deckstudio-qa/round-5/home-03b-conv-lane.png",
+    "/tmp/deckstudio-qa/round-5/home-04a.png",
+    "/tmp/deckstudio-qa/round-5/home-04b.png",
+    "/tmp/deckstudio-qa/round-5/home-04c.png",
+    "/tmp/deckstudio-qa/round-5/home-05a-selected.png",
+    "/tmp/deckstudio-qa/round-5/home-05.png",
+    "/tmp/deckstudio-qa/round-5/home-06.png",
+    "/tmp/deckstudio-qa/round-5/home-06b-reply.png",
+    "/tmp/deckstudio-qa/round-5/home-07a-after-esc.png",
+    "/tmp/deckstudio-qa/round-5/home-07.png",
+    "/tmp/deckstudio-qa/round-5/home-07b-after-esc.png",
+    "/tmp/deckstudio-qa/round-5/home-07c-present-from-1.png",
+    "/tmp/deckstudio-qa/round-5/home-07d-present-slide3.png",
+    "/tmp/deckstudio-qa/round-5/home-08.png"
+   ]
+  },
+  {
+   "screen": "history-brief",
+   "completed": true,
+   "steps_done": [
+    "1. Opened /history (lands on ?a=16&b=17), read the rail, both filmstrips and 'What changed' (hist-01)",
+    "2. Clicked v1 in the rail, then shift-clicked v17. The shift-click went through a synthetic MouseEvent with shiftKey because agent-browser has no modifier-click; the URL became a=1&b=17. Paged the filmstrip to check the moved and modified marks (hist-02, hist-02b-moved)",
+    "3. Clicked restore on the slide 9 row ('restore: revert content', 'An event is not an order'). An inline 'revert content? cancel / confirm' prompt appeared and I confirmed. This created v18, the compare moved to v1\u2192v18 and the row became 'done: v18, undo' (hist-03a-confirm, hist-03)",
+    "3b. Went to /. The versions rail shows v18 as current, labelled 'reverted body, assets of slide 9 (An event is not an order) to v1' (hist-04)",
+    "4. Back on /history (a=17&b=18), clicked 'Open v17 as a lane'. It landed on main / with a new top lane 'back to v17 / from history v17' carrying 'modify slide 9' with accept/refuse (hist-05)",
+    "5. Opened Brief and checks from the header link and read the fields, the Design rules, the image style, the theme.css path and the 4 checks (brief-01, brief-01b-design)",
+    "6. Appended ' QA-r5 marker.' to the message, saved ('saved' shown), reloaded: the change persisted (brief-02). Then put back the original sentence exactly, saved and reloaded to confirm",
+    "7. A background re-run was already going ('running after a deck change') and took ~9 min to settle. Clicked 'Run checks' at 00:41:16; it finished at 00:46:28, about 5 min, over the 4-min limit. brief-03 was taken at the 4-min mark and brief-03b-gaps after it finished. Read every remark",
+    "8. Opened Present from main (URL /d/dss-sf-2026/api/present#1), pressed ArrowRight x3 (#4), pressed e and landed on /slide/s_1BsURibNAC, 'slide 4 of 31' (present-00b-slide4, present-01). Pressed Escape: back on main / with slide 4 selected and context 'slide 4' (present-02)"
+   ],
+   "bugs": [
+    {
+     "where": "Brief and checks > Checks, remark range chip vs remark body (live update)",
+     "what": "When the deck changes while /brief is open, the range chip updates live but the slide numbers inside the remark text stay frozen, so they contradict each other. Seen live: chip 'slides 24\u201325' with text 'slide 23 (Invalidate every projection) ... slide 24 (Rewind is explicit)'. Also chip 'slides 9\u201310' with text still citing 'slide 17 (Private state, compacted)', when Private state had already moved to slide 9. A reload fixes the text.",
+     "repro": "Open /d/dss-sf-2026/brief. In another tab, move or insert a slide on main (accept a lane move). Without reloading /brief, compare each remark's range chip with the 'slide N (title)' references in its text: the chip shifts, the text does not.",
+     "expected": "Chip and text re-number together, or neither does.",
+     "severity": "major",
+     "screenshot": "brief-01b-design.png"
+    },
+    {
+     "where": "Brief and checks > narrative arc, first remark 'slides 4\u201318 / lane ready'",
+     "what": "A stale remark survives every re-run (12:31, 12:37, 12:42) and contradicts itself and the deck. It still says 'the deck then spends twelve slides ... before the memory answer is decomposed at slide 9'. Only 5 slides now sit between 3 and 9, because v16 already moved 'Three read patterns' forward. Its chip says 4\u201318 and it is still marked 'lane ready'. The new remark 'slides 9\u201322' makes the same claim again (decomposition cut by the coordination thread), so the check lists that point twice.",
+     "repro": "Open /brief and expand narrative arc. Read remark 1 (slides 4\u201318) and remark 2 (slides 9\u201322). Check the slide order in the Slides column: 'Three read patterns' is 9, not 15+.",
+     "expected": "A re-run drops or rewrites remarks whose claim no longer holds, and does not keep two remarks for one issue.",
+     "severity": "major",
+     "screenshot": "brief-03.png"
+    },
+    {
+     "where": "Brief and checks > gaps vs abstract",
+     "what": "Duplicate remarks after a manual Run checks. 'slide 6 / lane ready' (\"Typed in, typed out\" details the wire format of a learned classifier, which no part of the abstract ... promises) and 'slides 6\u20137' (spend a text slide and a code slide on the request and response shape of a learned decision model, which no part of the abstract ... promises) make the same claim. Also, the chip of 'slides 22\u201326 / new' does not cover slide 21, which its own text cites as evidence ('slide 21 (One KTable, one query) stops at an in-process Interactive Query').",
+     "repro": "Open /brief, click Run checks, wait ~5 min, expand 'gaps vs abstract' and read its 4 remarks.",
+     "expected": "One remark per claim; the range chip covers every slide the text cites.",
+     "severity": "major",
+     "screenshot": "brief-03b-gaps.png"
+    },
+    {
+     "where": "Brief and checks header status during a manual run",
+     "what": "False status. After 'Run checks' the header reads 'Checks running\u2026'. About 90 s later it switches to 'running after a deck change' while the version stays v20 the whole time. The header shows no 'Run checks' button during an auto-run, so you cannot start one while it runs.",
+     "repro": "Open /brief with the deck idle (v20). Click Run checks. Poll the header text every 10 s: 'Checks running\u2026' at 00:41:20, then 'running after a deck change' from 00:42:44 to 00:46:17, with 'v20' unchanged.",
+     "expected": "The status keeps naming what started the run (a manual run) and only says 'after a deck change' when the version actually changed.",
+     "severity": "minor",
+     "screenshot": "brief-03.png"
+    },
+    {
+     "where": "Main screen lanes (rationale text), reached from history step 3/4",
+     "what": "Raw slide ids leak into user-facing text. Lane rows read 'keeps s_1bPtQ4g3u6 attached to the read-pattern it details', 's_sdB7-sjwth is the code for the private tier of s_1bPtQ4g3u6', 's_q3tV81Agum continues the tiers...', 's_6q7kZ4ZqHG is the code for s_q3tV81Agum'. The 'Drop the classifier wire-format slide' lane reads '...s_LNLSV_dFNk already makes the escalation point'.",
+     "repro": "Go to /d/dss-sf-2026/ and read the rows under the lanes 'Open the memory answer before the coordination block' and 'Drop the classifier wire-format slide'.",
+     "expected": "Slide references shown as 'slide N (title)', as the check remarks already do.",
+     "severity": "major",
+     "screenshot": "hist-04.png"
+    },
+    {
+     "where": "Main screen, lane 'Open the memory answer before the coordination block'",
+     "what": "The lane's actionable content is off-screen and its visible state is false. All you see is one anchor thumbnail (slide 8), a lone 'accepted' label floating in empty space, and '+4'. The 4 move rows' accept/refuse buttons sit at x=1675\u20131961 px inside the 1440 px viewport. 'accepted' suggests the lane is done when 4 moves are still pending.",
+     "repro": "At 1440x900 open /d/dss-sf-2026/ and look at that lane. Then run in devtools: [...document.querySelectorAll('button[aria-label^=\"accept: move\"]')].map(b=>b.getBoundingClientRect().x) \u2192 [1675,1771,1866,1961].",
+     "expected": "The lane strip scrolls to (or shows) the changed slides, and 'accepted' only appears on entries that are actually accepted.",
+     "severity": "major",
+     "screenshot": "hist-05.png"
+    },
+    {
+     "where": "History > compared-slide panel, 'not in v1' context grid",
+     "what": "In the context grid the 'slide 1' chip is drawn on top of the slide 1 thumbnail's byline ('slide 1 erosiaux | CTO, Conduktor'), hiding the first characters.",
+     "repro": "/history, click v1 in the rail so the compare is v1\u2192v17 (or v18). The bottom-left panel 'v1, not in v1, it comes between slides 1 and 2' shows the grid; look at the bottom-left of the slide 1 card.",
+     "expected": "The chip sits outside the thumbnail or over a blank area.",
+     "severity": "minor",
+     "screenshot": "hist-02.png"
+    },
+    {
+     "where": "History > What changed panel",
+     "what": "The panel's height is capped at ~330 px and its content is cut off under the compared-slide panel. With 5 entries (v1\u2192v18) the last row ('slide 8 moved from 15 to 8 / restore: move back') and part of the 'done: v18, undo' area are hidden, and nothing indicates there is more to scroll.",
+     "repro": "/history?a=1&b=18 at 1440x900. Look below 'done: v18, undo': a half-visible line is cut at y\u2248410 by the compare panel.",
+     "expected": "Every entry visible or a clear scroll affordance.",
+     "severity": "minor",
+     "screenshot": "hist-03.png"
+    }
+   ],
+   "frictions": [
+    {
+     "where": "History > rail click target",
+     "what": "agent-browser's ref click on the v1 rail button (off-screen in the horizontal rail) did nothing. Only a real mouse click after scrolling it into view selected it. The rail opens scrolled to the end and the first visible entry is cut in half ('ged \"The log has jobs\"').",
+     "expected": "The rail opens with whole items at both edges, and off-screen versions are reachable without manual horizontal scroll.",
+     "severity": "minor"
+    },
+    {
+     "where": "History > compare from/to selection",
+     "what": "Shift-click is the only way to pick the 'to' version, and the help line in the header is the only place that says so. There is no keyboard or visible control for 'to' apart from the 'to v17' chip at the far right of the rail.",
+     "expected": "Visible from/to pickers, or a toggle on each version row.",
+     "severity": "minor"
+    },
+    {
+     "where": "History > filmstrips",
+     "what": "Only 4 slides per row at 1440 px, with '+5' and '+21' to page. To find the moved slide ('moved from 15') I had to page with 'show the next slides'. The 'moved' connector lines run off to an empty bordered '+22' box on the v1 row.",
+     "expected": "Jump straight to a changed slide when its 'What changed' row is clicked; more thumbnails per row.",
+     "severity": "minor"
+    },
+    {
+     "where": "History > What changed, restore labels",
+     "what": "Labels are imprecise. 'slide 7: story, content, assets changed' offers 'restore: revert content', and 'slide 6: notes, content changed' offers 'restore: revert content', so it is unclear whether story/notes come back too. Rows are not in slide order (slide 9 before slide 8). 'v1, not in v1, it comes between slides 1 and 2' reads oddly. 'done: v18,' has a dangling comma.",
+     "expected": "Restore says exactly which fields it reverts; rows sorted by slide; the panel title says 'slide 2 is not in v1'.",
+     "severity": "minor"
+    },
+    {
+     "where": "History > 'Open v17 as a lane'",
+     "what": "It lands on main with no scroll or highlight on the new lane. The lane is called 'back to v17' while the button said 'Open v17 as a lane'. Other lanes look the same, so it is easy to lose which one you just created.",
+     "expected": "Land with the new lane scrolled into view and briefly highlighted.",
+     "severity": "minor"
+    },
+    {
+     "where": "Brief and checks > Run checks",
+     "what": "A full run takes ~5 min (checks run one after another: narrative arc ~1.5 min, concept order ~2.5 min, gaps ~1 min, render ~10 s). A deck change or brief save triggered an auto re-run that kept re-running checks for ~9 min. The only progress shown is a 'running\u2026' line per check.",
+     "expected": "Run checks in parallel, or show an overall progress/ETA; do not re-run unchanged checks.",
+     "severity": "major"
+    },
+    {
+     "where": "Brief and checks > remark status words",
+     "what": "The same state has different names: 'lane ready' and 'open draft lane' on /brief, 'lane opened: <name>' on the slide screen. Also 'draft ready', 'propose', 'open lane'. 'open draft lane' is a status label that reads like a button.",
+     "expected": "One vocabulary for 'a lane exists for this remark', and action wording only on buttons.",
+     "severity": "minor"
+    },
+    {
+     "where": "Brief and checks > Slides column",
+     "what": "Titles are cut to ~12 characters ('One home alrea\u2026', 'The response a\u2026'), so you cannot read them.",
+     "expected": "Two-line titles or a tooltip.",
+     "severity": "minor"
+    },
+    {
+     "where": "Brief and checks > save",
+     "what": "After saving the brief, nothing tells you whether the checks are now stale for the new message; a background re-run just started silently. The 'saved' marker disappears on reload.",
+     "expected": "A note like 'brief changed, checks will re-run' next to save.",
+     "severity": "minor"
+    },
+    {
+     "where": "Present",
+     "what": "Present opens at /d/dss-sf-2026/api/present#1: an /api/ path as a user-facing URL. Its rendering also differs from the slide screen: the slide screen shows flat grey rules at the bottom, while Present shows grey plus an orange wavy rule.",
+     "expected": "A clean /present route, and the same render in both views.",
+     "severity": "minor"
+    }
+   ],
+   "screenshots": [
+    "/tmp/deckstudio-qa/round-5/hist-01.png",
+    "/tmp/deckstudio-qa/round-5/hist-02.png",
+    "/tmp/deckstudio-qa/round-5/hist-02b-moved.png",
+    "/tmp/deckstudio-qa/round-5/hist-03a-confirm.png",
+    "/tmp/deckstudio-qa/round-5/hist-03.png",
+    "/tmp/deckstudio-qa/round-5/hist-04.png",
+    "/tmp/deckstudio-qa/round-5/hist-05.png",
+    "/tmp/deckstudio-qa/round-5/brief-01.png",
+    "/tmp/deckstudio-qa/round-5/brief-01b-design.png",
+    "/tmp/deckstudio-qa/round-5/brief-02a-edited.png",
+    "/tmp/deckstudio-qa/round-5/brief-02.png",
+    "/tmp/deckstudio-qa/round-5/brief-03.png",
+    "/tmp/deckstudio-qa/round-5/brief-03b-gaps.png",
+    "/tmp/deckstudio-qa/round-5/present-00.png",
+    "/tmp/deckstudio-qa/round-5/present-00b-slide4.png",
+    "/tmp/deckstudio-qa/round-5/present-01.png",
+    "/tmp/deckstudio-qa/round-5/present-02.png"
+   ]
+  }
+ ],
+ "critique": {
+  "verdict": "Two screens follow the principle and two break it. Focus and the slide page do it right: the slide sits in the middle, the proposal renders on it, and accept/refuse sits under it. The main screen, where the creator spends most of his time, still has the mockup-era right bar, and that bar is now mostly a feed of 67 machine remarks rather than a conversation. A single proposed change shows up in three or four places: a lane row on main, a lane card on the slide page, a mini compare inside the reply, and the focus view. Each place has its own accept button, so his attention scatters instead of staying on the slide. Lane rows on main are blocks of text with internal IDs (s_1bPtQ4g3u6) and one stray thumbnail. They are not the card-per-change strip from the mockup, so he reads prose to understand a move he should see. The deck also changes under him (v17 \u2192 v20, slides renumbered) without telling him, and the fixed versions band covers the lanes. The co-author's thinking is the strongest part: it pushes back, names tradeoffs and refuses no-op requests. The workbench around it still makes him hunt for where his answer landed.",
+  "score": 5,
+  "principle_violations": [
+   {
+    "screen": "main",
+    "what": "The conversation lives in a 360px right bar, and with no selection it opens on a remark feed ('67 open remarks on the deck', each with propose/resolve/warn), not on the conversation. When he selects slide 2, the big render sits in the middle but the co-author's answer appears in the right bar (main-07), away from the slide.",
+    "why_it_hurts": "This is the exact layout the creator rejected. He reads the slide in the centre and the answer at the far right, and remarks push his own messages below the fold (main-07-before shows remarks plus story plus notes before any message)."
+   },
+   {
+    "screen": "main",
+    "what": "Lane rows are text lists ('move slide 17, Private state, compacted, to 9: keeps s_1bPtQ4g3u6 attached to the read-pattern it details'). They show one thumbnail at the column of the first card plus '+4', and internal slide IDs leak into the rationale. The mockup's arc for a move and its row of cards with \u2713/\u2717 under each are gone.",
+    "why_it_hurts": "He cannot see a change, only read about it, and the IDs are noise that belongs to the model. Four moves read as four lines of jargon, not as one visual reorder."
+   },
+   {
+    "screen": "main",
+    "what": "With a slide selected, the 550px render plus the previous/next rail pushes every lane below the fixed versions band. 'back to v17' and 'Mentoring' peek out half-covered (main-07, home-07b, slide-06).",
+    "why_it_hurts": "The pending proposals for the slide he is looking at are hidden right when he is deciding about it. The whole point of the canvas is to see slide and proposals together."
+   },
+   {
+    "screen": "main",
+    "what": "Main shows the same deck twice (filmstrip and the 'all slides' grid) plus red remark-count badges on every thumbnail (6, 5, 2, 7...). These counts use the same red as pending-change markers.",
+    "why_it_hurts": "His attention goes to red counts of machine critiques rather than to his decisions. Remarks and proposals look alike, so he cannot tell what needs a decision from what is commentary."
+   },
+   {
+    "screen": "main",
+    "what": "Accepting in one lane changes the version (v18 \u2192 v20) and renumbers slides in every other lane ('slide 9' becomes 'slide 10' or 'slide 11') with no notice. The partial accept in 'Split request and response' gives a duplicated slide without any warning, and another lane still proposes removing that same slide.",
+    "why_it_hurts": "The answer to his action lands somewhere he is not looking, and part of it lands nowhere at all. He finds out about collateral changes only by comparing numbers."
+   },
+   {
+    "screen": "slide",
+    "what": "The conversation sits under the render, which is right, but in a ~600px column with its own nested scroll inside a scrolling page. When a lane comes back, the reply contains a second, thumbnail-sized main/proposed compare with its own accept/refuse, while the big render above has a toggle and the right column has a third lane card with \u2713/\u2717.",
+    "why_it_hurts": "There are three accept controls for one change. Once he scrolls to read the reply, the big render and its toggle scroll away, so he judges the change on 180px thumbnails."
+   },
+   {
+    "screen": "slide",
+    "what": "'remarks on this slide' lists deck-level remarks about slides 2/3 and 'lane opened: Open the memory answer\u2026' on slide 5. Story and notes diffs strike out words one by one, leaving 'the', 'was' and 'free' as islands.",
+    "why_it_hurts": "The right column is mostly unrelated commentary, and the before/after text cannot be read as sentences. The creator has to rebuild both versions in his head."
+   },
+   {
+    "screen": "focus",
+    "what": "When he messages the lane, the reply appears in the right sidebar thread, and the revision (new change #7) lands in a list that does not scroll to it. The canvas stays on the move. After accept, the move diff shows two identical images ('before, slide 17' / 'now in main as v19').",
+    "why_it_hurts": "The answer to his message is not shown where the change is. For a move, the after-accept view shows nothing about the move itself."
+   },
+   {
+    "screen": "focus",
+    "what": "The same state has two different layouts: side-by-side 'main, kept / refused proposal' right after acting, and strips plus 'This change is refused. Review the first pending change' after a reload.",
+    "why_it_hurts": "The screen looks different each time he lands on the same thing, which erodes trust in what he is seeing."
+   },
+   {
+    "screen": "home-newdeck",
+    "what": "The outline answer repeats 10 inserts as large cards, each beside an empty dashed 'not in main' box, in the right bar. The same lane sits in the strip with its own \u2713/\u2717. Present is the primary orange button on a 0-slide deck, and there is no 'draft outline from brief' starter.",
+    "why_it_hurts": "His first experience is a long scroll of duplicated proposals in the side bar, with two places to act on the same slide."
+   },
+   {
+    "screen": "brief",
+    "what": "Checks run one after another for ~5 min, re-run silently after any deck change ('running after a deck change'), and produce paragraph-long remarks. The status vocabulary varies: lane ready, open draft lane, draft ready, lane opened, propose, open lane.",
+    "why_it_hurts": "The brief screen feeds the remark flood on main without saying what it is doing. Status words that read like buttons make him wonder whether something is waiting for him."
+   }
+  ],
+  "changes": [
+   {
+    "rank": 1,
+    "screen": "main",
+    "change": "Move the conversation into the canvas on main, as the slide page already does. When a slide or range is selected, the stack under the big render becomes: lane rows that touch this slide (inline), then the conversation for this context with full canvas width, then the input. Keep a whole-deck conversation under the filmstrip when nothing is selected. Remove the right bar. Remarks become a collapsed 'N remarks' chip on the selected slide's header, expanding inline, and the per-thumbnail remark badges go away (one grey dot at most). Shrink the selected-slide render to ~360px tall, put previous/next as small arrows, and make the versions band a single collapsible line that scrolls with the page, not a fixed footer.",
+    "rationale": "This is the creator's own principle, and main is where he spends his time. It removes the side-bar eye travel, puts proposals next to the slide they change, and stops 67 remarks from crowding out his messages.",
+    "size": "large"
+   },
+   {
+    "rank": 2,
+    "screen": "main",
+    "change": "Render lane rows as in mockup 1. Use a fixed 220px header column (name, origin, discard). Next to it, one card per change aligned under its filmstrip column: proposed render, \u2713/\u2717 under it, insert marked with +, removal as a dashed card, moves drawn as an arc from the old to the new column with a 'from 17 \u2192 9' label. The rationale goes into a hover/expand line under the card, rewritten in slide titles. Strip every internal id (s_xxx) server-side before display. Delete the 'all slides' grid.",
+    "rationale": "He can see a change instead of reading it. Moves and reorders, which are most of the arc-check lanes, become visible at a glance, and the duplicate slide index disappears.",
+    "size": "medium"
+   },
+   {
+    "rank": 3,
+    "screen": "slide / main / focus / new deck",
+    "change": "Give each change exactly one place to act: the render it changes. Co-author replies that open or revise a lane show a one-line receipt in the thread ('Lane Shorter labels \u00b7 1 change \u00b7 shown on the slide above \u2191'). Clicking it scrolls to the render and flashes the proposed overlay. Remove the inline mini main/proposed compare and its accept/refuse from replies, and remove the empty 'not in main' boxes. Insert-only outlines become a compact title list in the reply that points to the strip. On the slide page, drop the right-column lane card's \u2713/\u2717 and keep only the toggle plus accept/refuse under the render. Make the main/proposed toggle sticky at the top of the scroll area.",
+    "rationale": "Today one change has three or four accept buttons and two thumbnail sizes. One action surface on the big render means he judges at full size and always knows which control counts.",
+    "size": "medium"
+   },
+   {
+    "rank": 4,
+    "screen": "main / focus",
+    "change": "Announce what moved, in place. After any accept, revise or background version bump, show a one-line notice at the top of the canvas: 'v19 \u2192 v20 \u00b7 slide 17 moved to 9, slides 9\u201316 shifted by one \u00b7 undo'. Flash the affected thumbnails for 2s. In focus, a lane revision scrolls the change list to the new item, selects it on the canvas, scrolls the thread to the start of the reply, and labels it 'new'. Moves keep stable labels (title + from\u2192to) instead of renumbering. Before a partial accept, warn when changes in a lane depend on each other, and badge lanes that touch the same slide ('conflicts with Drop the classifier slide').",
+    "rationale": "Right now, the answer to his action often lands where he is not looking, or is not shown at all. Renumbering and conflicts silently produce wrong decks (duplicate slide 6/7).",
+    "size": "medium"
+   },
+   {
+    "rank": 5,
+    "screen": "brief / slide",
+    "change": "Cut remark noise to what concerns him. Run checks in parallel, with one overall progress line ('3 of 4 checks done'). Skip checks whose inputs have not changed. Show remarks only on the slides they cite, with cross-slide remarks grouped under the range header. Collapse 'info'-level remarks by default. Use one status vocabulary: 'lane open' for the status and a 'propose' button only. In story/notes diffs, show old and new as whole sentences when more than ~40% of the words change.",
+    "rationale": "Remarks are today's main source of misdirected attention: deck-level ones on unrelated slides, silent re-runs, and status labels that look like buttons. Fewer, better-placed remarks free the canvas for the conversation.",
+    "size": "medium"
+   }
+  ],
+  "keep": [
+   "Focus screen layout: big main-vs-lane render with neighbouring slides on both strips ('main, was 17' / 'this lane, now 9') is the best move visualisation in the tool, plus the numbered change list, the accept/refuse bar and the slide-number strip",
+   "Slide page puts the conversation under the render with a main/proposed toggle, the closest screen to the creator's principle",
+   "Dashed 'removed' overlay drawn directly on the slide render with 'removed in lane <name>' label",
+   "In-place working indicator 'co-author is working on slide 6 0:02' in the thread",
+   "Co-author's pushback quality: refuses no-op requests, names the cost of each alternative, flags arc conflicts before building ('Flagging one thing: this slide is the problem statement\u2026')",
+   "Per-card accepted/refused states left visible in the lane row instead of the card disappearing",
+   "History compare: two version rows with connector lines, 'modified'/'moved from 15' labels, big side-by-side render, What changed list with per-row restore and inline confirm",
+   "'Open vN as a lane' as the way to restore, so a restore is reviewable like any proposal",
+   "Lane origin line ('from check: arc', 'from your request on slide 5', 'from history v17'), which tells him who proposed it",
+   "Restrained light theme with one accent colour reserved for proposals and actions"
+  ]
+ }
+}
