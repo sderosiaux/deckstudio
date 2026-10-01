@@ -89,3 +89,39 @@ button { font: inherit; }
 /* History: the "+N" slot over the end of the compared strips scrolls them on; it shows the count EdgeFade prints. */
 .diff-more { all: unset; box-sizing: border-box; cursor: pointer; border-radius: var(--radius); transition: box-shadow .15s ease; }
 .diff-more:hover, .diff-more:focus-visible { box-shadow: inset 0 0 0 1px var(--grey-2); }
+
+/* Slide screen. From 1280px: the work column (render, story, notes) and a 360px side column (lanes, remarks, then the
+ * conversation down to the bottom), each scrolling on its own. Narrower: one column, the side's sections under the render. */
+.slide-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.slide-layout[data-columns='2'] { display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
+.slide-main { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 48px calc(24px + var(--gutter)); display: flex; flex-direction: column; gap: 16px; }
+.slide-section { display: flex; flex-direction: column; gap: 8px; max-width: 800px; }
+.slide-side { min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); }
+.slide-side-scroll { flex: 0 1 auto; max-height: 55%; overflow: auto; padding: 4px 20px 16px; display: flex; flex-direction: column; gap: 20px; }
+.slide-side-talk { flex: 1 1 0; min-height: 240px; display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.slide-side-talk > [data-testid='thread'] { flex: 1; }
+/* The slide at reading size: SlidePreview has a fixed width, on the stage it takes the column's, 800px at most. */
+.slide-stage { width: min(100%, 800px); }
+.slide-stage > [data-testid='slide-preview'] { width: 100% !important; flex: none !important; }
+.slide-toggle { display: flex; flex-wrap: wrap; gap: 4px; max-width: 800px; }
+.slide-toggle > button { all: unset; cursor: pointer; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 10px; border-radius: 4px; font-size: var(--fs-meta); font-weight: 500; color: var(--grey); box-shadow: 0 0 0 1px var(--line); transition: color .15s ease, box-shadow .15s ease; }
+.slide-toggle > button:hover { color: var(--ink); }
+.slide-toggle > button[aria-pressed='true'] { color: var(--ink); background: var(--card); box-shadow: 0 0 0 1.5px var(--accent); }
+/* A lane on the slide: a card; a click shows its proposal on the render, and the lane shown is ringed in the accent. */
+.slide-lane { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: var(--radius); background: var(--card); box-shadow: 0 0 0 1px var(--line); cursor: pointer; transition: box-shadow .15s ease; }
+.slide-lane:hover { box-shadow: 0 0 0 1px var(--grey-2); }
+.slide-lane[aria-current='true'] { box-shadow: 0 0 0 1.5px var(--accent); }
+
+/* Focus screen. From 1280px the lane thread is a 360px column beside the work column (renders, decision bar, strips),
+ * full height, its composer at the bottom; narrower it follows the renders in the scrolling body. The decision bar is a
+ * block under that body, never laid over it. */
+.focus-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.focus-layout[data-columns='2'] { display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
+.focus-work { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.focus-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 16px calc(24px + var(--gutter)); display: flex; flex-direction: column; gap: 16px; }
+.focus-side { min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); }
+.focus-side > [data-testid='thread'] { flex: 1; }
+/* Before/after side by side as long as two 320px cards fit the body, stacked below; each card takes its column's width. */
+/* 1fr, not a 450px max: auto-fit counts its columns with the max, and two 450px cards miss the 1440px work column by 12px. */
+.focus-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); max-width: 924px; gap: 24px; }
+.focus-pair > [data-testid='slide-preview'] { width: 100% !important; flex: none !important; }

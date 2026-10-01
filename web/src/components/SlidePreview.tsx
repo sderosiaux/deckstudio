@@ -14,6 +14,8 @@ export interface SlidePreviewProps {
   missingText?: string;
   /** Card width in px; 560 by default (the reading size). */
   width?: number;
+  /** A dashed note laid over the slide, eg "removed in lane X": a pending change that deletes what is shown. */
+  overlay?: string | undefined;
 }
 
 const WIDTH = 560;
@@ -48,7 +50,7 @@ const frame = (variant: SlidePreviewVariant): CSSProperties => ({
  * One slide at reading size (560px wide unless its container sets the width): the label line, then the whole slide
  * in an inset 16:9 frame, from its thumbnail; or a dashed frame when the slide does not exist on that side.
  */
-export function SlidePreview({ label, variant, title = '', url, missingText = '', width = WIDTH }: SlidePreviewProps) {
+export function SlidePreview({ label, variant, title = '', url, missingText = '', width = WIDTH, overlay }: SlidePreviewProps) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [url]);
   return (
@@ -65,6 +67,28 @@ export function SlidePreview({ label, variant, title = '', url, missingText = ''
             <span className="muted" style={{ fontSize: 12 }}>{failed ? 'render failed' : 'rendering…'}</span>
           </div>
         )}
+        {overlay && variant !== 'missing' ? (
+          <div
+            data-testid="removed-overlay"
+            style={{
+              position: 'absolute',
+              inset: 8,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 16,
+              textAlign: 'center',
+              border: '2px dashed var(--grey)',
+              borderRadius: 'var(--radius)',
+              background: 'color-mix(in srgb, var(--paper) 72%, transparent)',
+              color: 'var(--ink)',
+              fontSize: 'var(--fs-row)',
+              fontWeight: 500,
+            }}
+          >
+            <span style={{ padding: '4px 10px', borderRadius: 4, background: 'var(--card)', boxShadow: '0 0 0 1px var(--line)' }}>{overlay}</span>
+          </div>
+        ) : null}
       </div>
     </figure>
   );
