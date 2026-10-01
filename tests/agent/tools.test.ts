@@ -254,6 +254,55 @@ describe('deck tools', () => {
     expect(await store.lane(laneId)).toEqual(again);
   });
 
+  it('QA3 no duplicate lanes: propose_lane with the same anchor and label (case and spaces aside) revises the open lane', async () => {
+    const h = makeDeckToolHandlers(ctx);
+    const anchor = { kind: 'slide', slide: 's2' } as const;
+    const first = (await h.propose_lane({ label: 'Trim the illustrative values', anchor, changes: [{ kind: 'modify', slide: 's2', patch: { body: '<p>a</p>' }, reason: 'r1' }] })) as { laneId: string };
+    const again = (await h.propose_lane({
+      label: '  trim the   Illustrative values ',
+      anchor,
+      changes: [{ kind: 'modify', slide: 's2', patch: { body: '<p>b</p>', notes: 'n' }, reason: 'r2' }],
+    })) as { laneId: string; revisedExisting: boolean; note: string; updated: string[] };
+    expect(again.laneId).toBe(first.laneId);
+    expect(again.revisedExisting).toBe(true);
+    expect(again.note).toMatch(/revised.*instead of/i);
+    expect(again.updated).toHaveLength(1);
+    expect(await laneFiles()).toHaveLength(1);
+    const lane = (await store.lane(first.laneId))!;
+    expect(lane.label).toBe('Trim the illustrative values');
+    expect(lane.changes).toMatchObject([{ kind: 'modify', slide: 's2', patch: { body: '<p>b</p>', notes: 'n' }, status: 'pending' }]);
+    expect(events.filter((e) => e.type === 'lane.created')).toHaveLength(1);
+    expect(events).toContainEqual({ type: 'lane.updated', laneId: first.laneId });
+
+    // Another anchor, or a closed lane, is not a duplicate.
+    const other = (await h.propose_lane({ label: 'Trim the illustrative values', anchor: { kind: 'slide', slide: 's3' }, changes: [{ kind: 'remove', slide: 's3', reason: 'r' }] })) as { laneId: string };
+    expect(other.laneId).not.toBe(first.laneId);
+    await store.putLane({ ...lane, status: 'closed' });
+    const fresh = (await h.propose_lane({ label: 'Trim the illustrative values', anchor, changes: [{ kind: 'modify', slide: 's2', patch: { body: '<p>c</p>' }, reason: 'r' }] })) as { laneId: string; revisedExisting?: boolean };
+    expect(fresh.laneId).not.toBe(first.laneId);
+    expect(fresh.revisedExisting).toBeUndefined();
+  });
+
+  it('QA3 no duplicate lanes: a single change on the same slide and field as a recent open lane on that anchor revises it', async () => {
+    const h = makeDeckToolHandlers(ctx);
+    const anchor = { kind: 'slide', slide: 's2' } as const;
+    const first = (await h.propose_lane({ label: 'Four-word hook title', anchor, changes: [{ kind: 'modify', slide: 's2', patch: { title: 'One home exists' }, reason: 'r1' }] })) as { laneId: string };
+    const second = (await h.propose_lane({ label: 'Shorter hook title', anchor, changes: [{ kind: 'modify', slide: 's2', patch: { title: 'One home' }, reason: 'r2' }] })) as { laneId: string; revisedExisting: boolean };
+    expect(second).toMatchObject({ laneId: first.laneId, revisedExisting: true });
+    expect((await store.lane(first.laneId))!.changes).toMatchObject([{ patch: { title: 'One home' } }]);
+    expect(await laneFiles()).toHaveLength(1);
+
+    // An explicit alternative is a variant, not a revision.
+    const alt = (await h.propose_lane({ label: 'Question title', anchor, alternative: true, changes: [{ kind: 'modify', slide: 's2', patch: { title: 'Where does it live?' }, reason: 'r3' }] })) as { laneId: string };
+    expect(alt.laneId).not.toBe(first.laneId);
+    // Another field, or a lane older than an hour, is not the same proposal.
+    const notes = (await h.propose_lane({ label: 'Notes', anchor, changes: [{ kind: 'modify', slide: 's2', patch: { notes: 'say it slowly' }, reason: 'r' }] })) as { laneId: string };
+    expect([first.laneId, alt.laneId]).not.toContain(notes.laneId);
+    for (const id of [first.laneId, alt.laneId]) await store.putLane({ ...(await store.lane(id))!, createdAt: new Date(Date.now() - 2 * 3600_000).toISOString() });
+    const late = (await h.propose_lane({ label: 'Late title', anchor, changes: [{ kind: 'modify', slide: 's2', patch: { title: 'Late' }, reason: 'r' }] })) as { laneId: string };
+    expect([first.laneId, alt.laneId, notes.laneId]).not.toContain(late.laneId);
+  });
+
   it('createLane validates like propose_lane and saves the lane with the given origin and status in one write', async () => {
     const res = (await createLane(ctx, { label: 'Hook first', anchor: { kind: 'arc' }, changes: [{ kind: 'move', slide: 's3', after: null, reason: 'hook' }] }, { origin: 'check:arc', status: 'draft' })) as { laneId: string };
     expect(await store.lane(res.laneId)).toMatchObject({ origin: 'check:arc', status: 'draft', label: 'Hook first' });
@@ -355,6 +404,13 @@ describe('deck tools', () => {
 describe('prompts', () => {
   it('SYSTEM_APPEND states the composition rules', () => {
     for (const s of ['render_slide', 'revise_lane', 'propose_lane', '24px', '1280x720', 'language']) expect(SYSTEM_APPEND).toContain(s);
+  });
+
+  it('QA3: the co-author marks alternatives and reports a proposal merged into an existing lane', () => {
+    expect(SYSTEM_APPEND).toMatch(/alternative, call propose_lane with a new label and alternative: true/);
+    expect(SYSTEM_APPEND).toMatch(/revisedExisting/);
+    const lane: Lane = { id: 'l1', label: 'L', anchor: { kind: 'slide', slide: 's2' }, origin: 'user', baseVersion: 1, changes: [], status: 'open', createdAt: '' };
+    expect(contextHeader({ thread: 'lane:l1', anchor: null, snapshot: snap(five), lane, brief })).toContain('alternative: true');
   });
 
   it('contextHeader lists brief, outline, range stories, and lane changes', () => {

@@ -30,7 +30,11 @@ Read every image path above with the Read tool (several per turn), then judge ea
         : ''
     }
 One remark per problem, anchored on the slide ({ "kind": "slide", "slide": "<id>" }). Use "warn" for overflow, unreadable text, lists${rules ? ', and broken design rules' : ''}; "info" otherwise. Never report the same problem twice on one slide. Say nothing about slides that are fine.
-
+${
+      allowLanes
+        ? '\nA lane that fixes a render problem must change what is rendered (the body or the title): enlarge, reword shorter or recompose what is on the stage (never truncate code). It is never only the notes or the story, which the audience does not see; if you cannot fix the render, set "lane" to null.\n'
+        : ''
+    }
 ${jsonContract(allowLanes)}`;
   },
 };

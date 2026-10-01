@@ -167,7 +167,7 @@ describe('lanes API', () => {
     expect(events).toContainEqual({ type: 'lane.closed', laneId: 'l_b' });
   });
 
-  it('after an accept, a move that became a no-op is orphaned; its lane stays open while it has other pending changes', async () => {
+  it('after an accept, a move that became a no-op is already on main; its lane stays open while it has other pending changes', async () => {
     const move = (id: string, target: string, after: string | null): Change => ({ id, kind: 'move', slide: target, after, reason: 'r', status: 'pending' });
     await store.putLane(lane('l_a', [move('c_a', 's4', 's1')]));
     await store.putLane(lane('l_b', [move('c_b', 's4', 's1'), modify('c_m5', 's5', 'y')]));
@@ -176,7 +176,7 @@ describe('lanes API', () => {
     expect((await deck()).order).toEqual(['s1', 's4', 's2', 's3', 's5']);
     const b = await getLane('l_b');
     expect(b.changes.map((c) => [c.id, c.status])).toEqual([
-      ['c_b', 'orphan'],
+      ['c_b', 'accepted'],
       ['c_m5', 'pending'],
     ]);
     expect(b.status).toBe('open');
@@ -316,6 +316,90 @@ describe('lanes API', () => {
     expect(e.status).toBe('draft');
     expect(e.changes.map((c) => c.status)).toEqual(['orphan', 'pending']);
     expect(events).toContainEqual({ type: 'lane.closed', laneId: 'l_d' });
+  });
+
+  const laneThread = async (l: string): Promise<string[]> => ((await app.inject({ method: 'GET', url: `/api/threads/lane:${l}` })).json() as { text: string }[]).map((m) => m.text);
+  const setTitle = async (id: string, title: string): Promise<void> => {
+    const main = await store.snapshot();
+    await store.commit({ ...main, slides: { ...main.slides, [id]: { ...main.slides[id]!, title } } }, { kind: 'restore', from: 1, entry: '{}' });
+  };
+
+  it('QA3 stale modify: a lane on v1 setting a title main changed since is orphaned with the reason, and closed', async () => {
+    // v1: s2 titled "Title s2" (A). l_old proposes B; l_new proposes C and is accepted.
+    await store.putLane(lane('l_old', [modify('c_old', 's2', 'B')]));
+    await store.putLane(lane('l_new', [modify('c_new', 's2', 'C')]));
+    expect((await accept('l_new', 'c_new')).statusCode).toBe(200);
+    const old = await getLane('l_old');
+    expect(old.changes.map((c) => c.status)).toEqual(['orphan']);
+    expect(old.status).toBe('closed');
+    expect((await laneThread('l_old')).join('\n')).toMatch(/title changed on main since v1/);
+    expect(((await app.inject({ method: 'GET', url: '/api/lanes' })).json() as Lane[]).map((l) => l.id)).toEqual([]);
+  });
+
+  it('QA3 already on main: after main takes the same title, the lane closes as accepted and leaves the list', async () => {
+    await store.putLane(lane('l_a', [modify('c_a', 's2', 'Same')]));
+    await store.putLane(lane('l_b', [modify('c_b', 's2', 'Same'), modify('c_b2', 's3', 'Other')]));
+    expect((await accept('l_a', 'c_a')).statusCode).toBe(200);
+    const b = await getLane('l_b');
+    expect(b.changes.map((c) => [c.id, c.status])).toEqual([
+      ['c_b', 'accepted'],
+      ['c_b2', 'pending'],
+    ]);
+    expect(b.status).toBe('open');
+    expect(await laneThread('l_b')).toEqual(['The title of slide 2 (Same): already on main, nothing to decide.']);
+
+    await store.putLane(lane('l_c', [modify('c_c', 's4', 'Four')]));
+    await setTitle('s4', 'Four');
+    // Any later accept rebases every open lane on main.
+    expect((await accept('l_b', 'c_b2')).statusCode).toBe(200);
+    expect((await getLane('l_c')).status).toBe('closed');
+    expect((await getLane('l_c')).changes[0]!.status).toBe('accepted');
+    expect(((await app.inject({ method: 'GET', url: '/api/lanes' })).json() as Lane[]).map((l) => l.id)).toEqual([]);
+    expect(events).toContainEqual({ type: 'lane.closed', laneId: 'l_c' });
+  });
+
+  it('refuse and open rebase the lane on main: stale changes are orphaned, a lane left with nothing pending closes', async () => {
+    await store.putLane(lane('l_a', [modify('c_1', 's1', 'x'), modify('c_2', 's2', 'y')]));
+    await setTitle('s2', 'Changed on main');
+    const r = await refuse('l_a', 'c_1');
+    expect(r.statusCode).toBe(200);
+    expect(r.json().changes.map((c: Change) => c.status)).toEqual(['refused', 'orphan']);
+    expect(r.json().status).toBe('closed');
+    expect(events).toContainEqual({ type: 'lane.closed', laneId: 'l_a' });
+
+    await store.putLane({ ...lane('l_d', [modify('c_3', 's3', 'z')]), status: 'draft', origin: 'check:render' });
+    await setTitle('s3', 'z');
+    const o = await app.inject({ method: 'POST', url: '/api/lanes/l_d/open' });
+    expect(o.statusCode).toBe(200);
+    expect(o.json().status).toBe('closed');
+    expect(o.json().changes[0].status).toBe('accepted');
+    expect(events).toContainEqual({ type: 'lane.closed', laneId: 'l_d' });
+  });
+
+  it('QA3 variants: pending modifies list the other open lanes on the same slide and field; accepting one orphans the others', async () => {
+    await store.putLane(lane('l_a', [modify('c_a', 's2', 'A title'), modify('c_a3', 's3', 'x')]));
+    await store.putLane(lane('l_b', [modify('c_b', 's2', 'B title')]));
+    await store.putLane({ ...lane('l_n', [{ id: 'c_n', kind: 'modify', slide: 's2', patch: { notes: 'n' }, reason: 'r', status: 'pending' }]) });
+    await store.putLane({ ...lane('l_closed', [modify('c_x', 's2', 'X')]), status: 'closed' });
+    type Listed = Omit<Lane, 'changes'> & { changes: (Change & { variantOf?: string[] })[] };
+    const list: Listed[] = (await app.inject({ method: 'GET', url: '/api/lanes' })).json();
+    const variants = (l: string, c: string) => list.find((x) => x.id === l)!.changes.find((x) => x.id === c)!.variantOf;
+    expect(variants('l_a', 'c_a')).toEqual(['l_b']);
+    expect(variants('l_a', 'c_a3')).toEqual([]);
+    expect(variants('l_b', 'c_b')).toEqual(['l_a']);
+    expect(variants('l_n', 'c_n')).toEqual([]);
+    const one: Listed = (await app.inject({ method: 'GET', url: '/api/lanes/l_b' })).json();
+    expect(one.changes[0]!.variantOf).toEqual(['l_a']);
+    // Not stored: the lane on disk has no such field.
+    expect('variantOf' in (await store.lane('l_b'))!.changes[0]!).toBe(false);
+
+    expect((await accept('l_b', 'c_b')).statusCode).toBe(200);
+    const a = await getLane('l_a');
+    expect(a.changes.map((c) => [c.id, c.status])).toEqual([
+      ['c_a', 'orphan'],
+      ['c_a3', 'pending'],
+    ]);
+    expect((a.changes[1] as Change & { variantOf?: string[] }).variantOf).toEqual([]);
   });
 
   it('preview skips pending changes that fail to apply and reports them', async () => {

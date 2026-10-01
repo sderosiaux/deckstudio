@@ -9,7 +9,7 @@ import type { Anchor, Brief, Lane, Origin, Remark, SlideId, Snapshot } from '../
 import { loadThemeCss } from '../../render/defaultTheme.js';
 import type { ThumbService } from '../../render/thumbs.js';
 import type { Bus } from '../../server/bus.js';
-import { LaneService, resolveLaneRemarks } from '../../server/laneService.js';
+import { emitLaneRebase, LaneService, rebaseOpenLanesAfterMain, resolveLaneRemarks } from '../../server/laneService.js';
 import type { DeckStore } from '../../store/deckStore.js';
 import { createLane } from '../tools.js';
 import { arc } from './arc.js';
@@ -51,9 +51,48 @@ const normText = (text: string): string =>
     .replace(/\bslide \d+\b/g, 'slide')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
-/** Two remarks with the same key report the same problem: a re-run keeps the old one instead of adding a twin. */
-const remarkKey = (origin: Origin, source: string | null, anchor: Anchor, text: string): string =>
-  [origin, source ?? '', anchorKey(anchor), normText(text)].join('\u0000');
+/** Words that carry no finding: two remarks sharing only these say nothing alike. */
+const STOP_WORDS = new Set(
+  'a an the of to in on at by for from with and or but is are was were be been it its this that these those as about than then there here so not no only also its their his her one'.split(' '),
+);
+const wordSet = (text: string): Set<string> => new Set(normText(text).split(' ').filter((w) => w !== '' && !STOP_WORDS.has(w)));
+/** Share of the two word sets' union that both hold (Jaccard); 1 for two texts with no meaningful word. */
+function similarity(a: string, b: string): number {
+  const x = wordSet(a);
+  const y = wordSet(b);
+  if (x.size === 0 && y.size === 0) return 1;
+  let shared = 0;
+  for (const w of x) if (y.has(w)) shared++;
+  return shared / (x.size + y.size - shared);
+}
+/** From this similarity on, two remarks of one check on the same anchor report the same problem. */
+export const SAME_REMARK_SIMILARITY = 0.6;
+/**
+ * Does `a` report the same problem as `b`? Same anchor and similar wording (owner checked by the caller). A re-run
+ * keeps the old remark (its id and createdAt) instead of adding a reworded twin.
+ */
+const sameFinding = (a: { anchor: Anchor; text: string }, b: { anchor: Anchor; text: string }): boolean =>
+  anchorKey(a.anchor) === anchorKey(b.anchor) && similarity(a.text, b.text) >= SAME_REMARK_SIMILARITY;
+/** The most similar entry of `pool` reporting the same finding as `it`, if any. */
+function bestMatch<T extends { anchor: Anchor; text: string }>(it: { anchor: Anchor; text: string }, pool: readonly T[]): T | undefined {
+  let best: T | undefined;
+  let score = -1;
+  for (const r of pool) {
+    if (!sameFinding(it, r)) continue;
+    const s = similarity(it.text, r.text);
+    if (s > score) {
+      best = r;
+      score = s;
+    }
+  }
+  return best;
+}
+/** Render lanes must change what the audience sees: a lane touching only these fields does not fix a render remark. */
+const UNRENDERED_FIELDS: ReadonlySet<string> = new Set(['notes', 'story']);
+/** True when every change of the lane is a modify of notes or story only: nothing on the stage would change. */
+export function changesOnlyUnrendered(lane: { changes: readonly { kind: string; patch?: object }[] }): boolean {
+  return lane.changes.every((c) => c.kind === 'modify' && c.patch !== undefined && Object.keys(c.patch).every((f) => UNRENDERED_FIELDS.has(f)));
+}
 
 export interface CheckRunnerOptions {
   store: DeckStore;
@@ -302,11 +341,15 @@ export class CheckRunner {
   }
 
   /**
-   * Housekeeping before a run: remarks found on the preview of a lane that is now closed are resolved, and a remark
-   * anchored on a slide that left main (and not on a lane preview) is dropped: it would read "slide ?".
+   * Housekeeping before a run: lanes are rebased on main (a stale change is orphaned, one main already took is
+   * accepted, a lane left with nothing to decide closes), remarks found on the preview of a lane that is now closed
+   * are resolved, and a remark anchored on a slide that left main (and not on a lane preview) is dropped: it would
+   * read "slide ?".
    */
   private async tidyRemarks(): Promise<void> {
     const { store, bus } = this.opts;
+    const rebase = await store.withLock(async () => rebaseOpenLanesAfterMain(store, await store.snapshot()));
+    emitLaneRebase(bus, rebase);
     const changed = await store.withLock(async () => {
       const [remarks, main, lanes] = await Promise.all([store.remarks(), store.snapshot(), store.lanes()]);
       const closed = lanes.filter((l) => l.status === 'closed').map((l) => l.id);
@@ -529,46 +572,51 @@ export class CheckRunner {
     const { store, bus } = this.opts;
     const origin = `check:${t.def.name}` as const;
     const source = t.laneId;
-    const keyOf = (r: { anchor: Anchor; text: string }): string => remarkKey(origin, source, r.anchor, r.text);
     const sameOwner = (r: Remark): boolean => r.origin === origin && (r.sourceLaneId ?? null) === source;
 
     // Remark text keeps its slide ids: they are named at read time in the order of that moment, so numbers never
-    // go stale. A lane label is stored as is, so it is named now. A problem reported twice in one answer is kept once.
-    const seen = new Set<string>();
-    const fresh = items
-      .map((it) => ({ ...it, lane: it.lane ? { ...it.lane, label: nameSlides(it.lane.label, { order: t.order, slides: t.snap.slides }, { titles: false }) } : null }))
-      .filter((it) => {
-        const k = keyOf(it);
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      });
+    // go stale. A lane label is stored as is, so it is named now. A problem reported twice in one answer (the same
+    // finding, even reworded) is kept once, as first worded.
+    const fresh: Item[] = [];
+    for (const it of items) {
+      if (bestMatch(it, fresh)) continue;
+      const lane = it.lane ? { ...it.lane, label: nameSlides(it.lane.label, { order: t.order, slides: t.snap.slides }, { titles: false }) } : null;
+      // A render remark is about what the audience sees: a lane that only edits notes or story does not fix it.
+      if (lane && t.def.name === 'render' && changesOnlyUnrendered(lane)) {
+        console.warn(`[checks] render: proposed lane "${lane.label}" dropped: it changes neither the body nor the title`);
+        fresh.push({ ...it, lane: null });
+      } else fresh.push({ ...it, lane });
+    }
 
     // Lanes first: createLane takes the deck lock itself. Planned on the remarks as they are now; the write
     // below re-reads them under the lock and closes any draft that ends up unreferenced.
     const before = await this.split(t, await store.remarks(), origin);
-    const keptKeys = new Set(before.kept.filter(sameOwner).map(keyOf));
-    const reusable = new Map<string, string>();
+    const keptBefore = before.kept.filter(sameOwner);
+    const reusable: { anchor: Anchor; text: string; laneId: string }[] = [];
     for (const r of before.replaced) {
-      if (!r.laneId || reusable.has(keyOf(r))) continue;
+      if (!r.laneId) continue;
       const lane = await store.lane(r.laneId);
-      if (lane && lane.origin === origin && lane.status === 'draft') reusable.set(keyOf(r), lane.id);
+      if (lane && lane.origin === origin && lane.status === 'draft') reusable.push({ anchor: r.anchor, text: r.text, laneId: lane.id });
     }
     const laneIds: (string | null)[] = [];
     const created: string[] = [];
+    const reused = new Set<string>();
     let attached = 0;
     let overCap = 0;
     for (const it of fresh) {
       laneIds.push(null);
-      const k = keyOf(it);
-      if (!t.allowLanes || keptKeys.has(k)) continue;
-      const reuse = reusable.get(k);
+      if (!t.allowLanes || bestMatch(it, keptBefore)) continue;
+      const reuse = bestMatch(
+        it,
+        reusable.filter((x) => !reused.has(x.laneId)),
+      )?.laneId;
       if (!reuse && !it.lane) continue;
       if (attached >= MAX_LANES_PER_RUN) {
         overCap++;
         continue;
       }
       if (reuse) {
+        reused.add(reuse);
         laneIds[laneIds.length - 1] = reuse;
         attached++;
         continue;
@@ -587,14 +635,14 @@ export class CheckRunner {
     const now = new Date().toISOString();
     const out = await store.withLock(async () => {
       const { kept, replaced } = await this.split(t, await store.remarks(), origin);
-      const keptNow = new Set(kept.filter(sameOwner).map(keyOf));
-      const previous = new Map<string, Remark>();
-      for (const r of replaced) if (!previous.has(keyOf(r))) previous.set(keyOf(r), r);
+      const keptNow = kept.filter(sameOwner);
+      // Each superseded remark is claimed by at most one new remark: the most similar report of the same finding.
+      const unclaimed = [...replaced];
       const remarks: Remark[] = [];
       fresh.forEach((it, k) => {
-        const key = keyOf(it);
-        if (keptNow.has(key)) return;
-        const was = previous.get(key);
+        if (bestMatch(it, keptNow)) return;
+        const was = bestMatch(it, unclaimed);
+        if (was) unclaimed.splice(unclaimed.indexOf(was), 1);
         remarks.push({
           id: was?.id ?? newId('r'),
           anchor: it.anchor,
@@ -604,7 +652,7 @@ export class CheckRunner {
           status: 'open',
           laneId: laneIds[k] ?? null,
           ...(source !== null ? { sourceLaneId: source } : {}),
-          // A problem found again is as old as its first report: the UI reads createdAt to mark what is new.
+          // A problem found again (even reworded) is as old as its first report: the UI reads createdAt to mark what is new.
           createdAt: was?.createdAt ?? now,
         });
       });

@@ -34,6 +34,15 @@ const [insertIn, modifyIn, removeIn, moveIn] = NewChangeSchema.options;
 /** A NewChange that may name the lane change it revises. */
 export const RevisedChangeSchema = z.discriminatedUnion('kind', [insertIn.extend(changeId), modifyIn.extend(changeId), removeIn.extend(changeId), moveIn.extend(changeId)]);
 export type RevisedChange = z.infer<typeof RevisedChangeSchema>;
+/** propose_lane's input: a lane, and whether the creator asked for an alternative to an existing lane. */
+export const ProposeLaneToolSchema = ProposeLaneInputSchema.extend({
+  alternative: z
+    .boolean()
+    .optional()
+    .describe('true only when the creator asked for an alternative to an existing lane: it then stays a separate lane'),
+});
+/** A proposal this close to an open lane of the same thread revises that lane instead of opening a twin. */
+export const DUPLICATE_WINDOW_MS = 3600_000;
 export const ReviseLaneInputSchema = z.object({
   laneId: z.string().min(1),
   changes: z.array(RevisedChangeSchema).min(1),
@@ -289,39 +298,96 @@ const rejected = (invalid: Invalid[]): ToolError => ({
 
 // ---------------------------------------------------------------------------
 
+type LockedStore = Pick<DeckToolContext, 'store' | 'bus'>;
+type ProposeLaneInput = z.infer<typeof ProposeLaneInputSchema>;
+
+/** Call under the deck lock: validates `input` against current main and saves it as one new lane. */
+async function createLocked(ctx: LockedStore, input: ProposeLaneInput, as: { origin: Origin; status: 'draft' | 'open' }): Promise<object> {
+  const { store, bus } = ctx;
+  const [state, snap] = await Promise.all([store.state(), store.snapshot()]);
+  const anchorErr = anchorProblem(snap, input.anchor);
+  if (anchorErr) return { error: `Rejected; nothing was saved: ${anchorErr}`, invalid: [] };
+  const { changes, invalid } = checkChanges(snap, input.changes);
+  if (invalid.length) return rejected(invalid);
+  const lane: Lane = {
+    id: newId('l'),
+    label: input.label,
+    anchor: input.anchor,
+    origin: as.origin,
+    baseVersion: state.version,
+    changes,
+    status: as.status,
+    createdAt: new Date().toISOString(),
+  };
+  await store.putLane(lane);
+  bus.emit({ type: 'lane.created', laneId: lane.id });
+  return { laneId: lane.id, changes: changes.map((c) => ({ id: c.id, summary: summarize(c) })) };
+}
+
+/** Call under the deck lock: merges a revision into a lane that is not closed, validated against current main. */
+async function reviseLocked(ctx: LockedStore, lane: Lane, input: RevisedChange[], replace: boolean): Promise<object> {
+  const { store, bus } = ctx;
+  const [state, snap] = await Promise.all([store.state(), store.snapshot()]);
+  const plan = planRevision(lane, input, replace);
+  if (plan.invalid.length) return rejected(plan.invalid);
+  const refs = input.flatMap((c, index) => {
+    const reasons = refProblems(snap, c);
+    return reasons.length ? [{ index, reason: reasons.join('; ') }] : [];
+  });
+  if (refs.length) return rejected(refs);
+  // The pending changes replay in lane order on current main, so a revision that contradicts a kept change is caught.
+  const conflicts = replay(snap, plan.changes, plan.sourceIndex);
+  if (conflicts.length) return rejected(conflicts);
+  // Validated against the current main, so the lane now bases on it.
+  const next: Lane = { ...lane, baseVersion: state.version, changes: plan.changes };
+  await store.putLane(next);
+  bus.emit({ type: 'lane.updated', laneId: lane.id });
+  return {
+    laneId: lane.id,
+    kept: plan.kept,
+    updated: plan.updated,
+    added: plan.added,
+    dropped: plan.dropped,
+    changes: plan.changes.map((c) => ({ id: c.id, summary: summarize(c) })),
+  };
+}
+
+const sameAnchor = (a: Anchor, b: Anchor): boolean => JSON.stringify(a) === JSON.stringify(b);
+const normLabel = (s: string): string => s.toLowerCase().replace(/\s+/g, ' ').trim();
+/** "slide\0field" for every field a modify patches. */
+const modifyKeys = (c: NewChange | Change): string[] => (c.kind === 'modify' ? Object.keys(c.patch).map((f) => `${c.slide}\u0000${f}`) : []);
+
+/**
+ * The open user lane a new proposal duplicates, if any: same anchor and the same label (case and spacing aside), or,
+ * unless the creator asked for an alternative, a single modify on a slide field that a pending modify of a lane on the
+ * same anchor created within the last hour already changes. The thread a lane came from is not stored: a lane on the
+ * same anchor stands for the same thread (a slide thread proposes on its slide).
+ */
+function duplicateOf(lanes: readonly Lane[], input: z.infer<typeof ProposeLaneToolSchema>, now: number): Lane | null {
+  const candidates = lanes.filter((l) => l.status === 'open' && l.origin === 'user' && sameAnchor(l.anchor, input.anchor));
+  const byLabel = candidates.find((l) => normLabel(l.label) === normLabel(input.label));
+  if (byLabel) return byLabel;
+  if (input.alternative === true || input.changes.length !== 1) return null;
+  const keys = modifyKeys(input.changes[0]!);
+  if (keys.length === 0) return null;
+  return (
+    candidates.find((l) => {
+      if (now - Date.parse(l.createdAt) > DUPLICATE_WINDOW_MS) return false;
+      const theirs = new Set(l.changes.flatMap((c) => (c.status === 'pending' ? modifyKeys(c) : [])));
+      return keys.some((k) => theirs.has(k));
+    }) ?? null
+  );
+}
+
 /**
  * Validates a propose_lane input against the current deck and saves it as one lane, with the given origin
  * and status, in a single write: the co-author opens user lanes, a check saves drafts under its own origin.
  */
-export async function createLane(
-  ctx: Pick<DeckToolContext, 'store' | 'bus'>,
-  args: unknown,
-  as: { origin: Origin; status: 'draft' | 'open' },
-): Promise<object> {
-  const { store, bus } = ctx;
+export async function createLane(ctx: LockedStore, args: unknown, as: { origin: Origin; status: 'draft' | 'open' }): Promise<object> {
   const p = parse(ProposeLaneInputSchema, args);
   if (!p.ok) return p.err;
   const input = p.value;
-  return store.withLock(async () => {
-    const [state, snap] = await Promise.all([store.state(), store.snapshot()]);
-    const anchorErr = anchorProblem(snap, input.anchor);
-    if (anchorErr) return { error: `Rejected; nothing was saved: ${anchorErr}`, invalid: [] };
-    const { changes, invalid } = checkChanges(snap, input.changes);
-    if (invalid.length) return rejected(invalid);
-    const lane: Lane = {
-      id: newId('l'),
-      label: input.label,
-      anchor: input.anchor,
-      origin: as.origin,
-      baseVersion: state.version,
-      changes,
-      status: as.status,
-      createdAt: new Date().toISOString(),
-    };
-    await store.putLane(lane);
-    bus.emit({ type: 'lane.created', laneId: lane.id });
-    return { laneId: lane.id, changes: changes.map((c) => ({ id: c.id, summary: summarize(c) })) };
-  });
+  return ctx.store.withLock(() => createLocked(ctx, input, as));
 }
 
 export function makeDeckToolHandlers(ctx: DeckToolContext): DeckToolHandlers {
@@ -365,7 +431,22 @@ export function makeDeckToolHandlers(ctx: DeckToolContext): DeckToolHandlers {
     },
 
     async propose_lane(args) {
-      return createLane(ctx, args, { origin: 'user', status: 'open' });
+      const p = parse(ProposeLaneToolSchema, args);
+      if (!p.ok) return p.err;
+      const { alternative: _alternative, ...input } = p.value;
+      return store.withLock(async () => {
+        const twin = duplicateOf(await store.lanes(), p.value, Date.now());
+        if (!twin) return createLocked(ctx, input, { origin: 'user', status: 'open' });
+        const res = await reviseLocked(ctx, twin, input.changes, false);
+        if ('error' in res) return res;
+        return {
+          ...res,
+          revisedExisting: true,
+          note:
+            `The open lane "${twin.label}" already proposed this on the same slides, so it was revised instead of opening a second lane. ` +
+            'Tell the creator you updated that lane, by its label. For a real alternative, call propose_lane again with alternative: true.',
+        };
+      });
     },
 
     async revise_lane(args) {
@@ -377,29 +458,7 @@ export function makeDeckToolHandlers(ctx: DeckToolContext): DeckToolHandlers {
         if (!lane) return { error: `lane "${laneId}" does not exist.` };
         // A draft (proposed by a check) can be revised too; it stays a draft until the creator opens it.
         if (lane.status === 'closed') return { error: `lane "${laneId}" is closed; call propose_lane for a new proposal.` };
-        const [state, snap] = await Promise.all([store.state(), store.snapshot()]);
-        const plan = planRevision(lane, input, replace === true);
-        if (plan.invalid.length) return rejected(plan.invalid);
-        const refs = input.flatMap((c, index) => {
-          const reasons = refProblems(snap, c);
-          return reasons.length ? [{ index, reason: reasons.join('; ') }] : [];
-        });
-        if (refs.length) return rejected(refs);
-        // The pending changes replay in lane order on current main, so a revision that contradicts a kept change is caught.
-        const conflicts = replay(snap, plan.changes, plan.sourceIndex);
-        if (conflicts.length) return rejected(conflicts);
-        // Validated against the current main, so the lane now bases on it.
-        const next: Lane = { ...lane, baseVersion: state.version, changes: plan.changes };
-        await store.putLane(next);
-        bus.emit({ type: 'lane.updated', laneId });
-        return {
-          laneId,
-          kept: plan.kept,
-          updated: plan.updated,
-          added: plan.added,
-          dropped: plan.dropped,
-          changes: plan.changes.map((c) => ({ id: c.id, summary: summarize(c) })),
-        };
+        return reviseLocked(ctx, lane, input, replace === true);
       });
     },
 
@@ -486,8 +545,9 @@ export function makeDeckTools(ctx: DeckToolContext): { server: McpSdkServerConfi
       ),
       tool(
         'propose_lane',
-        'Propose a lane: a labelled, coherent set of changes (insert/modify/remove/move) anchored on a slide, a range, or the arc, with a one-line reason per change. Slide ids must exist; insert.after/move.after may be null for "first". Invalid input is rejected with the offending change indexes and nothing is saved.',
-        ProposeLaneInputSchema.shape,
+        'Propose a lane: a labelled, coherent set of changes (insert/modify/remove/move) anchored on a slide, a range, or the arc, with a one-line reason per change. Slide ids must exist; insert.after/move.after may be null for "first". Invalid input is rejected with the offending change indexes and nothing is saved. ' +
+          'A proposal that repeats an open lane (same anchor and label, or the same slide field changed by a recent lane on that anchor) revises that lane instead: the result then says revisedExisting. Set alternative: true only when the creator asked for an alternative.',
+        ProposeLaneToolSchema.shape,
         wrap(h.propose_lane),
       ),
       tool(

@@ -296,6 +296,13 @@ describe('history API', () => {
     expect((await post('/api/history/restore', { from: 99, entry: { kind: 'removed', slide: 's3', wasAt: 2 } })).statusCode).toBe(400);
   });
 
+  /** An earlier accept may leave a later change of the lane already on main: the rebase then accepts it by itself. */
+  const acceptIfPending = async (lanes: LaneService, laneId: string, changeId: string): Promise<void> => {
+    const current = (await store.lane(laneId))!.changes.find((c) => c.id === changeId)!;
+    if (current.status === 'pending') await lanes.accept(laneId, changeId);
+    else expect(current.status, `change ${changeId}`).toBe('accepted');
+  };
+
   it('open-as-lane, all accepted in order, reproduces v<n> on random decks (seeded)', async () => {
     const lanes = new LaneService(store, app.bus);
     // 16 seeds: every iteration adds two versions and several accepts to the same store, so 40 ran past the
@@ -308,7 +315,7 @@ describe('history API', () => {
       const res = await post('/api/history/open-as-lane', { n: t.n });
       if (res.statusCode === 409) continue; // main happened to equal the target
       const lane = (await store.lane((res.json() as { laneId: string }).laneId))!;
-      for (const c of lane.changes) await lanes.accept(lane.id, c.id);
+      for (const c of lane.changes) await acceptIfPending(lanes, lane.id, c.id);
       expect(contentOf(await store.snapshot()), `seed ${seed}`).toEqual(contentOf(target));
     }
   });
@@ -327,7 +334,7 @@ describe('history API', () => {
         await store.commit(main, { kind: 'accept', laneId: 'manual', changeId: 'c' });
         const lane = (await store.lane(((await post('/api/history/open-as-lane', { n: t.n })).json() as { laneId: string }).laneId))!;
         const ids = lane.changes.map((c) => c.id);
-        for (const id of order === 'reverse' ? ids.reverse() : shuffle(ids, rnd)) await lanes.accept(lane.id, id);
+        for (const id of order === 'reverse' ? ids.reverse() : shuffle(ids, rnd)) await acceptIfPending(lanes, lane.id, id);
         expect(contentOf(await store.snapshot()), `seed ${seed} ${order}`).toEqual(contentOf(target));
       }
       checked++;

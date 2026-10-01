@@ -119,8 +119,10 @@ describe('rebaseLane', () => {
     status: 'open',
     createdAt: '2026-09-30T00:00:00Z',
   });
+  const statuses = (l: Lane) => l.changes.map((c) => [c.id, c.status]);
+  const withTitle = (snap: Snapshot, id: string, title: string): Snapshot => ok(applyChange(snap, { id: 'x', kind: 'modify', slide: id, patch: { title }, ...base }));
 
-  it('Review Focus 1: modify s3 after s3 was removed becomes orphan, others stay pending', () => {
+  it('Review Focus 1: modify s3 after s3 was removed becomes orphan, a remove of s3 is already on main, others stay pending', () => {
     const afterA = ok(applyChange(fixture(), { id: 'a1', kind: 'remove', slide: 's3', ...base }));
     const b = lane([
       { id: 'b1', kind: 'modify', slide: 's3', patch: { title: 'x' }, ...base },
@@ -130,15 +132,17 @@ describe('rebaseLane', () => {
       { id: 'b5', kind: 'remove', slide: 's3', ...base },
       { id: 'b6', kind: 'insert', after: null, slide: slide('n2'), ...base },
     ]);
-    const rebased = rebaseLane(b, afterA);
-    expect(rebased.changes.map((c) => [c.id, c.status])).toEqual([
+    const { lane: rebased, causes } = rebaseLane(b, afterA, fixture());
+    expect(statuses(rebased)).toEqual([
       ['b1', 'orphan'],
       ['b2', 'pending'],
       ['b3', 'orphan'],
       ['b4', 'orphan'],
-      ['b5', 'orphan'],
+      ['b5', 'accepted'],
       ['b6', 'pending'],
     ]);
+    expect(causes.b5).toBe('already on main');
+    expect(causes.b2).toBeUndefined();
     expect(b.changes[0]?.status).toBe('pending');
   });
 
@@ -148,7 +152,7 @@ describe('rebaseLane', () => {
       { id: 'b1', kind: 'modify', slide: 's3', patch: { title: 'x' }, reason: 'r', status: 'accepted' },
       { id: 'b2', kind: 'remove', slide: 's3', reason: 'r', status: 'refused' },
     ]);
-    expect(rebaseLane(b, afterA).changes.map((c) => c.status)).toEqual(['accepted', 'refused']);
+    expect(rebaseLane(b, afterA, fixture()).lane.changes.map((c) => c.status)).toEqual(['accepted', 'refused']);
   });
 
   it('references to slides inserted earlier in the same lane are not orphaned', () => {
@@ -156,10 +160,10 @@ describe('rebaseLane', () => {
       { id: 'b1', kind: 'insert', after: 's2', slide: slide('n1'), ...base },
       { id: 'b2', kind: 'insert', after: 'n1', slide: slide('n2'), ...base },
     ]);
-    expect(rebaseLane(b, fixture()).changes.map((c) => c.status)).toEqual(['pending', 'pending']);
+    expect(rebaseLane(b, fixture(), fixture()).lane.changes.map((c) => c.status)).toEqual(['pending', 'pending']);
   });
 
-  it('a move whose slide already sits at its target on main becomes orphan; a real move stays pending', () => {
+  it('a move whose slide already sits at its target on main is already on main; a real move stays pending', () => {
     // fixture order: s1 s2 s3 s4 s5. s3 already sits after s2; s1 already first.
     const b = lane([
       { id: 'b1', kind: 'move', slide: 's3', after: 's2', ...base },
@@ -167,22 +171,111 @@ describe('rebaseLane', () => {
       { id: 'b3', kind: 'move', slide: 's5', after: 's1', ...base },
       { id: 'b4', kind: 'modify', slide: 's4', patch: { title: 'x' }, ...base },
     ]);
-    expect(rebaseLane(b, fixture()).changes.map((c) => [c.id, c.status])).toEqual([
-      ['b1', 'orphan'],
-      ['b2', 'orphan'],
+    const r = rebaseLane(b, fixture(), fixture());
+    expect(statuses(r.lane)).toEqual([
+      ['b1', 'accepted'],
+      ['b2', 'accepted'],
       ['b3', 'pending'],
       ['b4', 'pending'],
     ]);
+    expect(r.causes).toEqual({ b1: 'already on main', b2: 'already on main' });
   });
 
-  it('a move is judged on main as the earlier pending changes of the lane leave it', () => {
+  it('a move made redundant by an earlier pending change of the lane is orphan, not accepted', () => {
     // After b1 moves s2 to the end, s3 follows s1: "move s3 after s1" is then a no-op, "move s4 after s1" is not.
     const b = lane([
       { id: 'b1', kind: 'move', slide: 's2', after: 's5', ...base },
       { id: 'b2', kind: 'move', slide: 's3', after: 's1', ...base },
       { id: 'b3', kind: 'move', slide: 's4', after: 's1', ...base },
     ]);
-    expect(rebaseLane(b, fixture()).changes.map((c) => c.status)).toEqual(['pending', 'orphan', 'pending']);
+    expect(rebaseLane(b, fixture(), fixture()).lane.changes.map((c) => c.status)).toEqual(['pending', 'orphan', 'pending']);
+  });
+
+  it('a move in place on main that an earlier pending change of the lane displaces stays pending', () => {
+    // b1 puts s4 right after s2; b2 then puts s3 back after s2: in place on main, needed after b1.
+    const b = lane([
+      { id: 'b1', kind: 'move', slide: 's4', after: 's2', ...base },
+      { id: 'b2', kind: 'move', slide: 's3', after: 's2', ...base },
+    ]);
+    expect(statuses(rebaseLane(b, fixture(), fixture()).lane)).toEqual([
+      ['b1', 'pending'],
+      ['b2', 'pending'],
+    ]);
+  });
+
+  it('QA3 stale modify: v1 title A, the lane sets B, main changed it to C: orphan with the field and the base version', () => {
+    const v1 = withTitle(fixture(), 's2', 'A');
+    const main = withTitle(v1, 's2', 'C');
+    const b = lane([{ id: 'b1', kind: 'modify', slide: 's2', patch: { title: 'B', notes: 'n' }, ...base }]);
+    const r = rebaseLane(b, main, v1);
+    expect(statuses(r.lane)).toEqual([['b1', 'orphan']]);
+    expect(r.causes).toEqual({ b1: 'title changed on main since v1' });
+  });
+
+  it('a modify stays pending when main changed only fields it does not patch', () => {
+    const v1 = fixture();
+    const main = ok(applyChange(v1, { id: 'x', kind: 'modify', slide: 's2', patch: { notes: 'main notes' }, ...base }));
+    const b = lane([{ id: 'b1', kind: 'modify', slide: 's2', patch: { title: 'B' }, ...base }]);
+    const r = rebaseLane(b, main, v1);
+    expect(statuses(r.lane)).toEqual([['b1', 'pending']]);
+    expect(r.causes).toEqual({});
+  });
+
+  it('QA3 already on main: a modify whose values main already took is accepted; partly taken stays pending', () => {
+    const v1 = withTitle(fixture(), 's2', 'A');
+    const main = withTitle(v1, 's2', 'B');
+    const b = lane([
+      { id: 'b1', kind: 'modify', slide: 's2', patch: { title: 'B' }, ...base },
+      { id: 'b2', kind: 'modify', slide: 's2', patch: { title: 'B', notes: 'new notes' }, ...base },
+    ]);
+    const r = rebaseLane(b, main, v1);
+    expect(statuses(r.lane)).toEqual([
+      ['b1', 'accepted'],
+      ['b2', 'pending'],
+    ]);
+    expect(r.causes).toEqual({ b1: 'already on main' });
+  });
+
+  it('the lane’s own accepted changes do not make its other pending changes stale', () => {
+    const v1 = fixture();
+    const own: Change = { id: 'b1', kind: 'modify', slide: 's2', patch: { notes: 'N1' }, reason: 'r', status: 'accepted' };
+    const main = ok(applyChange(v1, own));
+    const b = lane([own, { id: 'b2', kind: 'modify', slide: 's2', patch: { notes: 'N2' }, ...base }]);
+    expect(statuses(rebaseLane(b, main, v1).lane)).toEqual([
+      ['b1', 'accepted'],
+      ['b2', 'pending'],
+    ]);
+  });
+
+  it('an insert of a slide identical to the one right after the same predecessor on main is already on main', () => {
+    const twin = slide('n1', { title: 'Hook' });
+    const main = ok(applyChange(fixture(), { id: 'x', kind: 'insert', after: 's2', slide: { ...twin, id: 'm1' }, ...base }));
+    const b = lane([
+      { id: 'b1', kind: 'insert', after: 's2', slide: twin, ...base },
+      { id: 'b2', kind: 'insert', after: 's4', slide: slide('n2', { title: 'Hook' }), ...base },
+      { id: 'b3', kind: 'insert', after: 's3', slide: twin, ...base },
+    ]);
+    const r = rebaseLane(b, main, fixture());
+    expect(statuses(r.lane)).toEqual([
+      ['b1', 'accepted'],
+      ['b2', 'pending'],
+      ['b3', 'pending'],
+    ]);
+    expect(r.causes).toEqual({ b1: 'already on main' });
+  });
+
+  it('a later change on a slide the lane inserted, now already on main, is judged on main’s twin', () => {
+    const twin = slide('n1', { title: 'Hook' });
+    const main = ok(applyChange(fixture(), { id: 'x', kind: 'insert', after: 's2', slide: { ...twin, id: 'm1' }, ...base }));
+    const b = lane([
+      { id: 'b1', kind: 'insert', after: 's2', slide: twin, ...base },
+      { id: 'b2', kind: 'modify', slide: 'n1', patch: { title: 'Hook 2' }, ...base },
+    ]);
+    // n1 itself never reaches main: a change that needs it can no longer apply.
+    expect(statuses(rebaseLane(b, main, fixture()).lane)).toEqual([
+      ['b1', 'accepted'],
+      ['b2', 'orphan'],
+    ]);
   });
 });
 
