@@ -14,8 +14,8 @@ const MAX_THUMB_W = 240;
 const FIT_COLS = 4;
 /** The one gap between thumbs on every strip (--col-gap). */
 const GAP = 8;
-/** Height of the link band between the rows: enough for a moved slide's curve to read, no more. */
-const CONNECTOR_H = 64;
+/** Height of the link band between the rows: enough for a moved slide's curve to read, no more; the rest goes to the compare. */
+const CONNECTOR_H = 40;
 const PAD = 6;
 /** The row-name gutter, as on main. */
 const GUTTER = 120;
@@ -220,7 +220,10 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
               {aCells.map((c) =>
                 c.kind === 'ghost' ? (
                   <div role="listitem" key={`ghost:${c.id}`} data-edge-item style={cellStyle}>
-                    <div data-testid={`ghost-${c.id}`} className="edge-frame" title={`"${title(b, c.id)}" is slide ${c.at + 1} in v${b.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--line)' }} />
+                    <div data-testid={`ghost-${c.id}`} className="edge-frame" title={`"${title(b, c.id)}" is slide ${c.at + 1} in v${b.n}`} style={{ ...slot, ...(b.thumbs[c.id] ? { padding: 0 } : {}), borderColor: c.id === focused ? 'var(--ink)' : 'var(--grey-2)' }}>
+                      {/* The slide that comes in, faded, mirroring a removed slide's slot: the strip reads as slides, not empty boxes. */}
+                      {b.thumbs[c.id] ? <img data-testid="ghost-image" src={b.thumbs[c.id]} alt="" draggable={false} style={{ width: '100%', height: '100%', objectFit: 'contain', opacity: 0.45, display: 'block' }} /> : null}
+                    </div>
                     <div className="meta" style={{ paddingTop: 4, textAlign: 'center' }}>not in v{a.n}</div>
                   </div>
                 ) : (

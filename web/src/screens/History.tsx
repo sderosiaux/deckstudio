@@ -142,6 +142,83 @@ export function pairCardWidth(pane: { width: number; height: number }): number {
   return Math.max(160, Math.floor(Math.min(byWidth, byHeight)));
 }
 
+/** How many of the other side's slides the context card shows on each side of the gap. */
+const CONTEXT_EACH_SIDE = 2;
+
+/** Where a slide that one side only has would sit on the other: the gap's index there, and its slides just before and after it. */
+export interface SlidePlace {
+  /** 0-based index in the other side's order where the slide would go. */
+  at: number;
+  before: SlideId[];
+  after: SlideId[];
+}
+
+/**
+ * Anchored on the nearest slide before it (on its own side) that the other side also has, else on the nearest one
+ * after it; null when the two sides share no slide around it.
+ */
+export function placeIn(id: SlideId, own: Snapshot, other: Snapshot): SlidePlace | null {
+  const i = own.order.indexOf(id);
+  if (i < 0) return null;
+  const prev = own.order.slice(0, i).reverse().find((x) => other.order.includes(x));
+  const next = own.order.slice(i + 1).find((x) => other.order.includes(x));
+  const at = prev !== undefined ? other.order.indexOf(prev) + 1 : next !== undefined ? other.order.indexOf(next) : -1;
+  if (at < 0) return null;
+  return { at, before: other.order.slice(Math.max(0, at - CONTEXT_EACH_SIDE), at), after: other.order.slice(at, at + CONTEXT_EACH_SIDE) };
+}
+
+/** "between slides 2 and 3", "after slide 5", "before slide 1": in the other side's numbers. */
+const placeWords = (p: SlidePlace): string =>
+  p.before.length && p.after.length ? `between slides ${p.at} and ${p.at + 1}` : p.before.length ? `after slide ${p.at}` : `before slide ${p.at + 1}`;
+
+interface ContextCardProps {
+  label: string;
+  /** "not in v1" or "removed in v3". */
+  absent: string;
+  /** "it comes" or "it sat". */
+  verb: string;
+  width: number | undefined;
+  place: SlidePlace | null;
+  side: Snapshot;
+  thumbs: Record<SlideId, string | undefined>;
+}
+
+/**
+ * The side of the compare where the slide does not exist: not an empty dashed frame but that side's slides around its
+ * place, two before and two after, the gap marked between them, at the size of the render it faces. Same card as
+ * SlidePreview's; the thumbs size from the frame's own box (a size container) so the two rows fill it.
+ */
+function ContextCard({ label, absent, verb, width, place, side, thumbs }: ContextCardProps) {
+  // A lone slide before the gap sits next to it, in the second column, so the strip still reads left to right.
+  const cell = (id: SlideId, i: number, all: SlideId[]) => {
+    const n = side.order.indexOf(id) + 1;
+    const title = side.slides[id]?.title ?? id;
+    return (
+      <figure key={id} data-testid="context-thumb" data-slide={id} className="compare-context-thumb" style={all === place?.before && all.length === 1 && i === 0 ? { gridColumn: 2 } : undefined}>
+        <div className="compare-context-img">
+          {thumbs[id] ? <img src={thumbs[id]} alt={title} draggable={false} /> : <span>{title}</span>}
+        </div>
+        <figcaption className="meta">slide {n}</figcaption>
+      </figure>
+    );
+  };
+  return (
+    <figure data-testid="slide-preview" data-variant="missing" aria-label={label} className="compare-context" style={width === undefined ? undefined : { width, flex: `0 0 ${width}px` }}>
+      <figcaption className="compare-context-label" title={label}>{label}</figcaption>
+      <div className="compare-context-frame">
+        {place ? (
+          <div className="compare-context-grid">
+            {place.before.map(cell)}
+            <div data-testid="context-gap" className="compare-context-gap" />
+            {place.after.map(cell)}
+          </div>
+        ) : null}
+        <p className="compare-context-text">{place ? `${absent}, ${verb} ${placeWords(place)}` : absent}</p>
+      </div>
+    </figure>
+  );
+}
+
 interface ComparePairProps {
   compared: Compared;
   slide: SlideId;
@@ -186,12 +263,12 @@ function ComparePair({ compared, slide, thumbsA, thumbsB }: ComparePairProps) {
         {atA >= 0 ? (
           <SlidePreview label={`v${pair.a}, slide ${atA + 1}`} variant="main" title={title(a)} url={thumbsA[slide]} width={width} />
         ) : (
-          <SlidePreview label={`v${pair.a}, not in v${pair.a}`} variant="missing" missingText={`not in v${pair.a}`} width={width} />
+          <ContextCard label={`v${pair.a}, not in v${pair.a}`} absent={`not in v${pair.a}`} verb="it comes" width={width} place={placeIn(slide, b, a)} side={a} thumbs={thumbsA} />
         )}
         {atB >= 0 ? (
           <SlidePreview label={`v${pair.b}, slide ${atB + 1}${changed ? `, ${words.join(', ')}` : ''}`} variant={changed ? 'lane' : 'main'} title={title(b)} url={thumbsB[slide]} width={width} />
         ) : (
-          <SlidePreview label={`v${pair.b}, removed`} variant="missing" missingText={`removed in v${pair.b}`} width={width} />
+          <ContextCard label={`v${pair.b}, removed`} absent={`removed in v${pair.b}`} verb="it sat" width={width} place={placeIn(slide, a, b)} side={b} thumbs={thumbsB} />
         )}
       </div>
     </div>
@@ -541,29 +618,37 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
   const pairSlide = !shown ? undefined : inShown(focused) ? focused : (shown.entries[0]?.slide ?? shown.b.order[0] ?? shown.a.order[0]);
 
   return (
-    <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-        <ScreenHeader>
-          <h1 className="screen-title">Versions</h1>
-          <span className="meta" data-testid="history-deck">{deck.state.name}</span>
-          <span className="meta" data-testid="history-version">v{deck.state.version}</span>
-          {actionError ? <span role="alert" style={{ color: 'var(--warn)', fontSize: 13 }}>{actionError}</span> : null}
-          <BackToMain navigate={navigate} />
-          {pair ? (
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={openAsLane}
-              disabled={openDisabled}
-              title={aEmpty ? `v${pair.a} is ${EMPTY_VERSION}` : aIsMain ? `main already has v${pair.a}'s slides` : `Propose the changes that bring main back to v${pair.a}`}
-              style={{ marginLeft: 8, alignSelf: 'center' }}
-            >
-              Open v{pair.a} as a lane
-            </button>
-          ) : null}
-        </ScreenHeader>
-        {/* The strips size to their rows; the large pair takes the height left between them and the rail. */}
-        <section aria-label="compared versions" style={{ flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '8px 24px 0' }}>
+    <div className="history-layout">
+      <ScreenHeader>
+        <h1 className="screen-title">Versions</h1>
+        <span className="meta" data-testid="history-deck">{deck.state.name}</span>
+        <span className="meta" data-testid="history-version">v{deck.state.version}</span>
+        {/* How the rail at the foot picks the pair: said up here, where the header has room, so the rail's line goes to the renders. */}
+        <span className="meta" style={{ marginLeft: 12 }}>click a version below to compare from it, shift-click to compare to it</span>
+        {pair && pair.a !== pair.b ? (
+          <button type="button" className="link" onClick={swap} style={{ fontSize: 12, color: 'var(--ink)' }}>swap</button>
+        ) : null}
+        {actionError ? <span role="alert" style={{ color: 'var(--warn)', fontSize: 13 }}>{actionError}</span> : null}
+        <BackToMain navigate={navigate} />
+        {pair ? (
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={openAsLane}
+            disabled={openDisabled}
+            title={aEmpty ? `v${pair.a} is ${EMPTY_VERSION}` : aIsMain ? `main already has v${pair.a}'s slides` : `Propose the changes that bring main back to v${pair.a}`}
+            style={{ marginLeft: 8, alignSelf: 'center' }}
+          >
+            Open v{pair.a} as a lane
+          </button>
+        ) : null}
+      </ScreenHeader>
+      {/*
+        * The strips size to their rows, "what changed" beside them at their height; the large pair and the rail span
+        * the whole width under both, so no column of paper runs down beside the renders.
+        */}
+      <div className="history-top">
+        <section aria-label="compared versions" className="history-strips">
           {diffError ? (
             <p style={{ color: 'var(--warn)' }}>Could not compare: {diffError}</p>
           ) : !pair ? (
@@ -580,101 +665,97 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
             />
           )}
         </section>
-        {shown && pairSlide !== undefined ? (
-          <section aria-label="compared slide" style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '0 24px' }}>
-            <ComparePair compared={shown} slide={pairSlide} thumbsA={thumbsOf(shown.pair.a, shown.a)} thumbsB={thumbsOf(shown.pair.b, shown.b)} />
-          </section>
-        ) : (
-          <div style={{ flex: '1 1 0' }} />
-        )}
-        {/* The version line is a thin rail at the foot of the column, as on main under the lanes. */}
-        <div style={{ padding: '16px 24px 16px', borderTop: '1px solid var(--line)' }}>
-          <p className="meta" style={{ margin: '0 0 10px calc(var(--gutter) + 6px)', display: 'flex', gap: 12, alignItems: 'baseline' }}>
-            <span>click a version to compare from it, shift-click to compare to it</span>
-            {pair && pair.a !== pair.b ? (
-              <button type="button" className="link" onClick={swap} style={{ fontSize: 12, color: 'var(--ink)' }}>swap</button>
-            ) : null}
-          </p>
-          <div ref={railBox} style={{ position: 'relative' }}>
-            <VersionLine versions={versions} current={deck.state.version} selection={pair ?? undefined} onSelect={select} />
-            {railChips.map((c) => (
-              <button
-                key={c.n}
-                type="button"
-                className="edge-chip"
-                data-testid="rail-edge-chip"
-                data-side={c.side}
-                title={`Scroll the rail to v${c.n}`}
-                onClick={() => revealOnRail(c.n)}
-                style={{ position: 'absolute', top: -4, zIndex: 4, cursor: 'pointer', ...(c.side === 'left' ? { left: 'calc(var(--gutter) + 6px)' } : { right: 0 }) }}
-              >
-                {`${c.role} v${c.n}`}
-              </button>
-            ))}
+        <aside aria-label="what changed" className="history-changes">
+          <div className="history-changes-scroll">
+            <h2 className="screen-title" style={{ marginBottom: 14 }}>What changed</h2>
+            {done && (!shown || shown.a.order.length === 0 || shown.entries.length === 0 || shown.pair.a === shown.pair.b) ? <ol style={{ listStyle: 'none', margin: '0 0 12px', padding: 0 }}>{doneRow(done)}</ol> : null}
+            {!shown ? null : shown.pair.a === shown.pair.b ? (
+              <p className="muted" style={{ fontSize: 13 }}>Both sides are v{shown.pair.a}. Click another version to compare from it, or shift-click to compare to it.</p>
+            ) : shown.entries.length === 0 ? (
+              <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} and v{shown.pair.b} have the same slides in the same order.</p>
+            ) : shown.a.order.length === 0 ? (
+              // Every row would remove a slide from main: no per-row buttons for a restore that empties the deck.
+              <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} is empty: restoring would remove every slide</p>
+            ) : (
+              <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                {withDone(shown.entries.map((e, index) => {
+                  const key = `${e.kind}:${e.slide}`;
+                  if (done?.key === key) return doneRow(done);
+                  const d = describeEntry(e, shown);
+                  const does = RESTORE_VERB[e.kind];
+                  return (
+                    <li
+                      key={key}
+                      data-testid="diff-entry"
+                      data-kind={e.kind}
+                      data-slide={e.slide}
+                      onMouseEnter={() => setFocused(e.slide)}
+                      style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 0', borderBottom: '1px solid var(--line)' }}
+                    >
+                      <span className="mono" style={{ ...chip, borderColor: focused === e.slide ? 'var(--ink)' : 'var(--line)' }}>{d.where}</span>
+                      <span style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.35 }}>
+                        <span style={{ display: 'block' }}>{d.what}</span>
+                        <span className="muted" data-testid="diff-entry-title" style={{ marginTop: 2, fontSize: 'var(--fs-meta)', lineHeight: '16px', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden' }} title={d.title}>{d.title}</span>
+                        {/* What the button does, in the row itself: a tooltip alone hid that restoring an added slide deletes it. */}
+                        <span className="muted" data-testid="diff-entry-does" style={{ display: 'block', marginTop: 2, fontSize: 'var(--fs-meta)', lineHeight: '16px' }}>restore: {does}</span>
+                      </span>
+                      {confirming === key ? (
+                        // Restoring rewrites main: the second click, next to what it does, is the commit.
+                        <span data-testid="restore-confirm" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, fontSize: 12 }}>
+                          <span>{does}?</span>
+                          <span style={{ display: 'flex', gap: 6 }}>
+                            <button type="button" className="btn" onClick={() => setConfirming(null)} style={rowButton}>cancel</button>
+                            <button type="button" className="btn-primary" onClick={() => restore(e, key, index)} disabled={busy !== null} style={rowButton}>confirm</button>
+                          </span>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => setConfirming(key)}
+                          disabled={busy !== null}
+                          aria-label={`restore (${does}): ${d.where}, as in v${shown.pair.a}`}
+                          title={`${does[0]!.toUpperCase()}${does.slice(1)}, as in v${shown.pair.a}`}
+                          style={rowButton}
+                        >
+                          {busy === key ? 'restoring…' : 'restore'}
+                        </button>
+                      )}
+                    </li>
+                  );
+                }))}
+              </ol>
+            )}
           </div>
+        </aside>
+      </div>
+      {shown && pairSlide !== undefined ? (
+        <section aria-label="compared slide" style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '0 24px' }}>
+          <ComparePair compared={shown} slide={pairSlide} thumbsA={thumbsOf(shown.pair.a, shown.a)} thumbsB={thumbsOf(shown.pair.b, shown.b)} />
+        </section>
+      ) : (
+        <div style={{ flex: '1 1 0' }} />
+      )}
+      {/* The version line is a thin rail at the foot of the screen, as on main under the lanes. */}
+      <div className="history-rail">
+        <div ref={railBox} style={{ position: 'relative' }}>
+          <VersionLine versions={versions} current={deck.state.version} selection={pair ?? undefined} onSelect={select} />
+          {railChips.map((c) => (
+            <button
+              key={c.n}
+              type="button"
+              className="edge-chip"
+              data-testid="rail-edge-chip"
+              data-side={c.side}
+              title={`Scroll the rail to v${c.n}`}
+              onClick={() => revealOnRail(c.n)}
+              style={{ position: 'absolute', top: -4, zIndex: 4, cursor: 'pointer', ...(c.side === 'left' ? { left: 'calc(var(--gutter) + 6px)' } : { right: 0 }) }}
+            >
+              {`${c.role} v${c.n}`}
+            </button>
+          ))}
         </div>
       </div>
-      <aside aria-label="what changed" style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', padding: '18px 20px', overflowY: 'auto' }}>
-        <h2 className="screen-title" style={{ marginBottom: 14 }}>What changed</h2>
-        {done && (!shown || shown.a.order.length === 0 || shown.entries.length === 0 || shown.pair.a === shown.pair.b) ? <ol style={{ listStyle: 'none', margin: '0 0 12px', padding: 0 }}>{doneRow(done)}</ol> : null}
-        {!shown ? null : shown.pair.a === shown.pair.b ? (
-          <p className="muted" style={{ fontSize: 13 }}>Both sides are v{shown.pair.a}. Click another version to compare from it, or shift-click to compare to it.</p>
-        ) : shown.entries.length === 0 ? (
-          <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} and v{shown.pair.b} have the same slides in the same order.</p>
-        ) : shown.a.order.length === 0 ? (
-          // Every row would remove a slide from main: no per-row buttons for a restore that empties the deck.
-          <p className="muted" style={{ fontSize: 13 }}>v{shown.pair.a} is empty: restoring would remove every slide</p>
-        ) : (
-          <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-            {withDone(shown.entries.map((e, index) => {
-              const key = `${e.kind}:${e.slide}`;
-              if (done?.key === key) return doneRow(done);
-              const d = describeEntry(e, shown);
-              const does = RESTORE_VERB[e.kind];
-              return (
-                <li
-                  key={key}
-                  data-testid="diff-entry"
-                  data-kind={e.kind}
-                  data-slide={e.slide}
-                  onMouseEnter={() => setFocused(e.slide)}
-                  style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 0', borderBottom: '1px solid var(--line)' }}
-                >
-                  <span className="mono" style={{ ...chip, borderColor: focused === e.slide ? 'var(--ink)' : 'var(--line)' }}>{d.where}</span>
-                  <span style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.35 }}>
-                    <span style={{ display: 'block' }}>{d.what}</span>
-                    <span className="muted" data-testid="diff-entry-title" style={{ marginTop: 2, fontSize: 'var(--fs-meta)', lineHeight: '16px', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden' }} title={d.title}>{d.title}</span>
-                    {/* What the button does, in the row itself: a tooltip alone hid that restoring an added slide deletes it. */}
-                    <span className="muted" data-testid="diff-entry-does" style={{ display: 'block', marginTop: 2, fontSize: 'var(--fs-meta)', lineHeight: '16px' }}>restore: {does}</span>
-                  </span>
-                  {confirming === key ? (
-                    // Restoring rewrites main: the second click, next to what it does, is the commit.
-                    <span data-testid="restore-confirm" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, fontSize: 12 }}>
-                      <span>{does}?</span>
-                      <span style={{ display: 'flex', gap: 6 }}>
-                        <button type="button" className="btn" onClick={() => setConfirming(null)} style={rowButton}>cancel</button>
-                        <button type="button" className="btn-primary" onClick={() => restore(e, key, index)} disabled={busy !== null} style={rowButton}>confirm</button>
-                      </span>
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() => setConfirming(key)}
-                      disabled={busy !== null}
-                      aria-label={`restore (${does}): ${d.where}, as in v${shown.pair.a}`}
-                      title={`${does[0]!.toUpperCase()}${does.slice(1)}, as in v${shown.pair.a}`}
-                      style={rowButton}
-                    >
-                      {busy === key ? 'restoring…' : 'restore'}
-                    </button>
-                  )}
-                </li>
-              );
-            }))}
-          </ol>
-        )}
-      </aside>
     </div>
   );
 }
