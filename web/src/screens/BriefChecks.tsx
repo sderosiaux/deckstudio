@@ -4,6 +4,7 @@ import {
   briefChecksApi,
   focusPath,
   mainPath,
+  slidePath,
   navigate as defaultNavigate,
   subscribe as defaultSubscribe,
   thumbUrl,
@@ -58,6 +59,55 @@ const liveOf = (rs: Remark[], lanes: Lane[], name: CheckName): Remark[] => ofChe
 /** Resolved or lane-closed: kept behind "show resolved (N)". */
 const settledOf = (rs: Remark[], lanes: Lane[], name: CheckName): Remark[] => ofCheck(rs, name).filter((r) => r.status !== 'open' || laneClosed(r, lanes));
 const hasWarn = (rs: Remark[], lanes: Lane[], name: CheckName): boolean => liveOf(rs, lanes, name).some((r) => r.severity === 'warn');
+
+const sameAnchor = (x: Anchor, y: Anchor): boolean =>
+  x.kind === 'arc' ? y.kind === 'arc' : x.kind === 'slide' ? y.kind === 'slide' && x.slide === y.slide : y.kind === 'range' && x.from === y.from && x.to === y.to;
+
+/** Function words that carry no point of their own: two remarks sharing only these are not alike. */
+const STOP_WORDS: ReadonlySet<string> = new Set(
+  ('the and for but nor yet with without that this these those which while where when what who whom whose how why ' +
+    'are was were been being has have had its not from into onto over under about inside outside here there their ' +
+    'they them then than also only just very more most less each every some such same other both either neither ' +
+    'all any can could would should will does did one two nothing something anything already still even so')
+    .split(' '),
+);
+
+/** A plural or third-person "s" dropped, so "promises" and "promise", "details" and "detail" count as one word. */
+const stem = (w: string): string => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w);
+
+/** The words of a remark that carry its point: lower-cased, three letters or more, without function words, stemmed. */
+export function remarkWords(text: string): ReadonlySet<string> {
+  return new Set((text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((w) => w.length >= 3 && !STOP_WORDS.has(w)).map(stem));
+}
+
+/** Share of the shorter remark's words the other one also uses, from which two remarks make the same point. */
+export const SIMILAR_SHARE = 0.6;
+
+/**
+ * Two remarks make the same point: same anchor, same origin, and at least 60% of the shorter one's words in the other.
+ * The server applies the same rule when a check reruns; until it dedupes, the screen groups what it would merge.
+ */
+export function similarRemarks(a: Remark, b: Remark): boolean {
+  if (a.origin !== b.origin || !sameAnchor(a.anchor, b.anchor)) return false;
+  const wa = remarkWords(a.text);
+  const wb = remarkWords(b.text);
+  const smaller = Math.min(wa.size, wb.size);
+  if (smaller === 0) return a.text.trim() === b.text.trim();
+  let shared = 0;
+  for (const w of wa) if (wb.has(w)) shared++;
+  return shared / smaller >= SIMILAR_SHARE;
+}
+
+/** Remarks grouped by point, at the place of their first one; in a group the oldest leads (the one already seen). */
+export function groupSimilar(rs: readonly Remark[]): Remark[][] {
+  const groups: Remark[][] = [];
+  for (const r of rs) {
+    const g = groups.find((members) => members.some((m) => similarRemarks(m, r)));
+    if (g) g.push(r);
+    else groups.push([r]);
+  }
+  return groups.map((g) => [...g].sort((x, y) => Date.parse(x.createdAt) - Date.parse(y.createdAt)));
+}
 
 /** The draft lane a remark points at, if any: a check proposed it and the creator has not opened it yet. */
 function draftLaneOf(lanes: Lane[], laneId: string | null): string | undefined {
@@ -129,7 +179,7 @@ function themeNote(d: DesignLoad): string {
     : `theme.css: ${themeCssPath} (not present: the built-in theme applies; create it to change the look, then restart)`;
 }
 
-function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
+function BriefCard({ initial, api, previewSlide, navigate }: { initial: Brief; api: BriefChecksApi; previewSlide: SlideId | undefined; navigate(path: string): void }) {
   const [draft, setDraft] = useState<Brief>(initial);
   const saved = useRef<Brief>(initial);
   const [save, setSave] = useState<Save>({ kind: 'idle' });
@@ -150,7 +200,27 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
 
   const designText = (key: 'rules' | 'imageStyle', label: string, minRows: number, placeholder?: string) => (
     <>
-      <label htmlFor={`brief-design-${key}`} style={fieldLabel}>{label}</label>
+      {key === 'rules' && previewSlide !== undefined ? (
+        // The rules apply to every render: one slide shows them at work.
+        <span style={{ ...fieldLabel, display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
+          <label htmlFor={`brief-design-${key}`}>{label}</label>
+          <a
+            href={slidePath(previewSlide)}
+            className="link"
+            onClick={(e) => {
+              if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+              e.preventDefault();
+              persist(draft);
+              navigate(slidePath(previewSlide));
+            }}
+            style={{ fontSize: 12, fontWeight: 400, color: 'var(--ink)' }}
+          >
+            preview on a slide
+          </a>
+        </span>
+      ) : (
+        <label htmlFor={`brief-design-${key}`} style={fieldLabel}>{label}</label>
+      )}
       <textarea
         id={`brief-design-${key}`}
         className="brief-design-field"
@@ -254,7 +324,9 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
               {showBuiltIn ? 'hide built-in style' : 'show built-in style'}
             </button>
             {showBuiltIn ? (
-              <p data-testid="builtin-style" className="muted" style={{ margin: '6px 0 0', fontSize: 12, lineHeight: 1.45, whiteSpace: 'pre-wrap' }}>{design.info.defaultImageStyle}</p>
+              <pre style={{ margin: '6px 0 0', padding: '8px 12px', borderRadius: 'var(--radius)', border: '1px solid var(--line)', background: 'var(--card)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                <code data-testid="builtin-style" className="mono" style={{ fontSize: 12, lineHeight: 1.45, color: 'var(--ink)' }}>{design.info.defaultImageStyle}</code>
+              </pre>
             ) : null}
           </div>
         ) : null}
@@ -282,6 +354,8 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
    */
   const [ownRun, setOwnRun] = useState<'idle' | 'requested' | 'running'>('idle');
   const [showSettled, setShowSettled] = useState<ReadonlySet<CheckName>>(new Set());
+  /** Groups of near-duplicate remarks unfolded, by the id of the remark that leads them. */
+  const [similarShown, setSimilarShown] = useState<ReadonlySet<string>>(new Set());
   /** Per check, when this screen saw its current run start: the fallback reference when the check had never run before. */
   const runStart = useRef<Partial<Record<CheckName, string>>>({});
   const [liveError, setLiveError] = useState<string | null>(null);
@@ -291,13 +365,13 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
   // Absent until a run finishes while the screen is open (the first look has nothing to compare with); null = it had never run.
   const lastSeen = useRef<Partial<Record<CheckName, string | null>>>({});
   /** Per check, the reference of its latest finished run: the lastRun before it, and the remark ids listed before it started. */
-  const [since, setSince] = useState<Partial<Record<CheckName, { at: string | null; ids: ReadonlySet<string> }>>>({});
-  /** Remark ids of the latest list loaded; a run's "before" is this list when the run is seen starting. */
-  const listed = useRef<ReadonlySet<string> | null>(null);
-  /** Per check, the ids listed when this screen saw its current run start. */
-  const runIds = useRef<Partial<Record<CheckName, ReadonlySet<string>>>>({});
-  /** What the first load listed: never "new", even when a run that was already in flight produced it. */
-  const [firstIds, setFirstIds] = useState<ReadonlySet<string> | null>(null);
+  const [since, setSince] = useState<Partial<Record<CheckName, { at: string | null; listed: readonly Remark[] }>>>({});
+  /** The latest list loaded; a run's "before" is this list when the run is seen starting. */
+  const listed = useRef<readonly Remark[] | null>(null);
+  /** Per check, the remarks listed when this screen saw its current run start. */
+  const runListed = useRef<Partial<Record<CheckName, readonly Remark[]>>>({});
+  /** What the first load listed: never "new", nor anything that rewords it, even when a run already in flight produced it. */
+  const [firstListed, setFirstListed] = useState<readonly Remark[] | null>(null);
   const pendingThumbs = useRef(new Map<string, SlideId>());
 
   const reportLive = useCallback((err: unknown) => setLiveError(message(err)), []);
@@ -330,9 +404,8 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
     const [rs, ls] = await Promise.all([api.getRemarks(), api.getLanes('all')]);
     setRemarks(rs);
     setLanes(ls);
-    const ids: ReadonlySet<string> = new Set(rs.map((r) => r.id));
-    if (listed.current === null) setFirstIds(ids);
-    listed.current = ids;
+    if (listed.current === null) setFirstListed(rs);
+    listed.current = rs;
     setLiveError(null);
     if (!autoExpanded.current) {
       autoExpanded.current = true;
@@ -348,21 +421,21 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
   const applyStatus = useCallback((status: ChecksStatus): void => {
     statusNow.current = status;
     setStatus(status);
-    const changed: Partial<Record<CheckName, { at: string | null; ids: ReadonlySet<string> }>> = {};
+    const changed: Partial<Record<CheckName, { at: string | null; listed: readonly Remark[] }>> = {};
     const now = new Date().toISOString();
     for (const { name } of CHECK_ROWS) {
       if (status.running.includes(name) && runStart.current[name] === undefined) {
         runStart.current[name] = now;
-        runIds.current[name] = listed.current ?? new Set();
+        runListed.current[name] = listed.current ?? [];
       }
       const at = status.lastRun[name];
       // The reference is the previous lastRun; a check that never ran falls back to when this screen saw the run start.
       if (name in lastSeen.current && lastSeen.current[name] !== at) {
-        changed[name] = { at: lastSeen.current[name] ?? runStart.current[name] ?? null, ids: runIds.current[name] ?? new Set() };
+        changed[name] = { at: lastSeen.current[name] ?? runStart.current[name] ?? null, listed: runListed.current[name] ?? [] };
       }
       if (!status.running.includes(name)) {
         delete runStart.current[name];
-        delete runIds.current[name];
+        delete runListed.current[name];
       }
       lastSeen.current[name] = at;
     }
@@ -399,12 +472,14 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
   }, [api, subscribe, loadDeck, loadRemarks, loadStatus, loadThumb, reportLive, applyStatus]);
 
 
-  // Never on the first look, and never without a reference: "new" means created since the run before this one and not
-  // listed before this run started (a remark the creator already saw is not new because the run ended after it).
+  // Never on the first look, and never without a reference: "new" means created since the run before this one, and
+  // neither listed nor reworded from a remark listed before this run started (a point the creator already saw is not
+  // new because the run ended after it, or because the check phrased it again).
   const isNew = (r: Remark, name: CheckName): boolean => {
     const before = since[name];
-    if (!before || typeof before.at !== 'string' || !firstIds) return false;
-    return Date.parse(r.createdAt) > Date.parse(before.at) && !before.ids.has(r.id) && !firstIds.has(r.id);
+    if (!before || typeof before.at !== 'string' || !firstListed) return false;
+    const seen = (rs: readonly Remark[]): boolean => rs.some((x) => x.id === r.id || similarRemarks(x, r));
+    return Date.parse(r.createdAt) > Date.parse(before.at) && !seen(before.listed) && !seen(firstListed);
   };
 
   const run = (): void => {
@@ -428,6 +503,14 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
       const next = new Set(prev);
       if (next.has(name)) next.delete(name);
       else next.add(name);
+      return next;
+    });
+
+  const toggleSimilar = (id: string): void =>
+    setSimilarShown((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
 
@@ -492,7 +575,7 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
         )}
       </ScreenHeader>
       <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(300px, 1fr) minmax(380px, 1.2fr) minmax(300px, 1fr)', gap: 0, padding: '8px 24px 20px' }}>
-        <BriefCard initial={brief} api={api} />
+        <BriefCard initial={brief} api={api} previewSlide={deck.order[0]} navigate={navigate} />
 
         <section style={card} aria-label="checks">
           <style>{DOT_CSS}</style>
@@ -501,6 +584,22 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {CHECK_ROWS.map(({ name, label }) => {
               const open = liveOf(remarks, lanes, name);
+              // Near-duplicates (a rerun's rewording) share one card until the server dedupes them.
+              const groups = groupSimilar(open);
+              const card = (r: Remark) => (
+                <RemarkCard
+                  key={r.id}
+                  remark={r}
+                  order={deck.order}
+                  onShow={show}
+                  onPropose={(id) => api.proposeRemark(id)}
+                  laneHref={laneHref(lanes, r.laneId)}
+                  onOpenLane={navigate}
+                  draftLaneId={draftLaneOf(lanes, r.laneId)}
+                  onOpenDraft={(id) => api.openLane(id)}
+                  isNew={r.status === 'open' && !laneClosed(r, lanes) && isNew(r, name)}
+                />
+              );
               const settled = settledOf(remarks, lanes, name);
               const settledShown = showSettled.has(name);
               const warn = hasWarn(remarks, lanes, name);
@@ -522,7 +621,7 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
                       style={{ width: 10, height: 10, borderRadius: '50%', flex: '0 0 auto', alignSelf: 'center', transition: 'background .2s ease', ...DOT[dot].style }}
                     />
                     <span className="row-label">{label}</span>
-                    {open.length ? <span className="meta">{`${open.length} remark${open.length > 1 ? 's' : ''}`}</span> : null}
+                    {groups.length ? <span className="meta">{`${groups.length} remark${groups.length > 1 ? 's' : ''}`}</span> : null}
                     <span className="meta">{lastRunLabel(name)}</span>
                     <span aria-hidden style={{ marginLeft: 'auto', color: 'var(--grey)', transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s ease' }}>⌄</span>
                   </button>
@@ -533,20 +632,21 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
                           {status?.lastRun[name] ? 'Nothing to flag.' : 'Not run yet. Use "Run checks" to get remarks here.'}
                         </p>
                       ) : null}
-                      {[...open, ...(settledShown ? settled : [])].map((r) => (
-                          <RemarkCard
-                            key={r.id}
-                            remark={r}
-                            order={deck.order}
-                            onShow={show}
-                            onPropose={(id) => api.proposeRemark(id)}
-                            laneHref={laneHref(lanes, r.laneId)}
-                            onOpenLane={navigate}
-                            draftLaneId={draftLaneOf(lanes, r.laneId)}
-                            onOpenDraft={(id) => api.openLane(id)}
-                            isNew={r.status === 'open' && !laneClosed(r, lanes) && isNew(r, name)}
-                          />
-                        ))}
+                      {groups.map(([lead, ...alike]) => {
+                        const shown = similarShown.has(lead!.id);
+                        return (
+                          <div key={lead!.id} data-testid="remark-group" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {card(lead!)}
+                            {alike.length > 0 ? (
+                              <button type="button" className="link" aria-expanded={shown} onClick={() => toggleSimilar(lead!.id)} style={{ fontSize: 12, alignSelf: 'flex-start', color: 'var(--ink)' }}>
+                                {`${alike.length + 1} similar`}
+                              </button>
+                            ) : null}
+                            {shown ? <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 12, borderLeft: '1px solid var(--line)' }}>{alike.map(card)}</div> : null}
+                          </div>
+                        );
+                      })}
+                      {settledShown ? settled.map(card) : null}
                       {settled.length > 0 ? (
                         <button type="button" className="link" aria-expanded={settledShown} onClick={() => toggleSettled(name)} style={{ fontSize: 12, alignSelf: 'flex-start' }}>
                           {`${settledShown ? 'hide' : 'show'} resolved (${settled.length})`}

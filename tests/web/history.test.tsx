@@ -44,6 +44,7 @@ const stubApi = () => {
     restoreEntry: vi.fn(async () => undefined),
     openVersionAsLane: vi.fn(async (_n: number) => ({ laneId: 'lv' })),
     thumbFor: vi.fn(async (id: SlideId) => ({ hash: `h${id}`, ready: true })),
+    thumbForVersion: vi.fn(async (n: number, id: SlideId) => ({ hash: `v${n}${id}`, ready: true })),
   };
   return api satisfies HistoryApi;
 };
@@ -229,11 +230,12 @@ describe('History', () => {
     fireEvent.click(versionButton(1));
     await waitFor(() => screen.queryAllByTestId('thumb-image').length > 0);
     const rowA = screen.getByTestId('row-a');
-    // s2 was retitled after v1: its v1 card cannot use main's render.
-    const s2 = within(rowA).getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's2')!;
-    expect(within(s2).queryByTestId('thumb-image')).toBeNull();
-    const s1 = within(rowA).getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's1')!;
-    await waitFor(() => within(s1).queryByTestId('thumb-image') !== null);
+    const img = (id: SlideId) => within(within(rowA).getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === id)!).queryByTestId('thumb-image')?.getAttribute('src');
+    // s2 was retitled after v1: its v1 card is v1's own render, never main's.
+    await waitFor(() => img('s2') !== undefined);
+    expect(img('s2')).toBe('/api/thumbs/v1s2.png');
+    await waitFor(() => img('s1') !== undefined);
+    expect(img('s1')).toBe('/api/thumbs/hs1.png');
     expect(api.thumbFor).not.toHaveBeenCalledWith('s4');
   });
 
@@ -496,14 +498,43 @@ describe('History QA1', () => {
     }
   });
 
-  it('a past version whose slide differs from main shows a title card, never a blank thumb', async () => {
-    render(<History api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+  it('a past version whose slide render is still on its way shows a title card, never a blank thumb', async () => {
+    const api = stubApi();
+    api.thumbForVersion.mockImplementation(async (n: number, id: SlideId) => ({ hash: `v${n}${id}`, ready: false }));
+    render(<History api={api} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryAllByTestId('version').length === 3);
     fireEvent.click(versionButton(1));
     await waitFor(() => screen.queryAllByTestId('diff-entry').length === 4);
     const rowA = screen.getByTestId('row-a');
     const s2 = within(rowA).getAllByRole('listitem').find((c) => c.querySelector('[data-slide="s2"]'))!;
     expect(within(s2).getByTestId('thumb-title-card').textContent).toBe('Title s2');
+  });
+
+  it('QA3: a past version\'s slide that differs from main is rendered as it was in that version, on every page', async () => {
+    const api = stubApi();
+    api.thumbForVersion.mockImplementation(async (n: number, id: SlideId) => ({ hash: `v${n}${id}`, ready: false }));
+    const bus = fakeBus();
+    render(<History api={api} subscribe={bus.subscribe} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('version').length === 3);
+    fireEvent.click(versionButton(1));
+    await waitFor(() => screen.queryAllByTestId('diff-entry').length === 4);
+    // Asked for the slides of v1 that main does not have as they were: s2 (retitled since) and s4 (removed since).
+    const asked = (n: number) => api.thumbForVersion.mock.calls.filter(([m]) => m === n).map(([, id]) => id).sort();
+    await waitFor(() => asked(1).length === 2);
+    expect(asked(1)).toEqual(['s2', 's4']);
+    // v3 is main: its slides use main's thumbs.
+    expect(api.thumbForVersion).not.toHaveBeenCalledWith(3, expect.anything());
+    act(() => bus.emit({ type: 'thumb.ready', hash: 'v1s2', slideId: null }));
+    const rowA = screen.getByTestId('row-a');
+    const s2 = within(rowA).getAllByRole('listitem').find((c) => c.querySelector('[data-slide="s2"]'))!;
+    await waitFor(() => within(s2).queryByTestId('thumb-image') !== null);
+    expect(within(s2).getByTestId('thumb-image').getAttribute('src')).toBe('/api/thumbs/v1s2.png');
+    expect(within(s2).queryByTestId('thumb-title-card')).toBeNull();
+    // Coming back to the same version asks nothing again: a version never changes.
+    fireEvent.click(versionButton(2));
+    fireEvent.click(versionButton(1));
+    await waitFor(() => screen.queryAllByTestId('diff-entry').length === 4);
+    expect(api.thumbForVersion.mock.calls.filter(([n]) => n === 1)).toHaveLength(2);
   });
 });
 
@@ -571,5 +602,156 @@ describe('VersionLine QA1', () => {
     render(<VersionLine versions={[1, 2, 3].map(version)} current={3} selection={{ a: 1, b: 3 }} onSelect={vi.fn()} />);
     const tag = (n: number) => within(screen.getAllByTestId('version').find((v) => v.getAttribute('data-version') === String(n))!).queryByTestId('version-pick')?.textContent;
     expect([tag(1), tag(2), tag(3)]).toEqual(['from', undefined, 'to']);
+  });
+});
+
+describe('DiffFilmstrips QA3', () => {
+  const side = (n: number, s: Snapshot, thumbs: Record<SlideId, string | undefined> = {}) => ({ n, snapshot: s, thumbs });
+
+  it('a removed slide\'s slot shows its render from the earlier version, faded, not a box with its title', () => {
+    render(<DiffFilmstrips a={side(1, snaps[1]!, { s4: '/api/thumbs/v1s4.png' })} b={side(3, snaps[3]!)} entries={diffVersions(snaps[1]!, snaps[3]!)} onFocus={vi.fn()} />);
+    const gone = screen.getAllByTestId('diff-marker').find((m) => m.getAttribute('data-kind') === 'removed')!;
+    expect(within(gone).getByTestId('gone-image').getAttribute('src')).toBe('/api/thumbs/v1s4.png');
+    expect(gone.textContent).toBe('');
+    expect(gone.getAttribute('title')).toContain('Title s4');
+  });
+});
+
+describe('History QA3 strips and rail', () => {
+  const many = (n: number) => snap(Array.from({ length: n }, (_, i) => slide(`m${i + 1}`)));
+  const rect = (left: number, width: number, top = 0, height = 99): DOMRect => ({ left, width, top, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+
+  it('the strips page back too: a "+N" at the start counts the slides scrolled past and pages back by a page', () => {
+    let left = 184 * 6;
+    const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')!;
+    Object.defineProperty(Element.prototype, 'scrollLeft', { configurable: true, get: () => left, set: (v: number) => void (left = v) });
+    const spyRect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.hasAttribute('data-edge-item')) {
+        const i = [...this.parentElement!.children].indexOf(this);
+        return rect(126 + i * 184 - left, 176);
+      }
+      if (this.classList.contains('gutter')) return rect(0, 120);
+      return rect(0, 900, 0, 300);
+    });
+    const spyWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(900);
+    try {
+      render(<DiffFilmstrips a={{ n: 1, snapshot: many(30), thumbs: {} }} b={{ n: 2, snapshot: many(30), thumbs: {} }} entries={[]} onFocus={vi.fn()} />);
+      const back = screen.getAllByRole('button', { name: /^show the previous slides/ });
+      expect(back).toHaveLength(2);
+      expect(back[0]!.getAttribute('aria-label')).toBe('show the previous slides (6 more)');
+      expect(back[0]!.textContent).toBe('+6');
+      fireEvent.click(back[0]!);
+      // A page is the whole columns that fit: (900 - 120 - 48) / 184 = 3.
+      expect(left).toBe(184 * 3);
+      fireEvent.click(back[0]!);
+      fireEvent.click(back[0]!);
+      expect(left).toBe(0);
+    } finally {
+      Object.defineProperty(Element.prototype, 'scrollLeft', desc);
+      spyRect.mockRestore();
+      spyWidth.mockRestore();
+    }
+  });
+
+  /** Lays the rail out: version n at (n - 1) * 160, 160 wide, in an 800px rail; returns the rail's scrollLeft box. */
+  const layoutRail = () => {
+    const box = { left: 0 };
+    const restore = [
+      vi.spyOn(HTMLElement.prototype, 'offsetLeft', 'get').mockImplementation(function (this: HTMLElement) {
+        const n = this.getAttribute('data-version');
+        return n === null ? 0 : (Number(n) - 1) * 160 + 6;
+      }),
+      vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.hasAttribute('data-version') ? 160 : 800;
+      }),
+      vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800),
+    ];
+    const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')!;
+    Object.defineProperty(Element.prototype, 'scrollLeft', { configurable: true, get: () => box.left, set: (v: number) => void (box.left = v) });
+    return {
+      box,
+      restore: () => {
+        for (const r of restore) r.mockRestore();
+        Object.defineProperty(Element.prototype, 'scrollLeft', desc);
+      },
+    };
+  };
+  const twelve = () => Array.from({ length: 12 }, (_, i) => ({ n: i + 1, order: ['s1'], slides: { s1: `h${i}` }, cause: { kind: 'import' as const }, createdAt: '2026-09-30T00:00:00.000Z', label: `change ${i + 1}` }));
+  const railApi = () => {
+    const api = stubApi();
+    api.getVersions.mockResolvedValue(twelve());
+    api.getVersionSnapshot.mockResolvedValue(snaps[3]!);
+    api.getHistoryDiff.mockImplementation(async (a: number, b: number) => ({ a, b, entries: [] }));
+    api.getDeck.mockResolvedValue({ ...deck, state: { ...deck.state, version: 12 } });
+    return api;
+  };
+
+  it('the versions rail shows both compared versions when they fit', async () => {
+    const rail = layoutRail();
+    try {
+      render(<History api={railApi()} subscribe={noEvents} navigate={vi.fn()} initialPair={{ a: 1, b: 12 }} />);
+      await waitFor(() => screen.queryAllByTestId('version').length === 12);
+      fireEvent.click(versionButton(9));
+      // v9 at 1286..1446, v12 at 1766..1926: both in an 800px view.
+      await waitFor(() => rail.box.left > 0 && rail.box.left <= 1280 && rail.box.left + 800 >= 1926);
+      expect(screen.queryByTestId('rail-edge-chip')).toBeNull();
+    } finally {
+      rail.restore();
+    }
+  });
+
+  it('when they do not fit, the rail shows the earlier one and a "to vN" chip at the edge that scrolls to the other', async () => {
+    const rail = layoutRail();
+    try {
+      render(<History api={railApi()} subscribe={noEvents} navigate={vi.fn()} initialPair={{ a: 1, b: 12 }} />);
+      await waitFor(() => screen.queryAllByTestId('version').length === 12);
+      fireEvent.click(versionButton(2));
+      await waitFor(() => screen.queryByTestId('rail-edge-chip') !== null);
+      // v2 starts at 166: in view.
+      expect(rail.box.left).toBeLessThanOrEqual(160);
+      const chip = screen.getByTestId('rail-edge-chip');
+      expect(chip.textContent).toBe('to v12');
+      expect(chip.getAttribute('data-side')).toBe('right');
+      fireEvent.click(chip);
+      expect(rail.box.left + 800).toBeGreaterThanOrEqual(1926);
+      // Now v2 is the one out of view, on the left.
+      await waitFor(() => screen.queryByTestId('rail-edge-chip')?.textContent === 'from v2');
+      expect(screen.getByTestId('rail-edge-chip').getAttribute('data-side')).toBe('left');
+    } finally {
+      rail.restore();
+    }
+  });
+});
+
+describe('History QA3 compare state', () => {
+  const many = (n: number, retitle?: string) => snap(Array.from({ length: n }, (_, i) => slide(`m${i + 1}`, `m${i + 1}` === retitle ? 'Changed' : undefined)));
+
+  it('the strips open on the first changed slide when it lies past the visible end', () => {
+    let left = 0;
+    const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')!;
+    Object.defineProperty(Element.prototype, 'scrollLeft', { configurable: true, get: () => left, set: (v: number) => void (left = v) });
+    const spyWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(900);
+    try {
+      const a = many(30);
+      const b = many(30, 'm12');
+      render(<DiffFilmstrips a={{ n: 1, snapshot: a, thumbs: {} }} b={{ n: 2, snapshot: b, thumbs: {} }} entries={diffVersions(a, b)} onFocus={vi.fn()} />);
+      expect(left).toBe(11 * 184);
+      cleanup();
+      left = 0;
+      const near = many(30, 'm2');
+      render(<DiffFilmstrips a={{ n: 1, snapshot: a, thumbs: {} }} b={{ n: 2, snapshot: near, thumbs: {} }} entries={diffVersions(a, near)} onFocus={vi.fn()} />);
+      expect(left).toBe(0);
+    } finally {
+      Object.defineProperty(Element.prototype, 'scrollLeft', desc);
+      spyWidth.mockRestore();
+    }
+  });
+
+  it('keeps the compared pair in the URL, so coming back to the history finds it', async () => {
+    render(<History api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('version').length === 3);
+    fireEvent.click(versionButton(1));
+    await waitFor(() => location.search === '?a=1&b=3');
+    expect(location.pathname).toBe('/history');
   });
 });

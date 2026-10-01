@@ -99,6 +99,11 @@ export function thumbFor(slideId: SlideId): Promise<ThumbStatus> {
   return getJson<ThumbStatus>(`/api/thumbs/for/${encodeURIComponent(slideId)}`);
 }
 
+/** A slide as it was in version n (history): same hash cache as main's thumbs; `thumb.ready` follows, matched by hash. */
+export function thumbForVersion(n: number, slideId: SlideId): Promise<ThumbStatus> {
+  return getJson<ThumbStatus>(`/api/thumbs/version/${n}/${encodeURIComponent(slideId)}`);
+}
+
 export function thumbUrl(hash: string): string {
   return `/api/thumbs/${hash}.png`;
 }
@@ -299,6 +304,7 @@ export interface HistoryApi {
   restoreEntry(from: number, entry: DiffEntry): Promise<void>;
   openVersionAsLane(n: number): Promise<{ laneId: string }>;
   thumbFor(slideId: SlideId): Promise<ThumbStatus>;
+  thumbForVersion(n: number, slideId: SlideId): Promise<ThumbStatus>;
 }
 
 export const laneApi: LaneApi = { acceptChange, refuseChange, discardLane };
@@ -307,7 +313,7 @@ export const focusApi: FocusApi = { getDeck, getLane, getLanePreview, thumbFor, 
 export const slideApi: SlideApi = { getDeck, getLanes, getLane, getLanePreview, thumbFor, acceptChange, refuseChange, discardLane, getThread, postMessage };
 export const remarkApi: RemarkApi = { proposeRemark, resolveRemark };
 export const briefChecksApi: BriefChecksApi = { getDeck, getBrief, putBrief, getRemarks, proposeRemark, runChecks, getChecksStatus, getLanes, openLane, thumbFor, getDesign };
-export const historyApi: HistoryApi = { getDeck, getVersions, getVersionSnapshot, getHistoryDiff, restoreEntry, openVersionAsLane, thumbFor };
+export const historyApi: HistoryApi = { getDeck, getVersions, getVersionSnapshot, getHistoryDiff, restoreEntry, openVersionAsLane, thumbFor, thumbForVersion };
 
 /** Client-side routes. The server answers index.html for any non-API path, so these also work on reload. */
 export function focusPath(laneId: string, changeId: string): string {

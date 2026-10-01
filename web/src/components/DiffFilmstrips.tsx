@@ -1,4 +1,4 @@
-import { useEffect, useRef, type CSSProperties } from 'react';
+import { useEffect, useLayoutEffect, useRef, type CSSProperties } from 'react';
 import type { DiffEntry, SlideId, Snapshot } from '../../../src/model/types.js';
 import { END_W, EdgeFade, useVisibleColumns } from './EdgeFade.js';
 import { Thumb } from './Thumb.js';
@@ -123,11 +123,33 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   }, []);
-  /** The "+N" slot moves the strips on by the whole columns that fit, so the next card starts where the first one was. */
-  const scrollOn = (): void => {
+  // A compare opens on its first change: when that column lies past the visible end, it becomes the first one in view.
+  // Once per pair of versions, so a thumbnail arriving later never moves the strips under the reader.
+  const firstChange = Math.min(
+    ...[...bRowCells(b.snapshot.order, entries).entries(), ...aRowCells(a.snapshot.order, entries).entries()].flatMap(([i, c]) =>
+      entries.some((e) => e.slide === c.id) ? [i] : [],
+    ),
+  );
+  const opened = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    const key = `${a.n}:${b.n}`;
+    if (!el || opened.current === key) return;
+    opened.current = key;
+    if (!Number.isFinite(firstChange)) return;
+    const x = PAD + firstChange * COL;
+    const fits = x >= el.scrollLeft && x + THUMB_W <= el.scrollLeft + el.clientWidth - GUTTER - END_W;
+    if (!fits) el.scrollLeft = firstChange * COL;
+  }, [a.n, b.n, firstChange]);
+  /**
+   * The "+N" slots page the strips by the whole columns that fit, as on main: on, so the next card starts where the
+   * first one was, or back to the start.
+   */
+  const page = (dir: -1 | 1): void => {
     const el = scroller.current;
     if (!el) return;
-    el.scrollLeft += Math.max(1, Math.floor((el.clientWidth - GUTTER - END_W) / COL)) * COL;
+    const by = Math.max(1, Math.floor((el.clientWidth - GUTTER - END_W) / COL)) * COL;
+    el.scrollLeft = Math.max(0, el.scrollLeft + dir * by);
   };
   const cells = bRowCells(b.snapshot.order, entries);
   const aCells = aRowCells(a.snapshot.order, entries);
@@ -157,7 +179,8 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
   };
   const straight = (from: number, to: number): string => `M ${centerX(from)} 0 L ${centerX(to)} ${CONNECTOR_H}`;
   const label = (n: number) => (
-    <div className="gutter row-label" style={{ fontWeight: 700, display: 'flex', alignItems: 'center' }}>
+    // The paper shadow covers the scroller's 4px top padding and the row's left pad, where a paged-past card's outline would show.
+    <div className="gutter row-label" style={{ fontWeight: 700, display: 'flex', alignItems: 'center', boxShadow: `0 -4px 0 var(--paper), ${PAD}px -4px 0 var(--paper)` }}>
       v{n}
     </div>
   );
@@ -235,8 +258,9 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
               {cells.map((c) =>
                 c.kind === 'gone' ? (
                   <div role="listitem" key={`gone:${c.id}`} data-edge-item style={cellStyle}>
-                    <div data-testid="diff-marker" data-kind="removed" data-slide={c.id} className="edge-frame" title={`"${title(a, c.id)}" was slide ${c.wasAt + 1} in v${a.n}`} style={{ ...slot, borderColor: c.id === focused ? 'var(--ink)' : 'var(--accent)' }}>
-                      {title(a, c.id)}
+                    <div data-testid="diff-marker" data-kind="removed" data-slide={c.id} className="edge-frame" title={`"${title(a, c.id)}" was slide ${c.wasAt + 1} in v${a.n}`} style={{ ...slot, ...(a.thumbs[c.id] ? { padding: 0 } : {}), borderColor: c.id === focused ? 'var(--ink)' : 'var(--accent)' }}>
+                      {/* The slide as it was, faded: what restoring brings back. The title stands in until its render is ready. */}
+                      {a.thumbs[c.id] ? <img data-testid="gone-image" src={a.thumbs[c.id]} alt="" draggable={false} style={{ width: '100%', height: '100%', objectFit: 'contain', opacity: 0.45, display: 'block' }} /> : title(a, c.id)}
                     </div>
                     <div data-testid="diff-tag" data-slide={c.id} style={{ ...tag, position: 'static', paddingTop: 6, textAlign: 'center' }}>removed</div>
                   </div>
@@ -263,12 +287,28 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
             type="button"
             className="diff-more"
             aria-label={`show the next slides (${r.hidden} more)`}
-            title="Scroll on"
-            onClick={scrollOn}
+            title="Page on"
+            onClick={() => page(1)}
             style={{ position: 'absolute', left: visible.cut, top: r.top - THUMB_H / 2, width: END_W, height: THUMB_H }}
           />
         ) : null,
       )}
+      {/* The slides scrolled past: a count at the right end of each row's gutter that pages back. */}
+      {visible && visible.first > 0
+        ? visible.rows.map((r, i) => (
+            <button
+              key={`back:${i}`}
+              type="button"
+              className="strip-more"
+              aria-label={`show the previous slides (${visible.first} more)`}
+              title="Page back"
+              onClick={() => page(-1)}
+              style={{ position: 'absolute', left: GUTTER - END_W, top: r.top, width: END_W, height: 40, transform: 'translateY(-50%)' }}
+            >
+              +{visible.first}
+            </button>
+          ))
+        : null}
     </div>
   );
 }

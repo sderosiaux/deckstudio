@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { BriefChecks, autoRows, dotState } from '../../web/src/screens/BriefChecks.js';
+import { BriefChecks, autoRows, dotState, similarRemarks } from '../../web/src/screens/BriefChecks.js';
 import { RemarkPostIt, anchorLabel, cutAtWord } from '../../web/src/components/Remark.js';
 import { mainPath, selectionFromSearch, type BriefChecksApi, type DesignInfo, type BusEvent, type ChecksStatus, type DeckPayload } from '../../web/src/api.js';
 import type { Brief, Lane, Remark, Slide, SlideId } from '../../src/model/types.js';
@@ -583,5 +583,93 @@ describe('BriefChecks QA2', () => {
       expect(caption.style.overflow).toBe('hidden');
       expect(caption.style.whiteSpace).toBe('nowrap');
     }
+  });
+});
+
+describe('BriefChecks QA3', () => {
+  const first = remark('r_g1', {
+    origin: 'check:gaps',
+    anchor: { kind: 'slide', slide: 's6' },
+    text: '"Typed in, typed out" details the wire format of a learned classifier answer, which the abstract never promises.',
+    createdAt: '2026-09-30T09:00:00.000Z',
+  });
+  const reworded = remark('r_g2', {
+    origin: 'check:gaps',
+    anchor: { kind: 'slide', slide: 's6' },
+    text: 'Slide 6 shows the wire format of a learned classifier answer in detail, which the abstract never promises.',
+    createdAt: '2026-09-30T10:30:00.000Z',
+  });
+  const elsewhere = remark('r_g3', { origin: 'check:gaps', anchor: { kind: 'slide', slide: 's2' }, text: first.text, createdAt: '2026-09-30T09:00:00.000Z' });
+  const other = remark('r_g4', { origin: 'check:gaps', anchor: { kind: 'slide', slide: 's6' }, text: 'MCP is never introduced before slide 25 uses it.', createdAt: '2026-09-30T09:00:00.000Z' });
+
+  it('similarRemarks: same anchor, same origin and at least 60% shared words', () => {
+    expect(similarRemarks(first, reworded)).toBe(true);
+    expect(similarRemarks(first, elsewhere)).toBe(false);
+    expect(similarRemarks(first, other)).toBe(false);
+    expect(similarRemarks(first, { ...reworded, origin: 'check:order' })).toBe(false);
+  });
+
+  it('similarRemarks groups the rerun paraphrase QA round 3 found on the demo deck', () => {
+    const anchor = { kind: 'slide' as const, slide: 's6' };
+    const old = remark('r_q1', {
+      origin: 'check:gaps',
+      anchor,
+      text: '"Typed in, typed out" details the wire format of a learned classifier, which no part of the abstract or the message promises: nothing here is about memory, projections, the log or disposable compute. It is an ML-serving detail inside a Kafka memory talk.',
+    });
+    const rerun = remark('r_q2', {
+      origin: 'check:gaps',
+      anchor,
+      text: 'slide 6 (Typed in, typed out) shows the wire format of a learned classifier\'s answer, which serves neither the memory promise ("three tiers of memory") nor the message about the log being the recorded truth; it is a detail of the decision-layer aside started by slide 5 (Few decisions need an LLM). Dropping it keeps that aside to one slide and buys room for the MCP and recall slides the abstract actually promises.',
+    });
+    expect(similarRemarks(old, rerun)).toBe(true);
+  });
+
+  it('near-duplicate remarks of a check share one card with "2 similar"; the other one shows on demand', async () => {
+    const api = stubApi();
+    api.getRemarks.mockResolvedValue([first, reworded, elsewhere, other]);
+    render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => header('gaps').getAttribute('aria-expanded') === 'true');
+    const ids = () => within(row('gaps')).getAllByTestId('remark').map((c) => c.getAttribute('data-remark'));
+    expect(ids()).toEqual(['r_g1', 'r_g3', 'r_g4']);
+    // The count on the row is issues, not near-duplicates.
+    expect(within(header('gaps')).getByText('3 remarks')).toBeTruthy();
+    const more = within(row('gaps')).getByRole('button', { name: '2 similar' });
+    expect(more.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(more);
+    expect(ids()).toEqual(['r_g1', 'r_g2', 'r_g3', 'r_g4']);
+  });
+
+  it('"new" compares ids and similarity: a reworded remark found again by a run is not new', async () => {
+    const api = stubApi();
+    api.getRemarks.mockResolvedValue([first]);
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => row('gaps').textContent?.includes('last run'));
+    act(() => push({ type: 'checks.status', running: ['gaps'] }));
+    // The run replaces r_g1 by its rewording and finds one new issue.
+    const fresh = remark('r_g5', { origin: 'check:gaps', anchor: { kind: 'slide', slide: 's3' }, text: 'The abstract promises a demo that no slide shows.', createdAt: '2026-09-30T10:31:00.000Z' });
+    api.getRemarks.mockResolvedValue([{ ...first, status: 'resolved' }, reworded, fresh]);
+    act(() => push({ type: 'remarks.changed' }));
+    await waitFor(() => within(row('gaps')).queryAllByTestId('remark').length === 2);
+    act(() => push({ type: 'checks.status', running: [] }));
+    const card = (id: string) => within(row('gaps')).getAllByTestId('remark').find((c) => c.getAttribute('data-remark') === id)!;
+    await waitFor(() => within(card('r_g5')).queryByTestId('remark-new'));
+    expect(within(card('r_g2')).queryByTestId('remark-new')).toBeNull();
+  });
+
+  it('design: the rules field links to the first slide to preview them, and the built-in image style is a code block', async () => {
+    const navigate = vi.fn();
+    render(<BriefChecks api={stubApi()} subscribe={noEvents} navigate={navigate} />);
+    const link = await screen.findByRole('link', { name: 'preview on a slide' });
+    expect(link.getAttribute('href')).toBe('/slide/s1');
+    fireEvent.click(link);
+    expect(navigate).toHaveBeenCalledWith('/slide/s1');
+    fireEvent.click(await screen.findByRole('button', { name: 'show built-in style' }));
+    const code = screen.getByTestId('builtin-style');
+    expect(code.tagName).toBe('CODE');
+    expect(code.parentElement!.tagName).toBe('PRE');
+    expect(code.textContent).toBe(DEFAULT_STYLE);
   });
 });
