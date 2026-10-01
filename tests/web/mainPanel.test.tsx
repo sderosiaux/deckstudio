@@ -156,6 +156,9 @@ describe('Main selection panel', () => {
     expect(sheetLayout(30, 900, 600)).toEqual({ cols: 6, cell: 140 });
     // Never above 320px: a short deck spreads over more columns instead.
     expect(sheetLayout(2, 1400, 900).cell).toBeLessThanOrEqual(320);
+    // Paper under the last line that would hold over half a line is worse than a last line the rail cuts: one column
+    // fewer, larger cells, and the canvas scrolls. 30 slides in 1350x400: 10 per line fit with 100px to spare, so 9.
+    expect(sheetLayout(30, 1350, 400)).toEqual({ cols: 9, cell: 139 });
     // No room at all: as many 112px+ cells per line as the width holds; the canvas scrolls.
     const tight = sheetLayout(30, 900, 100);
     expect(tight.cell).toBeGreaterThanOrEqual(112);
@@ -168,10 +171,18 @@ describe('Main selection panel', () => {
     // 1920: the height stops the render at 1183px; the 273px left beside it hold the neighbours.
     const wide = stageLayout(1, 700, 1480);
     expect(wide.maxW).toBe(1183);
-    expect(wide.side).toBe(1480 - 1183 - 24);
-    // Under 160px a neighbour is not readable: no side column. Over 360px, it stops at 360.
-    expect(stageLayout(1, 700, 1350).side).toBe(0);
+    // 12px between them: with the card's own padding, 24px between the render and its neighbours.
+    expect(wide.side).toBe(1480 - 1183 - 12);
+    // Between 112px and 360px the neighbours take what is left; over 360px, it stops at 360.
+    expect(stageLayout(1, 700, 1350).side).toBe(1350 - 1183 - 12);
     expect(stageLayout(1, 400, 1800).side).toBe(360);
+    // 1440: less than 112px left beside the render: it gives up a few percent of its width for a 112px column of
+    // neighbours rather than leave a strip of paper between it and the conversation.
+    const tight = stageLayout(1, 560, 1032);
+    expect(tight.side).toBe(112);
+    expect(tight.maxW).toBe(1032 - 112 - 12);
+    // Not when the render would lose more than a fifth of its width: then no side column.
+    expect(stageLayout(1, 560, 700)).toMatchObject({ side: 0 });
     // A range lays its slides in a near-square grid: 4 slides, 2 by 2.
     expect(stageLayout(4, 600, 1200)).toMatchObject({ cols: 2, rows: 2 });
     // Not measured yet (jsdom, first paint): no cap, no side column.
@@ -194,6 +205,19 @@ describe('Main selection panel', () => {
     cleanup();
     render(<StageNeighbours order={order} slides={deck.slides} thumbs={thumbs} start={3} span={3} width={300} onPick={pick} onOpen={vi.fn()} />);
     expect(screen.getAllByTestId('stage-neighbour').map((x) => x.getAttribute('data-slide'))).toEqual(['s3']);
+  });
+
+  it('the neighbour column runs the height of the stage: one slide before, then as many after as the height holds', () => {
+    const thumbs = Object.fromEntries(order.map((id) => [id, `/t/${id}.png`]));
+    // 160px wide: 90px frames, a 22px label, 12px apart, a 20px caption per group: 600px hold four.
+    render(<StageNeighbours order={order} slides={deck.slides} thumbs={thumbs} start={1} span={1} width={160} height={600} onPick={vi.fn()} onOpen={vi.fn()} />);
+    expect(screen.getAllByTestId('stage-neighbour').map((x) => x.getAttribute('data-slide'))).toEqual(['s1', 's3', 's4', 's5']);
+    expect(screen.getAllByTestId('stage-neighbour-group').map((g) => g.getAttribute('data-side'))).toEqual(['previous', 'next']);
+    cleanup();
+    // Near the end of the deck the column runs back instead: the slides before fill it.
+    render(<StageNeighbours order={order} slides={deck.slides} thumbs={thumbs} start={order.length - 1} span={1} width={160} height={600} onPick={vi.fn()} onOpen={vi.fn()} />);
+    expect(screen.getAllByTestId('stage-neighbour')).toHaveLength(Math.min(4, order.length - 1));
+    expect(screen.getAllByTestId('stage-neighbour-group').map((g) => g.getAttribute('data-side'))).toEqual(['previous']);
   });
 
   it('a selected slide opens the stage under the strip, its render alone and large above the lane rows; the slide:<id> conversation takes the column beside it', async () => {
@@ -348,9 +372,9 @@ describe('Main selection panel', () => {
       fireEvent.click(thumb('s3'));
       await waitFor(() => panel());
       const render = screen.getByTestId('stage-render');
-      // 700 less the strip (160), what sits above the stage (28) and 16 of clearance: 496px, of which the card's
-      // label and padding take 48, so a 448px-high frame, 796px wide, plus the card's 24px of side padding.
-      await waitFor(() => render.style.maxWidth === '820px');
+      // 700 less the strip (160), what sits above the stage (28) and 4 of clearance: 508px, of which the card's
+      // label and padding take 48, so a 460px-high frame, 817px wide, plus the card's 24px of side padding.
+      await waitFor(() => render.style.maxWidth === '841px');
     } finally {
       Object.defineProperty(HTMLElement.prototype, 'offsetHeight', desc);
       Object.defineProperty(Element.prototype, 'clientHeight', cdesc);
