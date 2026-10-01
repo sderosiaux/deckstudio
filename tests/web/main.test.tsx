@@ -588,7 +588,7 @@ describe('Main QA1', () => {
     expect(canvas.scrollLeft).toBe(120);
   });
 
-  it('the lane rows scroll inside the canvas; the versions rail sits outside it and the canvas keeps a bottom padding of its height', async () => {
+  it('the lane rows scroll inside the canvas; the versions rail sits outside it, right under the canvas with no blank band', async () => {
     const third = mkLane('l3', 's1', '2026-09-30T00:00:02.000Z');
     const all = [...lanes, third];
     m.getLanes.mockImplementation(async (status?: string) => (status === undefined ? all : []));
@@ -610,7 +610,7 @@ describe('Main QA1', () => {
       expect(canvas.contains(last)).toBe(true);
       expect(canvas.contains(rail)).toBe(false);
       expect(canvas.style.overflow).toBe('auto');
-      await waitFor(() => canvas.style.paddingBottom === '96px');
+      expect(canvas.style.paddingBottom).toBe('24px');
     } finally {
       Object.defineProperty(HTMLElement.prototype, 'offsetHeight', desc);
     }
