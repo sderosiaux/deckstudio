@@ -1,5 +1,6 @@
 import { access } from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { Change, Lane } from '../../model/types.js';
 import type { ThumbService } from '../../render/thumbs.js';
 import type { DeckStore } from '../../store/deckStore.js';
 import type { Bus } from '../bus.js';
@@ -12,6 +13,29 @@ type Params = { id: string };
 type ChangeParams = { id: string; cid: string };
 type ListQuery = { status?: string };
 const LIST_STATUSES = ['draft', 'open', 'all'] as const;
+
+/** A lane as the routes answer it: each pending modify lists its variants (see withVariants). */
+export type LaneView = Omit<Lane, 'changes'> & { changes: (Change & { variantOf?: string[] })[] };
+
+const modifiedFields = (l: Lane): Set<string> =>
+  new Set(l.changes.flatMap((c) => (c.kind === 'modify' && c.status === 'pending' ? Object.keys(c.patch).map((f) => `${c.slide}\u0000${f}`) : [])));
+
+/**
+ * Adds `variantOf` to each pending modify: the ids of the other open lanes with a pending modify of the same field
+ * of the same slide. Computed at read time, never stored: accepting one variant orphans the others on rebase.
+ */
+export function withVariants(lanes: readonly Lane[], open: readonly Lane[]): LaneView[] {
+  const fields = open.map((l) => ({ id: l.id, fields: modifiedFields(l) }));
+  return lanes.map((lane) => ({
+    ...lane,
+    changes: lane.changes.map((c) => {
+      if (c.kind !== 'modify' || c.status !== 'pending') return c;
+      const keys = Object.keys(c.patch).map((f) => `${c.slide}\u0000${f}`);
+      const variantOf = fields.filter((o) => o.id !== lane.id && keys.some((k) => o.fields.has(k))).map((o) => o.id);
+      return { ...c, variantOf };
+    }),
+  }));
+}
 
 export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneService, thumbs: ThumbService, bus: Bus): void {
   const inflight = new Set<string>();
@@ -28,7 +52,8 @@ export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneSe
       return reply.code(400).send({ error: `invalid status "${status}": expected ${LIST_STATUSES.join(', ')}` });
     }
     const all = await store.lanes();
-    return status === 'all' ? all : all.filter((l) => l.status === status);
+    const open = all.filter((l) => l.status === 'open');
+    return withVariants(status === 'all' ? all : all.filter((l) => l.status === status), open);
   });
 
   app.post<{ Params: Params }>('/api/lanes/:id/open', async (req, reply) => {
@@ -42,7 +67,8 @@ export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneSe
   app.get<{ Params: Params }>('/api/lanes/:id', async (req, reply) => {
     const lane = await store.lane(req.params.id);
     if (!lane) return reply.code(404).send({ error: `unknown lane ${req.params.id}` });
-    return lane;
+    const open = (await store.lanes()).filter((l) => l.status === 'open');
+    return withVariants([lane], open)[0];
   });
 
   app.post<{ Params: ChangeParams }>('/api/lanes/:id/changes/:cid/accept', async (req, reply) => {

@@ -69,29 +69,116 @@ function isNoOpMove(snap: Snapshot, change: Change): boolean {
   return change.after === null ? i === 0 : i > 0 && snap.order[i - 1] === change.after;
 }
 
+const sameValue = (a: unknown, b: unknown): boolean =>
+  Array.isArray(a) && Array.isArray(b) ? a.length === b.length && a.every((x, i) => x === b[i]) : a === b;
+
+/** Same content, whatever the id. */
+const sameContent = (a: Slide, b: Slide): boolean => PATCH_FIELDS.every((f) => fieldEqual(a, b, f));
+
+/** The cause recorded when a pending change turns out to be on main already. */
+export const ALREADY_ON_MAIN = 'already on main';
+
 /**
- * Marks as 'orphan' the pending changes that no longer mean anything on `snap`: those whose referenced slides no
- * longer exist, and moves whose slide already sits at its target. A slide inserted by an earlier live
- * (pending/accepted) change of the same lane counts as existing, so "insert n1, then insert after n1" survives,
- * and a move is judged on main as the lane's earlier pending changes leave it. Non-pending changes are left untouched.
+ * True when applying the pending `change` to `main` would leave it as it is: a modify whose values main already
+ * holds, a move to where the slide already sits, an insert of a slide identical to the one right after the same
+ * predecessor, a remove of a slide no longer there (and not inserted by the lane itself).
  */
-export function rebaseLane(lane: Lane, snap: Snapshot): Lane {
-  const known = new Set<SlideId>(snap.order.filter((id) => Object.hasOwn(snap.slides, id)));
+function alreadyOnMain(main: Snapshot, change: Change, laneInserted: ReadonlySet<SlideId>): boolean {
+  switch (change.kind) {
+    case 'modify': {
+      const cur = main.slides[change.slide];
+      if (cur === undefined || !main.order.includes(change.slide)) return false;
+      return Object.entries(change.patch).every(([f, v]) => v === undefined || sameValue(cur[f as keyof Slide], v));
+    }
+    case 'move':
+      return isNoOpMove(main, change);
+    case 'insert': {
+      const i = change.after === null ? 0 : main.order.indexOf(change.after) + 1;
+      if (change.after !== null && i === 0) return false;
+      const next = main.order[i];
+      const s = next === undefined ? undefined : main.slides[next];
+      return s !== undefined && sameContent(s, change.slide);
+    }
+    case 'remove':
+      return !main.order.includes(change.slide) && !laneInserted.has(change.slide);
+  }
+}
+
+/** Fields of a pending modify that main changed since `base` to something else than the patch's value. */
+function staleFields(base: Snapshot, main: Snapshot, change: Change): string[] {
+  if (change.kind !== 'modify') return [];
+  const was = base.slides[change.slide];
+  const now = main.slides[change.slide];
+  if (was === undefined || now === undefined) return [];
+  return Object.entries(change.patch).flatMap(([f, v]) => {
+    if (v === undefined) return [];
+    const k = f as keyof Slide;
+    return !sameValue(was[k], now[k]) && !sameValue(now[k], v) ? [f] : [];
+  });
+}
+
+export interface Rebased {
+  lane: Lane;
+  /** Change id → why the rebase decided it (orphan or accepted). Changes left pending have no entry. */
+  causes: Record<string, string>;
+}
+
+/**
+ * Re-judges the pending changes of `lane` on `main`; `base` is main at the lane's baseVersion. A pending change is:
+ * - 'accepted' (cause "already on main") when applying it would leave main as it is;
+ * - 'orphan' when a slide it references no longer exists, when it is a modify of a field main changed since the
+ *   lane's base to another value (it would silently overwrite that change), or a move an earlier pending change of
+ *   the lane already makes;
+ * - left pending otherwise.
+ * The lane's own accepted changes count as part of its base, so they never make its other changes stale. A slide
+ * inserted by an earlier live change of the same lane counts as existing, so "insert n1, then insert after n1"
+ * survives, and a move is judged on main as the lane's earlier pending changes leave it. Decided changes are untouched.
+ */
+export function rebaseLane(lane: Lane, main: Snapshot, base: Snapshot): Rebased {
+  const known = new Set<SlideId>(main.order.filter((id) => Object.hasOwn(main.slides, id)));
+  const laneInserted = new Set<SlideId>();
+  // The base as the lane sees it: its own accepted changes are not "main changed since".
+  let seen = base;
+  for (const c of lane.changes) {
+    if (c.status !== 'accepted') continue;
+    const r = applyChange(seen, c);
+    if (r.ok) seen = r.next;
+  }
+  const causes: Record<string, string> = {};
   // Main with the lane's surviving pending changes applied so far: where a move would start from.
-  let sim = snap;
+  let sim = main;
   const changes = lane.changes.map((c): Change => {
     if (c.status !== 'pending') {
-      if (c.kind === 'insert' && c.status === 'accepted') known.add(c.slide.id);
+      if (c.kind === 'insert' && c.status === 'accepted' && main.order.includes(c.slide.id)) known.add(c.slide.id);
       return c;
     }
-    const orphan = referencedSlides(c).some((id) => !known.has(id)) || isNoOpMove(sim, c);
-    if (orphan) return { ...c, status: 'orphan' };
-    if (c.kind === 'insert') known.add(c.slide.id);
+    // On main, and as the lane's earlier pending changes leave it: an earlier move may still displace this one.
+    if (alreadyOnMain(main, c, laneInserted) && alreadyOnMain(sim, c, laneInserted)) {
+      causes[c.id] = ALREADY_ON_MAIN;
+      return { ...c, status: 'accepted' };
+    }
+    if (referencedSlides(c).some((id) => !known.has(id))) {
+      causes[c.id] = 'a slide it needs is no longer on main';
+      return { ...c, status: 'orphan' };
+    }
+    if (isNoOpMove(sim, c)) {
+      causes[c.id] = 'an earlier change of this lane already puts the slide there';
+      return { ...c, status: 'orphan' };
+    }
+    const stale = staleFields(seen, main, c);
+    if (stale.length) {
+      causes[c.id] = `${stale.join(', ')} changed on main since v${lane.baseVersion}`;
+      return { ...c, status: 'orphan' };
+    }
+    if (c.kind === 'insert') {
+      known.add(c.slide.id);
+      laneInserted.add(c.slide.id);
+    }
     const r = applyChange(sim, c);
     if (r.ok) sim = r.next;
     return c;
   });
-  return { ...lane, changes };
+  return { lane: { ...lane, changes }, causes };
 }
 
 const PATCH_FIELDS = ['title', 'story', 'notes', 'body', 'assets', 'kind'] as const satisfies readonly (keyof SlidePatch)[];

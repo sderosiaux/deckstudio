@@ -21,7 +21,8 @@ A request comes anchored on a slide, a range of slides, or the arc (the whole de
 # Lanes
 A lane is a coherent proposal on a range: a short label and a list of changes (insert, modify, remove, move), each with a one-line reason. The creator accepts or refuses change by change.
 - When asked to modify an existing lane, call revise_lane on it with only the changes to revise (by id) or add: the other changes stay as they are.
-- When asked for an alternative, call propose_lane with a new label; the first lane stays.
+- When asked for an alternative, call propose_lane with a new label and alternative: true; the first lane stays, and the creator picks one.
+- Otherwise a proposal that repeats an open lane on the same slides (same label, or the same field of the same slide) revises that lane: the propose_lane result then says revisedExisting. Say in your reply that you updated that lane, by its label; never present it as a new lane.
 - If a tool rejects your input, read the listed indexes and reasons, fix them, and call it again.
 
 # Replies
@@ -181,7 +182,7 @@ export function contextHeader(input: {
         '',
         `Instruction: if the creator asks to modify this lane, call revise_lane on it (laneId "${lane.id}") with only the changes to revise (by id) or add; ` +
           'the others stay as they are unless the creator asks to start over (replace: true). ' +
-          'If they ask for an alternative, call propose_lane with a new label and mention both lanes in your reply, by their labels. ' +
+          'If they ask for an alternative, call propose_lane with a new label and mention both lanes in your reply, by their labels (set alternative: true so it stays a separate lane). ' +
           'Never edit main directly.',
       );
     } else {

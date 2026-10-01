@@ -1,5 +1,5 @@
-import { hashSlide } from '../model/ids.js';
-import { applyChange, rebaseLane } from '../model/ops.js';
+import { hashSlide, newId } from '../model/ids.js';
+import { ALREADY_ON_MAIN, applyChange, rebaseLane } from '../model/ops.js';
 import type { Change, Lane, Remark, SlideId, Snapshot, Version } from '../model/types.js';
 import type { DeckStore } from '../store/deckStore.js';
 import type { Bus } from './bus.js';
@@ -47,19 +47,79 @@ export interface LaneRebase {
   remarksChanged: boolean;
 }
 
+/** Main at the lane's base version; main itself when that version cannot be read (no staleness is then detected). */
+async function baseOf(store: DeckStore, n: number, main: Snapshot, cache: Map<number, Snapshot>): Promise<Snapshot> {
+  const hit = cache.get(n);
+  if (hit) return hit;
+  const snap = await store.snapshotAt(n).catch(() => main);
+  cache.set(n, snap);
+  return snap;
+}
+
+/** "slide N (title)" on main, the quoted title of a slide main no longer has, or "a slide". */
+function slideLabel(id: SlideId, main: Snapshot, base: Snapshot): string {
+  const i = main.order.indexOf(id);
+  if (i >= 0) return `slide ${i + 1} (${main.slides[id]!.title})`;
+  const was = base.slides[id];
+  return was ? `the slide "${was.title}"` : 'a slide';
+}
+
+function describeChange(c: Change, main: Snapshot, base: Snapshot): string {
+  switch (c.kind) {
+    case 'modify':
+      return `the ${listOf(Object.keys(c.patch))} of ${slideLabel(c.slide, main, base)}`;
+    case 'insert':
+      return `the new slide "${c.slide.title}"`;
+    case 'remove':
+      return `removing ${slideLabel(c.slide, main, base)}`;
+    case 'move':
+      return `moving ${slideLabel(c.slide, main, base)}`;
+  }
+}
+
+const listOf = (xs: readonly string[]): string => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)!}`);
+const capitalize = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** One line per change the rebase decided, then whether the lane closed; null when nothing was decided. */
+export function rebaseNote(next: Lane, causes: Record<string, string>, main: Snapshot, base: Snapshot): string | null {
+  const lines = next.changes.flatMap((c) => {
+    const cause = causes[c.id];
+    if (cause === undefined) return [];
+    const what = capitalize(describeChange(c, main, base));
+    return [cause === ALREADY_ON_MAIN ? `${what}: already on main, nothing to decide.` : `${what} no longer applies: ${cause}.`];
+  });
+  if (lines.length === 0) return null;
+  if (next.status === 'closed') lines.push('Nothing is left to decide in this lane, so it is closed.');
+  return lines.join(' ');
+}
+
 /**
- * Call under the deck lock right after a commit moved main to `main`. Rebases every open lane on it (orphaning changes
- * that no longer apply), closes lanes left without a pending change and resolves their remarks. `touched` is a lane
- * the caller already modified (the one whose change was just accepted): it is always written and listed first.
+ * Call under the deck lock. Re-judges the lane's pending changes on `main` (see rebaseLane), closes it when nothing is
+ * left pending, and records in the lane's thread why changes were decided. Does not write the lane.
+ */
+export async function rebaseOnMain(store: DeckStore, lane: Lane, main: Snapshot, cache = new Map<number, Snapshot>()): Promise<Lane> {
+  const base = await baseOf(store, lane.baseVersion, main, cache);
+  const { lane: rebased, causes } = rebaseLane(lane, main, base);
+  const next: Lane = hasPending(rebased) ? rebased : { ...rebased, status: 'closed' };
+  const note = rebaseNote(next, causes, main, base);
+  if (note) await store.appendMessage({ id: newId('m'), thread: `lane:${lane.id}`, role: 'assistant', text: note, context: null, at: new Date().toISOString() });
+  return next;
+}
+
+/**
+ * Call under the deck lock right after a commit moved main to `main` (or whenever main may have moved under the
+ * lanes). Rebases every open lane on it (orphaning stale changes, accepting those already on main), closes lanes
+ * left without a pending change and resolves their remarks. `touched` is a lane the caller already modified (the
+ * one whose change was just accepted): it is always written and listed first.
  * Draft lanes are rebased too (they may end up closed) but otherwise stay drafts.
  */
 export async function rebaseOpenLanesAfterMain(store: DeckStore, main: Snapshot, touched?: Lane): Promise<LaneRebase> {
   // Drafts are rebased like open lanes: main moved under them too.
   const others = (await store.lanes()).filter((l) => l.status !== 'closed' && l.id !== touched?.id);
   const lanes: Lane[] = [];
+  const cache = new Map<number, Snapshot>();
   for (const l of touched ? [touched, ...others] : others) {
-    const rebased = rebaseLane(l, main);
-    const next: Lane = hasPending(rebased) ? rebased : { ...rebased, status: 'closed' };
+    const next = await rebaseOnMain(store, l, main, cache);
     if (l !== touched && JSON.stringify(next) === JSON.stringify(l)) continue;
     await store.putLane(next);
     lanes.push(next);
@@ -114,7 +174,8 @@ export class LaneService {
       const lane = await this.actionableLane(laneId);
       this.pendingChange(lane, changeId);
       const refused: Lane = { ...this.withStatus(lane, changeId, 'refused'), status: 'open' };
-      const next: Lane = hasPending(refused) ? refused : { ...refused, status: 'closed' };
+      // Main may have moved since the lane was last judged: what is left pending is re-judged on it.
+      const next = await rebaseOnMain(this.store, refused, await this.store.snapshot());
       await this.store.putLane(next);
       const remarksChanged = next.status === 'closed' && (await this.resolveRemarksOf([next.id]));
       return { next, remarksChanged };
@@ -130,15 +191,18 @@ export class LaneService {
       const lane = await this.store.lane(laneId);
       if (!lane) throw new LaneError(404, `unknown lane ${laneId}`);
       if (lane.status === 'closed') throw new LaneError(409, `lane ${laneId} is closed`);
-      if (lane.status === 'open') return { lane, changed: false };
-      const next: Lane = { ...lane, status: 'open' };
+      if (lane.status === 'open') return { lane, changed: false, remarksChanged: false };
+      // A draft may have waited while main moved: it opens judged on current main, and closes if nothing is left.
+      const next = await rebaseOnMain(this.store, { ...lane, status: 'open' }, await this.store.snapshot());
       await this.store.putLane(next);
-      return { lane: next, changed: true };
+      const remarksChanged = next.status === 'closed' && (await this.resolveRemarksOf([next.id]));
+      return { lane: next, changed: true, remarksChanged };
     });
     if (out.changed) {
-      this.bus.emit({ type: 'lane.updated', laneId });
-      this.bus.emit({ type: 'lane.opened', laneId });
+      emitLane(this.bus, out.lane);
+      if (out.lane.status === 'open') this.bus.emit({ type: 'lane.opened', laneId });
     }
+    if (out.remarksChanged) this.bus.emit({ type: 'remarks.changed' });
     return out.lane;
   }
 

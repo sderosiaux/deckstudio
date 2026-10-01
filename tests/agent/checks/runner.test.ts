@@ -478,7 +478,16 @@ describe('CheckRunner', () => {
   it('a run drops remarks whose slide left main (unless found on a lane preview) and resolves leftovers of closed lanes', async () => {
     const base = { origin: 'check:arc' as const, severity: 'warn' as const, status: 'open' as const, laneId: null, createdAt: '2026-09-30T00:00:00.000Z' };
     await store.putLane({ id: 'l_closed', label: 'x', anchor: { kind: 'arc' }, origin: 'user', baseVersion: 1, changes: [], status: 'closed', createdAt: base.createdAt });
-    await store.putLane({ id: 'l_open', label: 'y', anchor: { kind: 'arc' }, origin: 'user', baseVersion: 1, changes: [], status: 'open', createdAt: base.createdAt });
+    await store.putLane({
+      id: 'l_open',
+      label: 'y',
+      anchor: { kind: 'arc' },
+      origin: 'user',
+      baseVersion: 1,
+      changes: [{ id: 'c1', kind: 'modify', slide: 's2', patch: { title: 'Y' }, reason: 'r', status: 'pending' }],
+      status: 'open',
+      createdAt: base.createdAt,
+    });
     await store.putRemarks([
       { ...base, id: 'r_gone', anchor: { kind: 'slide', slide: 's9' }, text: 'gone', origin: 'user' },
       { ...base, id: 'r_leftover', anchor: { kind: 'slide', slide: 'n1' }, text: 'leftover', origin: 'check:render', sourceLaneId: 'l_closed' },
@@ -491,6 +500,78 @@ describe('CheckRunner', () => {
       ['r_preview', 'open'],
       ['r_user', 'open'],
     ]);
+  });
+
+  it('QA3 render lanes must change what is rendered: a notes-only lane is dropped, the remark stays without a draft', async () => {
+    await thumbs.start();
+    const notesOnly = { label: 'Explain the sub-caption', anchor: { kind: 'slide', slide: 's2' }, changes: [{ kind: 'modify', slide: 's2', patch: { notes: 'say it' }, reason: 'r' }] };
+    const storyOnly = { label: 'Retell', anchor: { kind: 'slide', slide: 's3' }, changes: [{ kind: 'modify', slide: 's3', patch: { story: 'x', notes: 'y' }, reason: 'r' }] };
+    const visual = { label: 'Enlarge the trigger sub-caption', anchor: { kind: 'slide', slide: 's4' }, changes: [{ kind: 'modify', slide: 's4', patch: { body: '<p class="big">x</p>', notes: 'n' }, reason: 'r' }] };
+    const { r } = runner([JSON.stringify({ remarks: [
+      { anchor: { kind: 'slide', slide: 's2' }, severity: 'warn', text: 'sub-caption at 17px', lane: notesOnly },
+      { anchor: { kind: 'slide', slide: 's3' }, severity: 'warn', text: 'overlap', lane: storyOnly },
+      { anchor: { kind: 'slide', slide: 's4' }, severity: 'warn', text: 'tiny caption', lane: visual },
+    ] })]);
+    const out = await r.run('render');
+    expect(out.lanes.map((l) => l.label)).toEqual(['Enlarge the trigger sub-caption']);
+    const remarks = await store.remarks();
+    expect(remarks.map((x) => [x.text, x.laneId === null])).toEqual([
+      ['sub-caption at 17px', true],
+      ['overlap', true],
+      ['tiny caption', false],
+    ]);
+    expect(await store.lanes()).toHaveLength(1);
+  });
+
+  it('QA3 the render prompt asks for lanes that change the render, labelled by the fix with the slide in the reason', () => {
+    const p = CHECKS.render.buildPrompt({ brief, snap: snap(five), deckOrder: snap(five).order, thumbs: { s1: '/t/s1.png' }, allowLanes: true });
+    expect(p).toMatch(/must change what is rendered \(the body or the title\)/);
+    expect(p).toMatch(/never only the notes or the story/);
+    const contract = CHECKS.order.buildPrompt({ brief, snap: snap(five), deckOrder: snap(five).order, allowLanes: true });
+    expect(contract).toMatch(/"label" names the fix, not the slide/);
+    expect(contract).toContain('Enlarge the trigger sub-caption');
+    expect(contract).toMatch(/name the slide in the reason/i);
+  });
+
+  it('QA3 a reworded finding on the same anchor keeps its id and createdAt and takes the new text; distinct findings stay apart', async () => {
+    await runner([JSON.stringify({ remarks: [
+      item('s2', 'The sub-caption on s2 renders at about 17px, below the readable floor.'),
+      item('s2', 'The caption is under 24px.'),
+    ] })]).r.run('order');
+    const old = '2026-01-01T00:00:00.000Z';
+    await store.putRemarks((await store.remarks()).map((x) => ({ ...x, createdAt: old })));
+    const [sub, caption] = await store.remarks();
+    await runner([JSON.stringify({ remarks: [
+      item('s2', 'On s2 the sub-caption renders around 17px, under the readable floor.'),
+      item('s2', 'On s2 the sub-caption renders near 17px, under the readable floor!'),
+      item('s2', 'The footer is under 24px.'),
+      item('s3', 'The caption is under 24px.'),
+    ] })]).r.run('order');
+    const after = await store.remarks();
+    expect(after.map((x) => [x.id === sub!.id ? 'sub' : x.id === caption!.id ? 'caption' : 'new', x.anchor.kind === 'slide' ? x.anchor.slide : '', x.text, x.createdAt === old])).toEqual([
+      ['sub', 's2', 'On s2 the sub-caption renders around 17px, under the readable floor.', true],
+      ['new', 's2', 'The footer is under 24px.', false],
+      ['new', 's3', 'The caption is under 24px.', false],
+    ]);
+  });
+
+  it('a run rebases the lanes on main first: a draft whose change main already took is closed', async () => {
+    const lane: Lane = {
+      id: 'l_d',
+      label: 'Same title',
+      anchor: { kind: 'slide', slide: 's2' },
+      origin: 'check:arc',
+      baseVersion: 1,
+      changes: [{ id: 'c1', kind: 'modify', slide: 's2', patch: { title: 'Taken' }, reason: 'r', status: 'pending' }],
+      status: 'draft',
+      createdAt: new Date().toISOString(),
+    };
+    await store.putLane(lane);
+    const main = await store.snapshot();
+    await store.commit({ ...main, slides: { ...main.slides, s2: { ...main.slides.s2!, title: 'Taken' } } }, { kind: 'import' });
+    await runner([JSON.stringify({ remarks: [] })]).r.run('order');
+    expect(await store.lane('l_d')).toMatchObject({ status: 'closed', changes: [{ status: 'accepted' }] });
+    expect(events).toContainEqual({ type: 'lane.closed', laneId: 'l_d' });
   });
 
   it('lastRun survives a restart: a new runner on the same deck reads it back', async () => {
