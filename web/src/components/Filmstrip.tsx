@@ -1,5 +1,5 @@
 import type { Slide, SlideId } from '../../../src/model/types.js';
-import { Thumb, type ThumbTitleLink } from './Thumb.js';
+import { Thumb, type RemarkDot, type ThumbTitleLink } from './Thumb.js';
 
 export interface FilmstripProps {
   order: SlideId[];
@@ -16,10 +16,12 @@ export interface FilmstripProps {
   fullLabel?: string;
   /** Makes the selected slide's title line a link (main: to its edit screen). */
   titleLink?(id: SlideId): ThumbTitleLink | undefined;
+  /** Open remarks per slide (main): a count dot on the thumb, coloured by the worst severity. */
+  remarkDots?: Record<SlideId, RemarkDot | undefined>;
 }
 
 /** A row of slide thumbnails in deck order, its name in the gutter. The canvas around it scrolls, not the row. */
-export function Filmstrip({ order, slides, thumbs, selected, onSelect, onOpen, label = 'main', fullLabel, titleLink }: FilmstripProps) {
+export function Filmstrip({ order, slides, thumbs, selected, onSelect, onOpen, label = 'main', fullLabel, titleLink, remarkDots }: FilmstripProps) {
   const picked = new Set<SlideId>(selected === undefined ? [] : typeof selected === 'string' ? [selected] : selected);
   const range = picked.size > 1;
   return (
@@ -42,6 +44,9 @@ export function Filmstrip({ order, slides, thumbs, selected, onSelect, onOpen, l
                 onClick={() => onSelect(id)}
                 onDoubleClick={onOpen ? () => onOpen(id) : undefined}
                 titleLink={!range && picked.has(id) ? titleLink?.(id) : undefined}
+                // A range is named by its caption under the strip: a hover title would sit on top of it.
+                hoverTitle={!range}
+                remarks={remarkDots?.[id]}
               />
             </div>
           );

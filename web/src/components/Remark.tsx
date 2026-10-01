@@ -111,6 +111,8 @@ export interface PostItProps {
   selected?: boolean;
   /** The lane linked to this remark is open on main: the card names it, as a link that brings its row into view. */
   openedLane?: { label: string; onShow(): void } | undefined;
+  /** A click on the text opens it whole (and closes it again); without it the text stays cut at three lines. */
+  expandable?: boolean;
 }
 
 /** A click on a card's action is that action only: it never reaches the card, which selects the remark's slides. */
@@ -179,7 +181,8 @@ function WordClamp({ text, lines }: { text: string; lines: number }) {
 }
 
 /** A remark pinned under its slide: a plain card with the text (three lines at most, cut after a word), propose and resolve. Fills its slot's width. */
-export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpenLane, selected = false, openedLane }: PostItProps) {
+export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpenLane, selected = false, openedLane, expandable = false }: PostItProps) {
+  const [expanded, setExpanded] = useState(false);
   const [state, setState] = useState<{ kind: 'idle' } | { kind: 'busy' } | { kind: 'sent' } | { kind: 'opened' } | { kind: 'error'; message: string }>({ kind: 'idle' });
   const draft = draftLaneId !== undefined && onOpenLane !== undefined && !openedLane;
   const act = (fn: () => Promise<unknown>, after: 'idle' | 'sent' | 'opened'): void => {
@@ -213,7 +216,20 @@ export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpen
         transition: 'border-color .15s ease',
       }}
     >
-      <WordClamp text={remark.text} lines={CLAMP_LINES} />
+      {expandable ? (
+        <button
+          type="button"
+          data-testid="remark-text"
+          aria-expanded={expanded}
+          onClick={only(() => setExpanded((x) => !x))}
+          title={expanded ? 'show less' : 'show the whole remark'}
+          style={{ all: 'unset', cursor: 'pointer', display: 'block', minWidth: 0 }}
+        >
+          {expanded ? <span style={{ display: 'block', lineHeight: LINE_H, color: 'var(--ink)', whiteSpace: 'pre-wrap' }}>{remark.text}</span> : <WordClamp text={remark.text} lines={CLAMP_LINES} />}
+        </button>
+      ) : (
+        <WordClamp text={remark.text} lines={CLAMP_LINES} />
+      )}
       {draft ? (
         <span data-testid="draft-ready" className="meta">
           {state.kind === 'opened' ? 'opening…' : 'draft ready'}
@@ -239,8 +255,14 @@ export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpen
           resolve
         </button>
         {state.kind === 'error' ? <span style={{ fontSize: 12, color: 'var(--warn)' }} title={state.message}>failed</span> : null}
-        {/* The severity is a fact about the remark, not an action: a muted tag at the end, and clicking it does nothing. */}
-        <span data-testid="severity-tag" className="tag" onClick={(e) => e.stopPropagation()} style={{ marginLeft: 'auto' }}>
+        {/* The severity is a fact about the remark, not an action: a plain coloured word at the end, and clicking it does nothing. */}
+        <span
+          data-testid="severity-tag"
+          className="severity"
+          data-severity={remark.severity}
+          onClick={(e) => e.stopPropagation()}
+          style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 500, color: remark.severity === 'warn' ? 'var(--warn)' : 'var(--grey)' }}
+        >
           {remark.severity}
         </span>
       </div>

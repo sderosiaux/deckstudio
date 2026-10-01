@@ -88,6 +88,7 @@ const emit = (e: BusEvent) => act(() => m.handlers.forEach((h) => h(e)));
 const callsFor = (fn: ReturnType<typeof vi.fn>, arg: string): number => fn.mock.calls.filter((c) => c[0] === arg).length;
 
 beforeEach(() => {
+  sessionStorage.clear();
   deck = deckV(3, mainSlides);
   m.handlers = [];
   m.getDeck.mockReset().mockImplementation(async () => deck);
@@ -126,6 +127,10 @@ const remark = (id: string, over: Partial<Remark>): Remark => ({
   ...over,
 });
 const remarkCount = (): string | null => screen.queryByTestId('remark-count')?.textContent ?? null;
+
+const mainThumb = (id: SlideId): HTMLElement => screen.getAllByTestId('thumb').find((t) => t.closest('[data-strip="main"]') && t.getAttribute('data-slide') === id)!;
+const laneRow = (laneId: string): HTMLElement => screen.getAllByTestId('lane-row').find((r) => r.getAttribute('data-lane') === laneId)!;
+const laneOrder = (): string[] => screen.getAllByTestId('lane-row').map((r) => r.getAttribute('data-lane')!);
 
 const laneCell = (laneId: string, slideId: SlideId): HTMLElement => {
   const row = screen.getAllByTestId('lane-row').find((r) => r.getAttribute('data-lane') === laneId)!;
@@ -328,51 +333,37 @@ describe('Main lane from history', () => {
 });
 
 describe('Main remarks', () => {
-  it('an open slide remark sits under its column, a range remark spans its columns; resolved ones are gone after remarks.changed', async () => {
+  it('open remarks are dots on their slides, not cards on the canvas; resolved ones are gone after remarks.changed', async () => {
     m.getRemarks.mockResolvedValue([
       remark('r_slide', { anchor: { kind: 'slide', slide: 's2' } }),
       remark('r_range', { anchor: { kind: 'range', from: 's3', to: 's5' }, severity: 'info' }),
       remark('r_done', { anchor: { kind: 'slide', slide: 's1' }, status: 'resolved' }),
     ]);
     await mounted();
-    // One row of cards: the two overlap (a card is at least three columns wide), so the second waits behind a count.
-    await waitFor(() => screen.queryAllByTestId('post-it').length === 1);
-    const slot = (id: string) => screen.getAllByTestId('post-it-slot').find((s) => within(s).getByTestId('post-it').getAttribute('data-remark') === id);
-    const cols = (id: string) => `${slot(id)!.getAttribute('data-col')}+${slot(id)!.getAttribute('data-span')}`;
-    expect(cols('r_slide')).toBe('1+1');
-    expect(slot('r_range')).toBeUndefined();
-    expect(screen.getByTestId('remarks-more').textContent).toContain('1 more remark');
-    expect(remarkCount()).toBe('2 open remarks');
-    // Selecting a slide of the range puts its remark first.
-    fireEvent.click(screen.getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's4')!);
-    await waitFor(() => slot('r_range') !== undefined);
-    expect(cols('r_range')).toBe('2+3');
-    expect(within(slot('r_range')!).getByTestId('post-it').getAttribute('data-selected')).toBe('true');
-    expect(slot('r_slide')).toBeUndefined();
+    await waitFor(() => remarkCount() === '2 open remarks');
+    const dot = (id: SlideId) => within(mainThumb(id)).queryByTestId('remark-dot');
+    expect(dot('s2')!.textContent).toBe('1');
+    expect(['s3', 's4', 's5'].map((id) => dot(id)?.getAttribute('data-severity'))).toEqual(['info', 'info', 'info']);
+    expect(dot('s1')).toBeNull();
+    expect(screen.queryAllByTestId('post-it')).toHaveLength(0);
+    expect(screen.queryByTestId('remarks-more')).toBeNull();
 
     m.getRemarks.mockResolvedValue([remark('r_slide', { anchor: { kind: 'slide', slide: 's2' }, status: 'resolved' })]);
     emit({ type: 'remarks.changed' });
-    await waitFor(() => screen.queryByTestId('post-its') === null);
+    await waitFor(() => screen.queryAllByTestId('remark-dot').length === 0);
     expect(remarkCount()).toBeNull();
   });
 
-  it('a lane-scoped remark shows under that lane cell, not under main, and does not count in the header', async () => {
+  it('a lane-scoped remark is counted in its lane gutter and listed there on demand, not under main nor in the header', async () => {
     m.getRemarks.mockResolvedValue([remark('r_lane', { anchor: { kind: 'slide', slide: 's3' }, sourceLaneId: 'l1' })]);
     await mounted();
-    const laneRemarks = (laneId: string) => {
-      const row = screen.getAllByTestId('lane-row').find((r) => r.getAttribute('data-lane') === laneId)!;
-      return within(row).queryAllByTestId('post-it-slot');
-    };
-    await waitFor(() => laneRemarks('l1').length === 1);
-    const [slot] = laneRemarks('l1');
-    expect(within(slot!).getByTestId('post-it').getAttribute('data-remark')).toBe('r_lane');
-    expect(slot!.getAttribute('data-slide')).toBe('s3');
-    expect(screen.queryByTestId('post-its')).toBeNull();
-    expect(screen.getAllByTestId('post-it')).toHaveLength(1);
-    expect(laneRemarks('l2')).toHaveLength(0);
+    const toggle = await waitFor(() => within(laneRow('l1')).queryByRole('button', { name: '1 check remark' }));
+    expect(screen.queryAllByTestId('post-it')).toHaveLength(0);
+    expect(within(laneRow('l2')).queryByRole('button', { name: /check remark/ })).toBeNull();
+    expect(screen.queryAllByTestId('remark-dot')).toHaveLength(0);
     expect(remarkCount()).toBeNull();
-
-    fireEvent.click(within(slot!).getByRole('button', { name: 'resolve' }));
+    fireEvent.click(toggle);
+    fireEvent.click(within(laneRow('l1')).getByRole('button', { name: 'resolve' }));
     expect(m.resolveRemark).toHaveBeenCalledWith('r_lane');
   });
 });
@@ -380,30 +371,74 @@ describe('Main remarks', () => {
 describe('Main draft lanes', () => {
   const draft: Lane = { ...mkLane('l3', 's4', '2026-09-30T00:00:02.000Z'), status: 'draft', origin: 'check:render' };
 
-  it('draft lanes are not rendered; a post-it linked to one offers "open lane", and the lane row appears after lane.updated', async () => {
+  it('draft lanes are not rendered; the remark in the panel offers "open lane", and the lane row appears first, flashed', async () => {
     drafts = [draft];
     m.getRemarks.mockResolvedValue([remark('r_d', { anchor: { kind: 'slide', slide: 's4' }, laneId: 'l3' })]);
     m.getLane.mockImplementation(async (id: string) => (id === 'l3' ? draft : lanes.find((l) => l.id === id)));
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      await mounted();
+      expect(m.getLanes).toHaveBeenCalledWith('draft');
+      fireEvent.click(mainThumb('s4'));
+      const postIt = await waitFor(() => screen.queryAllByTestId('post-it').find((p) => within(p).queryByTestId('draft-ready')));
+      expect(within(postIt).getByTestId('draft-ready').textContent).toBe('draft ready');
+      expect(within(postIt).queryByRole('button', { name: 'propose' })).toBeNull();
+      expect(laneOrder()).toEqual(['l2', 'l1']);
+
+      // A draft announced live stays off main too.
+      emit({ type: 'lane.updated', laneId: 'l3' });
+      await waitFor(() => callsFor(m.getLane, 'l3') === 1);
+      expect(screen.getAllByTestId('lane-row')).toHaveLength(2);
+
+      fireEvent.click(within(screen.getAllByTestId('post-it')[0]!).getByRole('button', { name: 'open lane' }));
+      expect(m.openLane).toHaveBeenCalledWith('l3');
+      m.getLane.mockImplementation(async (id: string) => (id === 'l3' ? { ...draft, status: 'open' } : lanes.find((l) => l.id === id)));
+      emit({ type: 'lane.updated', laneId: 'l3' });
+      await waitFor(() => screen.getAllByTestId('lane-row').length === 3);
+      expect(laneOrder()).toEqual(['l3', 'l2', 'l1']);
+      await waitFor(() => scrolled.mock.contexts.some((el) => (el as HTMLElement).id === 'lane-row-l3'));
+      expect(laneRow('l3').getAttribute('data-flash')).toBe('true');
+      await waitFor(() => screen.queryAllByTestId('draft-ready').length === 0);
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+});
+
+describe('Main one proposal, one place', () => {
+  afterEach(() => {
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it('lane rows list the newest first', async () => {
     await mounted();
-    expect(m.getLanes).toHaveBeenCalledWith('draft');
-    const postIt = await waitFor(() => screen.queryAllByTestId('post-it').find((p) => within(p).queryByTestId('draft-ready')));
-    expect(within(postIt).getByTestId('draft-ready').textContent).toBe('draft ready');
-    expect(within(postIt).queryByRole('button', { name: 'propose' })).toBeNull();
-    expect(screen.getAllByTestId('lane-row').map((r) => r.getAttribute('data-lane'))).toEqual(['l1', 'l2']);
+    expect(laneOrder()).toEqual(['l2', 'l1']);
+  });
 
-    // A draft announced live stays off main too.
-    emit({ type: 'lane.updated', laneId: 'l3' });
-    await waitFor(() => callsFor(m.getLane, 'l3') === 1);
-    await waitFor(() => screen.queryAllByTestId('post-it').some((p) => within(p).queryByRole('button', { name: 'open lane' })));
-    expect(screen.getAllByTestId('lane-row')).toHaveLength(2);
+  it('a lane revised by a request from the panel moves first, scrolls into view and flashes; a rebase afterwards does not', async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    await mounted();
+    fireEvent.click(mainThumb('s3'));
+    const input = screen.getByLabelText('message');
+    fireEvent.change(input, { target: { value: 'shorter title' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(m.postMessage).toHaveBeenCalledWith('slide:s3', 'shorter title', { kind: 'slide', slide: 's3' });
+    emit({ type: 'lane.updated', laneId: 'l1' });
+    await waitFor(() => laneOrder()[0] === 'l1');
+    await waitFor(() => scrolled.mock.contexts.some((el) => (el as HTMLElement).id === 'lane-row-l1'));
+    expect(laneRow('l1').getAttribute('data-flash')).toBe('true');
+    expect(laneRow('l2').getAttribute('data-flash')).toBeNull();
+    // The flash ends with its animation.
+    fireEvent(laneRow('l1'), new Event('animationend'));
+    await waitFor(() => laneRow('l1').getAttribute('data-flash') === null);
 
-    fireEvent.click(within(screen.getAllByTestId('post-it')[0]!).getByRole('button', { name: 'open lane' }));
-    expect(m.openLane).toHaveBeenCalledWith('l3');
-    m.getLane.mockImplementation(async (id: string) => (id === 'l3' ? { ...draft, status: 'open' } : lanes.find((l) => l.id === id)));
-    emit({ type: 'lane.updated', laneId: 'l3' });
-    await waitFor(() => screen.getAllByTestId('lane-row').length === 3);
-    expect(screen.getAllByTestId('lane-row').map((r) => r.getAttribute('data-lane'))).toEqual(['l1', 'l2', 'l3']);
-    await waitFor(() => screen.queryAllByTestId('draft-ready').length === 0);
+    emit({ type: 'assistant.done', thread: 'slide:s3', messageId: 'm1' });
+    emit({ type: 'lane.updated', laneId: 'l2' });
+    await waitFor(() => callsFor(m.getLanePreview, 'l2') === 2);
+    expect(laneOrder()).toEqual(['l1', 'l2']);
+    expect(laneRow('l2').getAttribute('data-flash')).toBeNull();
   });
 });
 
@@ -412,7 +447,9 @@ describe('Main propose feedback', () => {
 
   it('propose leaves a line in the thread panel that turns into a link once a lane linked to the remark arrives', async () => {
     m.getRemarks.mockResolvedValue([remark('r_p', { anchor: { kind: 'slide', slide: 's2' } })]);
+    sessionStorage.setItem('deckstudio.wholeDeck', 'open');
     await mounted();
+    fireEvent.click(mainThumb('s2'));
     const postIt = await waitFor(() => screen.queryByTestId('post-it'));
     fireEvent.click(within(postIt).getByRole('button', { name: 'propose' }));
     expect(m.proposeRemark).toHaveBeenCalledWith('r_p');
@@ -470,7 +507,6 @@ describe('subscribe', () => {
 });
 
 describe('Main QA1', () => {
-  const mainThumb = (id: SlideId): HTMLElement => screen.getAllByTestId('thumb').find((t) => t.closest('[data-strip="main"]') && t.getAttribute('data-slide') === id)!;
   const pressed = (): string[] =>
     screen
       .getAllByTestId('thumb')
@@ -481,13 +517,16 @@ describe('Main QA1', () => {
     delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   });
 
-  it('action clicks on a remark card (resolve, propose, its severity tag) leave the selection as it was', async () => {
-    m.getRemarks.mockResolvedValue([remark('r_s2', { anchor: { kind: 'slide', slide: 's2' }, severity: 'info' })]);
+  it('action clicks on a remark card in the panel (resolve, propose, its severity label, its text) leave the selection as it was', async () => {
+    m.getRemarks.mockResolvedValue([remark('r_s2', { anchor: { kind: 'range', from: 's2', to: 's4' }, severity: 'info' })]);
     await mounted();
-    await waitFor(() => screen.queryAllByTestId('post-it').length === 1);
     fireEvent.click(mainThumb('s4'));
+    await waitFor(() => screen.queryAllByTestId('post-it').length === 1);
     expect(pressed()).toEqual(['s4']);
-    fireEvent.click(within(postIt('r_s2')).getByTestId('severity-tag'));
+    const tag = within(postIt('r_s2')).getByTestId('severity-tag');
+    expect(tag.className).not.toContain('tag');
+    fireEvent.click(tag);
+    fireEvent.click(within(postIt('r_s2')).getByTestId('remark-text'));
     expect(pressed()).toEqual(['s4']);
     fireEvent.click(within(postIt('r_s2')).getByRole('button', { name: 'propose' }));
     expect(m.proposeRemark).toHaveBeenCalledWith('r_s2');
@@ -497,9 +536,6 @@ describe('Main QA1', () => {
     fireEvent.click(resolve);
     expect(m.resolveRemark).toHaveBeenCalledWith('r_s2');
     expect(pressed()).toEqual(['s4']);
-    // The card body itself still selects what the remark is about.
-    fireEvent.click(within(postIt('r_s2')).getByText('text r_s2'));
-    expect(pressed()).toEqual(['s2']);
   });
 
   it('accept, refuse and discard on a lane row leave the selection as it was', async () => {
@@ -576,7 +612,7 @@ describe('Main QA1', () => {
 
   it('lane rows carry their full title and no letter', async () => {
     await mounted();
-    expect(screen.getAllByTestId('lane-name').map((n) => n.textContent)).toEqual(['lane l1', 'lane l2']);
+    expect(screen.getAllByTestId('lane-name').map((n) => n.textContent)).toEqual(['lane l2', 'lane l1']);
   });
 
   it('a remark whose lane is open on main says "lane opened: <title>" as a link that scrolls to that row', async () => {
@@ -584,25 +620,23 @@ describe('Main QA1', () => {
     const scrolled = vi.fn();
     Element.prototype.scrollIntoView = scrolled;
     await mounted();
+    fireEvent.click(mainThumb('s5'));
     const link = await waitFor(() => screen.queryByTestId('lane-opened'));
     expect(link.textContent).toBe('lane opened: lane l2');
-    fireEvent.click(mainThumb('s1'));
     scrolled.mockClear();
     fireEvent.click(link);
     expect((scrolled.mock.contexts[0] as HTMLElement).id).toBe('lane-row-l2');
-    expect(pressed()).toEqual(['s1']);
+    expect(pressed()).toEqual(['s5']);
   });
 
-  it('the header counts open remarks with a label; "N more remarks" counts only the cards not shown', async () => {
+  it('the header counts open main remarks with a label', async () => {
     m.getRemarks.mockResolvedValue([
       remark('r_a', { anchor: { kind: 'slide', slide: 's1' } }),
       remark('r_b', { anchor: { kind: 'slide', slide: 's2' }, severity: 'info' }),
       remark('r_c', { anchor: { kind: 'slide', slide: 's5' }, severity: 'info' }),
     ]);
     await mounted();
-    await waitFor(() => screen.queryAllByTestId('post-it').length > 0);
+    await waitFor(() => screen.queryByTestId('remark-count'));
     expect(screen.getByTestId('remark-count').textContent).toBe('3 open remarks');
-    const shown = screen.getAllByTestId('post-it').length;
-    expect(screen.getByTestId('remarks-more').textContent).toBe(`${3 - shown} more ${3 - shown === 1 ? 'remark' : 'remarks'}: select a slide`);
   });
 });

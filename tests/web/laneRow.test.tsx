@@ -245,7 +245,7 @@ describe('LaneRow', () => {
     expect(onRetry).toHaveBeenCalledWith('l1');
   });
 
-  it('pins lane-scoped remarks on the grid under the cell they anchor to; an arc or off-row remark under the first cell', () => {
+  it('keeps lane-scoped remarks out of the row until asked: a count in the gutter opens them, full text and propose', () => {
     const r = (id: string, anchor: Remark['anchor']): Remark => ({
       id, anchor, text: `text ${id}`, origin: 'check:render', severity: 'warn', status: 'open', laneId: null, sourceLaneId: 'l1', createdAt: '2026-09-30T00:00:00.000Z',
     });
@@ -257,21 +257,75 @@ describe('LaneRow', () => {
         mainOrder={order}
         mainThumbs={{}}
         api={stubApi()}
-        remarks={[r('r_n1', { kind: 'slide', slide: 'n1' }), r('r_range', { kind: 'range', from: 's3', to: 's2' }), r('r_arc', { kind: 'arc' })]}
+        remarks={[r('r_n1', { kind: 'slide', slide: 'n1' }), r('r_arc', { kind: 'arc' })]}
         remarkApi={remarkApi}
       />,
     );
-    const slots = within(screen.getByTestId('lane-remarks')).getAllByTestId('post-it-slot');
-    const at = (id: string) => slots.find((s) => within(s).getByTestId('post-it').getAttribute('data-remark') === id)!;
-    // n1 sits in column 4, the first one s3 (modified) and the removed s4 leave free after s2
-    expect(at('r_n1').getAttribute('data-slide')).toBe('n1');
-    expect(at('r_n1').getAttribute('data-col')).toBe('4');
-    // a range goes under whichever end comes first in the lane: s2 before s3
-    expect(at('r_range').getAttribute('data-slide')).toBe('s2');
-    expect(at('r_arc').getAttribute('data-slide')).toBeNull();
-    expect(at('r_arc').getAttribute('data-col')).toBe('1');
-    fireEvent.click(within(at('r_n1')).getByRole('button', { name: 'propose' }));
+    expect(screen.queryByTestId('lane-remarks')).toBeNull();
+    expect(screen.queryAllByTestId('post-it')).toHaveLength(0);
+    const toggle = screen.getByRole('button', { name: '2 check remarks' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    const list = screen.getByTestId('lane-remarks');
+    expect(within(list).getAllByTestId('post-it').map((p) => p.getAttribute('data-remark'))).toEqual(['r_n1', 'r_arc']);
+    fireEvent.click(within(list).getAllByRole('button', { name: 'propose' })[0]!);
     expect(remarkApi.proposeRemark).toHaveBeenCalledWith('r_n1');
+  });
+
+  it('names a removed slide by its title from main when the preview no longer has it, never by id', () => {
+    const p: LanePreviewPayload = { order: ['s1', 's2', 's3', 's5'], slides: Object.fromEntries(Object.entries(mainSlides).filter(([id]) => id !== 's4')), skipped: [], thumbs: {} };
+    render(<LaneRow lane={lane({ changes: [removeS4] })} preview={p} mainOrder={order} mainSlides={{ ...mainSlides, s4: slide('s4', 'Typed in') }} mainThumbs={{}} api={stubApi()} />);
+    const slot = screen.getByTestId('removed-slot');
+    expect(slot.getAttribute('aria-label')).toBe('removed: Typed in');
+    expect(screen.getByRole('button', { name: 'accept: remove slide 4, Typed in' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'refuse: remove slide 4, Typed in' })).toBeTruthy();
+    expect([...document.querySelectorAll('[aria-label]')].map((el) => el.getAttribute('aria-label')).filter((n) => /\bs4\b/.test(n ?? ''))).toEqual([]);
+  });
+
+  it('puts the "story, notes" tag under the card next to accept and refuse, never over the thumbnail', () => {
+    const both: Change = { id: 'c6', kind: 'modify', slide: 's2', patch: { story: 'a', notes: 'b' }, reason: 'r', status: 'pending' };
+    const p: LanePreviewPayload = { order, slides: mainSlides, skipped: [], thumbs: {} };
+    render(<LaneRow lane={lane({ changes: [both] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    const cell = screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === 's2')!;
+    const tag = within(cell).getByTestId('modified-tag');
+    const buttons = within(cell).getByTestId('change-buttons');
+    // Same line as the buttons, not an overlay on the card.
+    expect(tag.closest('[data-testid="change-line"]')).toBe(buttons.closest('[data-testid="change-line"]'));
+    expect(tag.closest('[data-testid="change-line"]')).not.toBeNull();
+    expect(getComputedStyle(tag.parentElement!).position).not.toBe('absolute');
+  });
+
+  it('a lane whose changed slides lie past the columns in view shows an edge chip that reveals them', () => {
+    const modifyS5: Change = { id: 'c5', kind: 'modify', slide: 's5', patch: { title: 'New s5' }, reason: 'r', status: 'pending' };
+    const p: LanePreviewPayload = { order, slides: { ...mainSlides, s5: slide('s5', 'New s5') }, skipped: [], thumbs: {} };
+    const reveal = vi.fn();
+    const { rerender } = render(
+      <LaneRow lane={lane({ anchor: { kind: 'slide', slide: 's5' }, changes: [modifyS5] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} view={{ first: 0, end: 3 }} onReveal={reveal} />,
+    );
+    const chip = screen.getByTestId('edge-chip');
+    expect(chip.getAttribute('data-side')).toBe('right');
+    expect(chip.textContent).toContain('slide 5');
+    expect(chip.textContent).not.toMatch(/[←→⟶⟵]/);
+    fireEvent.click(chip);
+    expect(reveal).toHaveBeenCalledWith(4);
+    // Scrolled past it: the chip points left.
+    rerender(<LaneRow lane={lane({ anchor: { kind: 'slide', slide: 's1' }, changes: [{ ...modifyS5, slide: 's1' }] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} view={{ first: 2, end: 5 }} onReveal={reveal} />);
+    expect(screen.getByTestId('edge-chip').getAttribute('data-side')).toBe('left');
+    expect(screen.getByTestId('edge-chip').textContent).toContain('slide 1');
+    // In view: no chip.
+    rerender(<LaneRow lane={lane({ anchor: { kind: 'slide', slide: 's5' }, changes: [modifyS5] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} view={{ first: 2, end: 5 }} onReveal={reveal} />);
+    expect(screen.queryByTestId('edge-chip')).toBeNull();
+  });
+
+  it('flashes once when asked: an accent outline that clears when its animation ends', () => {
+    const { rerender } = render(<LaneRow lane={lane()} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} flash />);
+    const row = screen.getByTestId('lane-row');
+    expect(row.getAttribute('data-flash')).toBe('true');
+    expect(row.className).toContain('lane-flash');
+    const done = vi.fn();
+    rerender(<LaneRow lane={lane()} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} flash onFlashEnd={done} />);
+    fireEvent.animationEnd(row);
+    expect(done).toHaveBeenCalledWith('l1');
   });
 });
 

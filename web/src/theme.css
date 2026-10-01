@@ -77,14 +77,44 @@ button { font: inherit; }
 .thumb-title-link:hover { color: var(--accent); }
 [role='list']:hover .thumb-wrap:not(:hover) .thumb-title-link { visibility: hidden; }
 
-/* A muted fact about an item (a remark's severity): a small outlined pill, never styled like an action. */
-.tag {
-  display: inline-block; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); background: var(--paper);
-  font-size: var(--fs-meta); line-height: 16px; color: var(--grey); cursor: default; user-select: none;
-}
+/* A range on main: every slide of it is ringed; no thumb draws a title (Filmstrip leaves them out), the range caption names it. */
 
-/* A range on main: every slide of it is ringed; their titles stay hidden (they would overlap), the range caption names it. */
-[data-range] .thumb[aria-pressed='true']:not(:hover) .thumb-title { visibility: hidden; }
+/* Main: the strip and its numbers stay on top while the lane rows scroll under them; paper masks the canvas's side padding. */
+.strip-sticky {
+  position: sticky; top: 0; z-index: 5; background: var(--paper);
+  /* Also the 8px of top padding the sticky box stops under. */
+  box-shadow: -24px 0 0 var(--paper), 24px 0 0 var(--paper), 0 -8px 0 var(--paper), -24px -8px 0 var(--paper), 24px -8px 0 var(--paper);
+}
+/* A lane row brought into view lands under the sticky strip, not behind it. */
+.lane-row { scroll-margin-top: calc(var(--strip-h, 0px) + 8px); }
+/* A lane just created or revised from a request: one accent outline that fades out. */
+@keyframes lane-flash { from { outline-color: var(--accent); } to { outline-color: transparent; } }
+.lane-flash { outline: 2px solid transparent; outline-offset: 4px; border-radius: var(--radius); animation: lane-flash 1.5s ease-out 1; }
+/* Open remarks on a main slide: a count on the number line under the card (never over the slide), coloured by the worst severity. */
+.remark-dot {
+  position: absolute; top: calc(var(--thumb-h) + 6px); right: 0; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; line-height: 16px; text-align: center; color: var(--card); background: var(--grey);
+  pointer-events: none;
+}
+.remark-dot[data-severity='warn'] { background: var(--warn); }
+/* The "+N" ends of main's strip page it; the right one sits over the count EdgeFade prints. */
+.strip-more {
+  all: unset; box-sizing: border-box; z-index: 6; cursor: pointer; text-align: center; border-radius: var(--radius);
+  font-size: var(--fs-row); font-weight: 500; line-height: 40px; color: var(--grey); background: var(--paper); transition: box-shadow .15s ease, color .15s ease;
+}
+.strip-more:hover, .strip-more:focus-visible { color: var(--ink); box-shadow: inset 0 0 0 1px var(--grey-2); }
+.strip-more-over { background: transparent; }
+/* A lane whose changes lie outside the columns in view: a chip in its gutter that scrolls the strip there. */
+.edge-chip {
+  align-self: flex-start; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--card);
+  font-size: var(--fs-meta); color: var(--ink); white-space: nowrap; transition: border-color .15s ease;
+}
+.edge-chip:hover { border-color: var(--grey-2); }
+/* The selection panel never runs below the canvas's visible bottom: the composer stays in sight, the log scrolls inside. */
+.selection-panel { display: flex; flex-direction: column; max-height: var(--panel-max-h, none); overflow: hidden; }
+.selection-panel > [data-testid='thread'] { flex: 1 1 auto; min-height: 0; }
+.selection-panel [data-testid='thread'] > [role='log'] { flex: 1 1 auto; min-height: 48px; }
+.selection-panel .panel-remarks { max-height: calc(var(--panel-max-h, 100vh) * .4); overflow-y: auto; }
 
 /* History: the "+N" slot over the end of the compared strips scrolls them on; it shows the count EdgeFade prints. */
 .diff-more { all: unset; box-sizing: border-box; cursor: pointer; border-radius: var(--radius); transition: box-shadow .15s ease; }

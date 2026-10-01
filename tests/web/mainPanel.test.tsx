@@ -48,7 +48,8 @@ vi.mock('../../web/src/api.js', async (importOriginal) => {
   };
 });
 
-const { Main } = await import('../../web/src/screens/Main.js');
+const { Main, deckTurns, panelSpan, revealColumn, StripPager } = await import('../../web/src/screens/Main.js');
+const { placeCards } = await import('../../web/src/components/RemarkRow.js');
 
 const remark = (id: string, anchor: Remark['anchor']): Remark => ({
   id, anchor, text: `text ${id}`, origin: 'check:render', severity: 'warn', status: 'open', laneId: null, createdAt: '2026-09-30T00:00:00.000Z',
@@ -105,22 +106,147 @@ describe('Main selection panel', () => {
     expect(p.compareDocumentPosition(screen.getByText(/^No open lanes/)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("the selected slide's remark lives in the panel only; the others stay pinned", async () => {
-    m.getRemarks.mockResolvedValue([remark('r_s3', { kind: 'slide', slide: 's3' }), remark('r_s6', { kind: 'slide', slide: 's6' })]);
+  it("remarks leave the canvas: a count dot per thumb, and the selected slide's remarks first in its panel, expandable", async () => {
+    m.getRemarks.mockResolvedValue([
+      remark('r_s3', { kind: 'slide', slide: 's3' }),
+      { ...remark('r_info', { kind: 'slide', slide: 's3' }), severity: 'info' },
+      remark('r_range', { kind: 'range', from: 's2', to: 's4' }),
+      remark('r_s6', { kind: 'slide', slide: 's6' }),
+    ]);
     await mounted();
-    await waitFor(() => screen.queryByTestId('remark-count')?.textContent === '2 open remarks');
+    await waitFor(() => screen.queryByTestId('remark-count')?.textContent === '4 open remarks');
+    // No post-it row on the canvas.
+    expect(screen.queryByTestId('post-its')).toBeNull();
+    expect(screen.queryAllByTestId('post-it')).toHaveLength(0);
+    const dot = (id: SlideId) => within(thumb(id)).queryByTestId('remark-dot');
+    expect(dot('s3')!.textContent).toBe('3');
+    expect(dot('s3')!.getAttribute('data-severity')).toBe('warn');
+    expect(dot('s2')!.textContent).toBe('1');
+    expect(dot('s6')!.textContent).toBe('1');
+    expect(dot('s1')).toBeNull();
     fireEvent.click(thumb('s3'));
     const p = await waitFor(() => panel());
-    const inPanel = within(p).getAllByTestId('post-it').map((x) => x.getAttribute('data-remark'));
-    expect(inPanel).toEqual(['r_s3']);
-    const pinned = within(screen.getByTestId('post-its')).getAllByTestId('post-it').map((x) => x.getAttribute('data-remark'));
-    expect(pinned).toEqual(['r_s6']);
-    expect(screen.getAllByTestId('post-it').filter((x) => x.getAttribute('data-remark') === 'r_s3')).toHaveLength(1);
-    fireEvent.click(within(within(p).getByTestId('post-it')).getByRole('button', { name: 'propose' }));
+    const cards = within(p).getAllByTestId('post-it');
+    // Warnings first, then the rest; the range remark covers s3 too.
+    expect(cards.map((x) => x.getAttribute('data-remark'))).toEqual(['r_s3', 'r_range', 'r_info']);
+    // The remarks come before the conversation.
+    expect(within(p).getByTestId('panel-remarks').compareDocumentPosition(within(p).getByRole('log')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const text = within(cards[0]!).getByTestId('remark-text');
+    expect(text.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(text);
+    expect(text.getAttribute('aria-expanded')).toBe('true');
+    expect(text.textContent).toBe('text r_s3');
+    expect(pressed()).toEqual(['s3']);
+    fireEvent.click(within(cards[0]!).getByRole('button', { name: 'propose' }));
     expect(m.proposeRemark).toHaveBeenCalledWith('r_s3');
+    fireEvent.click(within(cards[1]!).getByRole('button', { name: 'resolve' }));
+    expect(m.resolveRemark).toHaveBeenCalledWith('r_range');
     // The propose note shows in the panel while the right bar is a rail.
     await waitFor(() => within(p).queryByTestId('propose-note'));
     expect(pressed()).toEqual(['s3']);
+  });
+
+  it('the whole-deck bar keeps only whole-deck turns: slide and range requests belong to their panel', async () => {
+    m.getThread.mockImplementation(async (key: string) =>
+      key === 'global'
+        ? [
+            msg('u_slide', 'user', { kind: 'slide', slide: 's2' }, '2026-09-30T00:00:01.000Z'),
+            msg('a_slide', 'assistant', null, '2026-09-30T00:00:02.000Z'),
+            msg('u_range', 'user', { kind: 'range', from: 's2', to: 's4' }, '2026-09-30T00:00:03.000Z'),
+            msg('a_range', 'assistant', null, '2026-09-30T00:00:04.000Z'),
+            msg('u_deck', 'user', { kind: 'arc' }, '2026-09-30T00:00:05.000Z'),
+            msg('a_deck', 'assistant', null, '2026-09-30T00:00:06.000Z'),
+            msg('u_old', 'user', null, '2026-09-30T00:00:07.000Z'),
+          ]
+        : [],
+    );
+    await mounted();
+    const bar = screen.getByTestId('thread-panel');
+    await waitFor(() => within(bar).queryAllByTestId('thread-message').length === 3);
+    expect(within(bar).getAllByTestId('thread-message').map((x) => x.textContent)).toEqual([
+      expect.stringContaining('text u_deck'),
+      expect.stringContaining('text a_deck'),
+      expect.stringContaining('text u_old'),
+    ]);
+    expect(deckTurns([msg('x', 'assistant', null, '2026-09-30T00:00:00.000Z')]).map((x) => x.id)).toEqual(['x']);
+  });
+
+  it('the panel is 5 to 9 columns wide from its column, and keeps that left edge with the canvas scrolled away', () => {
+    expect(panelSpan(3, undefined)).toBe(9);
+    expect(panelSpan(3, { first: 0, end: 9 })).toBe(6);
+    expect(panelSpan(7, { first: 0, end: 9 })).toBe(5);
+    expect(panelSpan(3, { first: 0, end: 20 })).toBe(9);
+    // Slides 4-6 selected, the canvas at its end (columns 21..29 in view): the panel is out of view, so placed
+    // without a view, at its own column and nine columns wide, never stretched over the columns in sight.
+    const [placed] = placeCards([{ id: 'p', col: 3, span: panelSpan(3, undefined), selected: true }], 30, 1);
+    expect(placed).toMatchObject({ start: 3, width: 9 });
+  });
+
+  it("the panel's height stops above the versions rail: the canvas height less the strip, the log scrolls inside", async () => {
+    const desc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight')!;
+    const cdesc = Object.getOwnPropertyDescriptor(Element.prototype, 'clientHeight')!;
+    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.getAttribute('data-testid') === 'strip-header' ? 160 : 0;
+      },
+    });
+    Object.defineProperty(Element.prototype, 'clientHeight', {
+      configurable: true,
+      get(this: Element) {
+        return this.getAttribute('data-testid') === 'canvas' ? 700 : 0;
+      },
+    });
+    try {
+      await mounted();
+      fireEvent.click(thumb('s3'));
+      const p = await waitFor(() => panel());
+      await waitFor(() => p.style.getPropertyValue('--panel-max-h') === '524px');
+      expect(p.className).toContain('selection-panel');
+    } finally {
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', desc);
+      Object.defineProperty(Element.prototype, 'clientHeight', cdesc);
+    }
+  });
+
+  it('the strip stays on top: the filmstrip and its range caption sit in a sticky header, the panel scrolls below it', async () => {
+    await mounted();
+    fireEvent.click(thumb('s2'));
+    fireEvent.click(thumb('s4'), { shiftKey: true });
+    const p = await waitFor(() => panel());
+    const header = screen.getByTestId('strip-header');
+    expect(header.className).toContain('strip-sticky');
+    expect(header.contains(document.querySelector('[data-strip="main"]'))).toBe(true);
+    expect(header.contains(screen.getByTestId('range-caption'))).toBe(true);
+    expect(header.contains(p)).toBe(false);
+    // No hover title competes with the range caption.
+    expect(header.querySelectorAll('.thumb-title')).toHaveLength(0);
+  });
+
+  it('"+N" on both ends pages the strip; revealColumn brings a column to the left edge', () => {
+    const page = vi.fn();
+    render(<StripPager visible={{ first: 9, end: 18, hidden: 12, rows: [{ hidden: 12, top: 60 }], cut: 900 }} onPage={page} />);
+    const prev = screen.getByRole('button', { name: 'show the previous slides (9 more)' });
+    const next = screen.getByRole('button', { name: 'show the next slides (12 more)' });
+    expect(prev.textContent).toBe('+9');
+    fireEvent.click(prev);
+    fireEvent.click(next);
+    expect(page.mock.calls).toEqual([[-1], [1]]);
+    cleanup();
+    render(<StripPager visible={{ first: 0, end: 9, hidden: 0, rows: [{ hidden: 0, top: 60 }], cut: 900 }} onPage={page} />);
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+
+    const canvas = document.createElement('div');
+    canvas.innerHTML = '<div class="gutter"></div><div data-strip="main"><button data-testid="thumb"></button><button data-testid="thumb"></button><button data-testid="thumb"></button></div>';
+    const rect = (left: number) => ({ left, right: left + 100, top: 0, bottom: 0, width: 100, height: 0, x: left, y: 0, toJSON: () => ({}) });
+    canvas.querySelector('.gutter')!.getBoundingClientRect = () => rect(44);
+    canvas.querySelectorAll('[data-testid="thumb"]').forEach((t, i) => {
+      t.getBoundingClientRect = () => rect(150 + i * 108);
+    });
+    canvas.scrollLeft = 0;
+    revealColumn(canvas, 2);
+    // The gutter ends at 144, its row starts 6px further: column 2 at 366 needs 216px.
+    expect(canvas.scrollLeft).toBe(216);
   });
 
   it('a range opens the panel at its first column on the global thread, showing only the turns about that range', async () => {
@@ -181,6 +307,19 @@ describe('Main selection panel', () => {
     const p = await waitFor(() => panel());
     expect(document.activeElement).toBe(within(p).getByLabelText('message'));
     fireEvent.keyDown(document.body, { key: 'Enter' });
+    expect(location.pathname).toBe('/slide/s4');
+  });
+
+  it('Enter in the empty composer opens the slide; with a message written it sends it', async () => {
+    await mounted();
+    fireEvent.click(thumb('s4'), { detail: 1 });
+    const p = await waitFor(() => panel());
+    const input = within(p).getByLabelText('message');
+    fireEvent.change(input, { target: { value: 'tighter' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(location.pathname).toBe('/');
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
     expect(location.pathname).toBe('/slide/s4');
   });
 

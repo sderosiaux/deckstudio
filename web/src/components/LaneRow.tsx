@@ -1,9 +1,8 @@
-import { useLayoutEffect, useState, type CSSProperties, type RefObject } from 'react';
-import type { Anchor, Change, Lane, Remark, SlideId } from '../../../src/model/types.js';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
+import type { Anchor, Change, Lane, Remark, Slide, SlideId } from '../../../src/model/types.js';
 import { focusPath, navigate, remarkApi as defaultRemarkApi, thumbUrl, type LaneApi, type LanePreviewPayload, type RemarkApi } from '../api.js';
 import { ChangeButtons } from './ChangeButtons.js';
 import { RemarkPostIt, anchorLabel } from './Remark.js';
-import { RemarkRow, type Pinned } from './RemarkRow.js';
 import { Thumb } from './Thumb.js';
 
 export interface LaneRowProps {
@@ -11,6 +10,8 @@ export interface LaneRowProps {
   /** Undefined while loading. */
   preview: LanePreviewPayload | undefined;
   mainOrder: SlideId[];
+  /** Main's slides: names a removed slide, which the lane preview no longer holds. */
+  mainSlides?: Record<SlideId, Slide>;
   /** Thumbnails of main, reused for the lane's unchanged slides. */
   mainThumbs: Record<SlideId, string | undefined>;
   api: LaneApi;
@@ -20,13 +21,16 @@ export interface LaneRowProps {
   failedThumbs?: ReadonlySet<string>;
   /** Re-requests the lane preview, which re-enqueues its thumbnails. */
   onRetryThumbs?(laneId: string): void;
-  /** Open remarks raised by a check on this lane's content (`sourceLaneId === lane.id`), pinned under the cell they anchor to. */
+  /** Open remarks raised by a check on this lane's content (`sourceLaneId === lane.id`): a count in the gutter, listed on demand. */
   remarks?: readonly Remark[];
   remarkApi?: RemarkApi;
-  /** Deck columns in sight on main: the lane's remark cards stay inside them. */
+  /** Deck columns in sight on main: when every changed slide lies outside, an edge chip points at the nearest one. */
   view?: { first: number; end: number };
-  /** Columns the moved hairlines of lanes below run down: the lane's remark cards keep clear of them. */
-  avoid?: ReadonlySet<number>;
+  /** Scrolls main's strip so that this 0-based column is in view (the edge chip). */
+  onReveal?(col: number): void;
+  /** The row was just created or revised from a request: an accent outline that fades once. */
+  flash?: boolean;
+  onFlashEnd?(laneId: string): void;
 }
 
 // Shown in the thumb slot when the server reports a failed render; clicking that thumb re-requests it.
@@ -37,15 +41,6 @@ export const FAILED_THUMB = `data:image/svg+xml,${encodeURIComponent(
 
 const NO_FAILED: ReadonlySet<string> = new Set();
 const NO_REMARKS: readonly Remark[] = [];
-
-/** Lane slide a lane-scoped remark points at: the slide itself, or the first slide of a range in lane order. Null for arc. */
-function remarkSlide(anchor: Anchor, laneOrder: readonly SlideId[]): SlideId | null {
-  if (anchor.kind === 'arc') return null;
-  if (anchor.kind === 'slide') return anchor.slide;
-  const a = laneOrder.indexOf(anchor.from);
-  const b = laneOrder.indexOf(anchor.to);
-  return a >= 0 && b >= 0 && b < a ? anchor.to : anchor.from;
-}
 
 const openFocus = (laneId: string, changeId: string): void => navigate(focusPath(laneId, changeId));
 
@@ -110,7 +105,13 @@ export const targetOf = (c: Change): SlideId => (c.kind === 'insert' ? c.slide.i
  *   does not hold (an unchanged context cell in the way yields: main already shows that slide).
  * Cells come sorted by column.
  */
-export function laneCells(lane: Lane, preview: LanePreviewPayload, mainOrder: SlideId[], cols: { start: number; span: number }): Cell[] {
+export function laneCells(
+  lane: Lane,
+  preview: LanePreviewPayload,
+  mainOrder: SlideId[],
+  cols: { start: number; span: number },
+  mainSlides?: Record<SlideId, Slide>,
+): Cell[] {
   const skipped = new Set(preview.skipped);
   const live = lane.changes.filter((c) => c.status === 'pending' && !skipped.has(c.id));
   const byTarget = new Map<SlideId, Change[]>();
@@ -121,7 +122,8 @@ export function laneCells(lane: Lane, preview: LanePreviewPayload, mainOrder: Sl
 
   const range = new Set(mainOrder.slice(cols.start, cols.start + cols.span));
   const markOf = (id: SlideId): Mark => (has(id, 'insert') ? 'inserted' : has(id, 'move') ? 'moved' : has(id, 'modify') ? 'modified' : 'none');
-  const titleOf = (id: SlideId): string => preview.slides[id]?.title ?? id;
+  // A removed slide is gone from the preview: main still has its title.
+  const titleOf = (id: SlideId): string => preview.slides[id]?.title ?? mainSlides?.[id]?.title ?? id;
 
   // Boundary a displaced slide lands before: right after its change's `after` when that is in place on main, else
   // after the nearest preceding in-place slide of the preview (e.g. after another inserted slide), else the start.
@@ -219,9 +221,9 @@ export function laneOrigin(lane: Pick<Lane, 'origin' | 'label' | 'anchor'>, main
  * A change in the creator's words, for the accessible names of its buttons: "modify slide 3, Hook". Main numbers for a
  * slide on main, the lane's position for an inserted one; never an id.
  */
-export function describeChange(c: Change, mainOrder: SlideId[], preview: LanePreviewPayload | undefined): string {
+export function describeChange(c: Change, mainOrder: SlideId[], preview: LanePreviewPayload | undefined, mainSlides?: Record<SlideId, Slide>): string {
   const id = targetOf(c);
-  const title = c.kind === 'insert' ? c.slide.title : (preview?.slides[id]?.title ?? id);
+  const title = c.kind === 'insert' ? c.slide.title : (preview?.slides[id]?.title ?? mainSlides?.[id]?.title ?? 'a slide');
   const onMain = mainOrder.indexOf(id);
   const inLane = preview ? preview.order.indexOf(id) : -1;
   const at = c.kind === 'insert' ? inLane : onMain;
@@ -272,33 +274,34 @@ export function LaneRow({
   remarks = NO_REMARKS,
   remarkApi = defaultRemarkApi,
   view,
-  avoid,
+  onReveal,
+  flash = false,
+  onFlashEnd,
+  mainSlides,
 }: LaneRowProps) {
   const { busy, error, accept, refuse, discard } = useLaneActions(lane.id, api);
+  const [remarksOpen, setRemarksOpen] = useState(false);
+  const row = useRef<HTMLDivElement>(null);
+  // A native listener: the flash ends with its CSS animation, however the browser names that event to React.
+  useEffect(() => {
+    const el = row.current;
+    if (!el || !flash || !onFlashEnd) return;
+    const end = (): void => onFlashEnd(lane.id);
+    el.addEventListener('animationend', end);
+    return () => el.removeEventListener('animationend', end);
+  }, [flash, onFlashEnd, lane.id]);
 
   const anchored = anchorColumns(lane.anchor, mainOrder);
   const n = Math.max(mainOrder.length, 1);
   const cols = anchored ?? { start: 0, span: n };
-  const allCells = preview ? laneCells(lane, preview, mainOrder, cols) : [];
+  const allCells = preview ? laneCells(lane, preview, mainOrder, cols, mainSlides) : [];
   // A whole-deck lane shows only the slides it touches: its untouched slides are main's, already in the row above.
   const cells = lane.anchor.kind === 'arc' && allCells.some((c) => c.mark !== 'none') ? allCells.filter((c) => c.mark !== 'none') : allCells;
   const region = lane.anchor.kind === 'arc' && cells.length > 0 ? regionColumns({ start: cells[0]!.col, span: 1 }, cells) : regionColumns(cols, cells);
   const skipped = preview ? lane.changes.filter((c) => c.status === 'pending' && preview.skipped.includes(c.id)) : [];
   const origin = laneOrigin(lane, mainOrder);
-  const describe = (c: Change): string => describeChange(c, mainOrder, preview);
-  // Remarks go on the grid under the cell they point at; the rest (arc, or a slide not in the row) under the first cell.
-  const cellCol = new Map(cells.map((c) => [c.id, c.col] as const));
-  const pinned: Pinned[] = remarks.map((r) => {
-    const id = remarkSlide(r.anchor, preview?.order ?? []);
-    const col = id !== null ? cellCol.get(id) : undefined;
-    return {
-      id: r.id,
-      col: col ?? region.start,
-      span: 1,
-      slide: col !== undefined ? id! : undefined,
-      card: <RemarkPostIt remark={r} onPropose={remarkApi.proposeRemark} onResolve={remarkApi.resolveRemark} />,
-    };
-  });
+  const describe = (c: Change): string => describeChange(c, mainOrder, preview, mainSlides);
+  const edge = edgeTarget(cells, view);
 
   const thumbFailed = (id: SlideId): boolean => {
     const t = preview?.thumbs[id];
@@ -334,7 +337,15 @@ export function LaneRow({
   );
 
   return (
-    <div id={`lane-row-${lane.id}`} data-testid="lane-row" data-lane={lane.id} style={{ display: 'flex', alignItems: 'stretch' }}>
+    <div
+      id={`lane-row-${lane.id}`}
+      data-testid="lane-row"
+      data-lane={lane.id}
+      data-flash={flash ? 'true' : undefined}
+      className={flash ? 'lane-row lane-flash' : 'lane-row'}
+      ref={row}
+      style={{ display: 'flex', alignItems: 'stretch' }}
+    >
       <div className="gutter" style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 8 }}>
         {/* The whole title, wrapped: a lane is what the creator decides on, its name is never cut. */}
         <span className="row-label" data-testid="lane-name" style={{ overflowWrap: 'anywhere' }}>
@@ -354,6 +365,37 @@ export function LaneRow({
         >
           discard lane
         </button>
+        {remarks.length > 0 ? (
+          <button
+            type="button"
+            className="link"
+            aria-expanded={remarksOpen}
+            onClick={(e) => {
+              e.stopPropagation();
+              setRemarksOpen((o) => !o);
+            }}
+            style={{ fontSize: 12, alignSelf: 'flex-start' }}
+          >
+            {remarks.length} check {remarks.length === 1 ? 'remark' : 'remarks'}
+          </button>
+        ) : null}
+        {edge && onReveal ? (
+          <button
+            type="button"
+            className="link edge-chip"
+            data-testid="edge-chip"
+            data-side={edge.side}
+            title={edge.side === 'right' ? 'further on in the strip' : 'earlier in the strip'}
+            onClick={(e) => {
+              e.stopPropagation();
+              onReveal(edge.col);
+            }}
+          >
+            {edge.side === 'left' ? <span aria-hidden>‹ </span> : null}
+            slide {edge.col + 1}
+            {edge.side === 'right' ? <span aria-hidden> ›</span> : null}
+          </button>
+        ) : null}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <div data-testid="lane-grid" style={{ display: 'grid', gridTemplateColumns: `repeat(${n}, var(--thumb-w))`, gridAutoColumns: 'var(--thumb-w)', columnGap: 'var(--col-gap)', padding: '0 6px' }}>
@@ -422,13 +464,19 @@ export function LaneRow({
                             <div data-testid="insert-badge" style={{ ...overlay, width: 14, height: 14, top: 3, left: 'calc(var(--thumb-w) - 17px)', borderRadius: 999, background: 'var(--accent)', color: 'var(--card)', fontWeight: 700, fontSize: 12, lineHeight: '14px', textAlign: 'center' }}>+</div>
                           </>
                         ) : null}
-                        {cell.mark === 'modified' ? <ModifiedMark fields={cellOffSlide(cell.changes)} /> : null}
+                        {cell.mark === 'modified' ? <ModifiedDot /> : null}
                       </>
                     )}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    {/* Under the card: the ✓ ✗ pairs, and what a story or notes rewrite touches, never over the slide. */}
+                    <div data-testid="change-line" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                       {cell.changes.map((c) => (
                         <ChangeButtons key={c.id} change={c} describe={describe(c)} disabled={busy} onAccept={accept} onRefuse={refuse} />
                       ))}
+                      {cell.mark === 'modified' && cellOffSlide(cell.changes).length > 0 ? (
+                        <span data-testid="modified-tag" className="meta" style={{ lineHeight: '14px' }}>
+                          {cellOffSlide(cell.changes).join(', ')}
+                        </span>
+                      ) : null}
                     </div>
                   </div>
                 ))}
@@ -446,7 +494,15 @@ export function LaneRow({
             ) : null}
           </section>
         </div>
-        {preview && pinned.length > 0 ? <RemarkRow testId="lane-remarks" items={pinned} columns={n} view={view} avoid={avoid} /> : null}
+        {remarksOpen && remarks.length > 0 ? (
+          <div data-testid="lane-remarks" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '0 6px' }}>
+            {remarks.map((r) => (
+              <div key={r.id} style={{ width: 280 }}>
+                <RemarkPostIt remark={r} onPropose={remarkApi.proposeRemark} onResolve={remarkApi.resolveRemark} expandable />
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -498,22 +554,26 @@ function MoveMark() {
   );
 }
 
-/**
- * The accent dot on a modified card. A modify that only rewrites the story or the notes renders the same slide: the
- * dot then carries those words in a small muted tag, so an identical card does not read as a missing diff.
- */
-function ModifiedMark({ fields }: { fields: readonly OffSlideField[] }) {
-  const dot = <span data-testid="modified-dot" style={{ width: 7, height: 7, flex: '0 0 7px', borderRadius: 999, background: 'var(--accent)' }} />;
-  if (fields.length === 0) return <div style={{ ...overlay, width: 7, height: 7, top: 4, left: 'calc(var(--thumb-w) - 11px)', display: 'flex' }}>{dot}</div>;
+/** The accent dot on a modified card. A story or notes rewrite says which under the card, by its buttons. */
+function ModifiedDot() {
   return (
-    <div
-      data-testid="modified-tag-box"
-      style={{ ...overlay, width: 'auto', height: 'auto', left: 'auto', right: 3, top: 3, display: 'flex', alignItems: 'center', gap: 4, padding: '0 4px 0 5px', borderRadius: 999, background: 'var(--paper)', boxShadow: '0 0 0 1px var(--line)' }}
-    >
-      <span data-testid="modified-tag" className="meta" style={{ lineHeight: '14px' }}>{fields.join(', ')}</span>
-      {dot}
+    <div style={{ ...overlay, width: 7, height: 7, top: 4, left: 'calc(var(--thumb-w) - 11px)', display: 'flex' }}>
+      <span data-testid="modified-dot" style={{ width: 7, height: 7, flex: '0 0 7px', borderRadius: 999, background: 'var(--accent)' }} />
     </div>
   );
+}
+
+/**
+ * Where a lane's edge chip points when none of its changed slides is in view: the nearest changed column past the
+ * visible end (right) or before the visible start (left). Null while one is in view, or without a view.
+ */
+export function edgeTarget(cells: readonly Cell[], view: { first: number; end: number } | undefined): { side: 'left' | 'right'; col: number } | null {
+  if (!view) return null;
+  const changed = cells.filter((c) => c.mark !== 'none' || c.slot).map((c) => c.col);
+  if (changed.length === 0 || changed.some((c) => c >= view.first && c < view.end)) return null;
+  const after = changed.filter((c) => c >= view.end);
+  if (after.length > 0) return { side: 'right', col: Math.min(...after) };
+  return { side: 'left', col: Math.max(...changed.filter((c) => c < view.first)) };
 }
 
 interface Riser {

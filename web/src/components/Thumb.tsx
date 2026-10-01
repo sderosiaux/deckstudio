@@ -17,6 +17,14 @@ export interface ThumbProps {
   onDoubleClick?(): void;
   /** Turns the title line into a link, shown as long as the thumb is selected (main: the slide's edit screen). */
   titleLink?: ThumbTitleLink;
+  /** Open remarks on this slide: a count dot in the card's corner. */
+  remarks?: RemarkDot | undefined;
+}
+
+export interface RemarkDot {
+  count: number;
+  /** The worst severity among them: its colour. */
+  severity: 'info' | 'warn';
 }
 
 export interface ThumbTitleLink {
@@ -48,7 +56,7 @@ const picture: CSSProperties = { width: '100%', height: '100%', display: 'block'
  * One slide in a strip: the rendered slide (a grey block until the PNG is ready), its number under it unless
  * `numbered` is off, and its title as one line on hover or selection.
  */
-export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbered = true, hoverTitle = true, onClick, onDoubleClick, titleLink }: ThumbProps) {
+export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbered = true, hoverTitle = true, onClick, onDoubleClick, titleLink, remarks }: ThumbProps) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [url]);
   const showImage = url !== undefined && !failed;
@@ -59,7 +67,7 @@ export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbe
       data-testid="thumb"
       data-slide={slideId}
       aria-pressed={selected}
-      aria-label={`Slide ${n}: ${title}`}
+      aria-label={`Slide ${n}: ${title}${remarks ? `, ${remarks.count} open ${remarks.count === 1 ? 'remark' : 'remarks'}` : ''}`}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
       style={{ all: 'unset', position: 'relative', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 6, width: 'var(--thumb-w)', flex: '0 0 auto' }}
@@ -71,6 +79,11 @@ export function Thumb({ slideId, n, title, url, selected, ring = 'accent', numbe
           <div data-testid="thumb-placeholder" style={{ ...picture, background: 'var(--line)' }} />
         )}
       </div>
+      {remarks ? (
+        <span data-testid="remark-dot" className="remark-dot" data-severity={remarks.severity} aria-hidden>
+          {remarks.count}
+        </span>
+      ) : null}
       {numbered ? <span style={{ fontSize: 'var(--fs-meta)', lineHeight: '15px', textAlign: 'center', color: selected ? `var(--${ring})` : 'var(--grey)' }}>{n}</span> : null}
       {titleLink || !hoverTitle ? null : <span className="thumb-title">{title}</span>}
     </button>
