@@ -222,7 +222,8 @@ describe('BriefChecks live status', () => {
 
     act(() => push({ type: 'checks.status', running: ['arc', 'render'] }));
     expect(row('render').textContent).toContain('running…');
-    expect(runBtn().textContent).toBe('Checks running…');
+    // Not started from this screen: the header says why checks run.
+    expect(screen.getByTestId('checks-auto').textContent).toBe('running after a deck change');
     act(() => push({ type: 'checks.status', running: ['render'] }));
     expect(row('arc').textContent).not.toContain('running…');
     act(() => push({ type: 'checks.status', running: [] }));
@@ -411,31 +412,6 @@ describe('BriefChecks QA1', () => {
     }
   });
 
-  it('the run button says "Run checks" when idle and "Checks running…" (disabled) only while a run is in flight', async () => {
-    const api = stubApi();
-    api.getChecksStatus.mockResolvedValue({ ...status, running: ['render'] });
-    let finish: () => void = () => undefined;
-    api.runChecks.mockImplementation(() => new Promise((r) => (finish = () => r({ started: ['arc', 'order', 'gaps', 'render'] }))));
-    let push: (e: BusEvent) => void = () => undefined;
-    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
-    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
-    await waitFor(() => row('render').textContent?.includes('running…'));
-    const btn = () => screen.getByRole('button', { name: /checks/i }) as HTMLButtonElement;
-    // One check still running is a run in flight: no second run on top of it.
-    expect(btn().textContent).toBe('Checks running…');
-    expect(btn().disabled).toBe(true);
-    act(() => push({ type: 'checks.status', running: [] }));
-    expect(btn().textContent).toBe('Run checks');
-    expect(btn().disabled).toBe(false);
-    fireEvent.click(btn());
-    expect(btn().textContent).toBe('Checks running…');
-    expect(btn().disabled).toBe(true);
-    await act(async () => finish());
-    act(() => push({ type: 'checks.status', running: ['arc'] }));
-    act(() => push({ type: 'checks.status', running: [] }));
-    expect(btn().textContent).toBe('Run checks');
-  });
-
   it('resolved and lane-closed remarks hide behind "show resolved (N)"', async () => {
     const api = stubApi();
     const closed: Lane = { ...lane, id: 'lc', status: 'closed' };
@@ -495,5 +471,117 @@ describe('BriefChecks QA1', () => {
     fireEvent.blur(title);
     expect(api.putBrief).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('brief-save').textContent).toBe('saved');
+  });
+});
+
+describe('BriefChecks QA2', () => {
+  const runBtn = () => screen.queryByRole('button', { name: /checks/i }) as HTMLButtonElement | null;
+  const autoLine = () => screen.queryByTestId('checks-auto');
+
+  it('the run button says "Run checks" when idle and "Checks running…" only while status.running is non-empty', async () => {
+    const api = stubApi();
+    let finish: () => void = () => undefined;
+    api.runChecks.mockImplementation(() => new Promise((r) => (finish = () => r({ started: ['arc', 'order', 'gaps', 'render'] }))));
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => api.getChecksStatus.mock.calls.length === 1 && row('arc').textContent?.includes('last run'));
+    expect(runBtn()!.textContent).toBe('Run checks');
+    expect(runBtn()!.disabled).toBe(false);
+    fireEvent.click(runBtn()!);
+    // The request is out, nothing runs yet: no second click, and no "running" the server has not said.
+    expect(runBtn()!.disabled).toBe(true);
+    expect(runBtn()!.textContent).toBe('Run checks');
+    await act(async () => finish());
+    act(() => push({ type: 'checks.status', running: ['arc'] }));
+    expect(runBtn()!.textContent).toBe('Checks running…');
+    expect(runBtn()!.disabled).toBe(true);
+    expect(autoLine()).toBeNull();
+    act(() => push({ type: 'checks.status', running: [] }));
+    expect(runBtn()!.textContent).toBe('Run checks');
+    expect(runBtn()!.disabled).toBe(false);
+  });
+
+  it('a run the system started (after a deck change) says so on the status line instead of a stuck button', async () => {
+    const api = stubApi();
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => api.getChecksStatus.mock.calls.length === 1 && row('arc').textContent?.includes('last run'));
+    act(() => push({ type: 'checks.status', running: ['arc', 'render'] }));
+    expect(autoLine()?.textContent).toBe('running after a deck change');
+    expect(runBtn()).toBeNull();
+    act(() => push({ type: 'checks.status', running: [] }));
+    expect(autoLine()).toBeNull();
+    expect(runBtn()!.textContent).toBe('Run checks');
+    expect(runBtn()!.disabled).toBe(false);
+  });
+
+  it('a run already in flight when the screen opens is the system\'s: the status line, not a disabled button', async () => {
+    const api = stubApi();
+    api.getChecksStatus.mockResolvedValue({ ...status, running: ['render'] });
+    render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => row('render').textContent?.includes('running…'));
+    expect(autoLine()?.textContent).toBe('running after a deck change');
+    expect(runBtn()).toBeNull();
+  });
+
+  it('"new" marks only a remark created after the previous run and absent from the list before this run', async () => {
+    const api = stubApi();
+    // lastRun arc is 10:00. r_mid was created at 10:15 (after it) but was already listed before the run: not new.
+    const old = remark('r_old_arc', { anchor: { kind: 'slide', slide: 's2' }, createdAt: '2026-09-30T09:00:00.000Z' });
+    const mid = remark('r_mid_arc', { anchor: { kind: 'slide', slide: 's3' }, createdAt: '2026-09-30T10:15:00.000Z' });
+    api.getRemarks.mockResolvedValue([old, mid]);
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => within(row('arc')).queryAllByTestId('remark').length === 2);
+    await waitFor(() => row('arc').textContent?.includes('last run'));
+    expect(within(row('arc')).queryAllByTestId('remark-new')).toHaveLength(0);
+
+    act(() => push({ type: 'checks.status', running: ['arc'] }));
+    const fresh = remark('r_new_arc', { anchor: { kind: 'slide', slide: 's4' }, createdAt: '2026-09-30T10:30:00.000Z' });
+    api.getRemarks.mockResolvedValue([old, mid, fresh]);
+    act(() => push({ type: 'remarks.changed' }));
+    await waitFor(() => within(row('arc')).queryAllByTestId('remark').length === 3);
+    act(() => push({ type: 'checks.status', running: [] }));
+    const card = (id: string) => within(row('arc')).getAllByTestId('remark').find((c) => c.getAttribute('data-remark') === id)!;
+    await waitFor(() => within(card('r_new_arc')).queryByTestId('remark-new'));
+    expect(within(card('r_mid_arc')).queryByTestId('remark-new')).toBeNull();
+    expect(within(card('r_old_arc')).queryByTestId('remark-new')).toBeNull();
+  });
+
+  it('"new" never marks what the first load listed, even when the screen opened mid-run', async () => {
+    const api = stubApi();
+    api.getChecksStatus.mockResolvedValue({ ...status, running: ['arc'] });
+    // Produced by the run in flight (after lastRun 10:00), listed on the first load: the creator has seen it.
+    const early = remark('r_early', { anchor: { kind: 'slide', slide: 's2' }, createdAt: '2026-09-30T10:20:00.000Z' });
+    api.getRemarks.mockResolvedValue([early]);
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => within(row('arc')).queryAllByTestId('remark').length === 1);
+    await waitFor(() => row('arc').textContent?.includes('running…'));
+    const late = remark('r_late', { anchor: { kind: 'slide', slide: 's4' }, createdAt: '2026-09-30T10:25:00.000Z' });
+    api.getRemarks.mockResolvedValue([early, late]);
+    act(() => push({ type: 'remarks.changed' }));
+    await waitFor(() => within(row('arc')).queryAllByTestId('remark').length === 2);
+    act(() => push({ type: 'checks.status', running: [] }));
+    const card = (id: string) => within(row('arc')).getAllByTestId('remark').find((c) => c.getAttribute('data-remark') === id)!;
+    await waitFor(() => within(card('r_late')).queryByTestId('remark-new'));
+    expect(within(card('r_early')).queryByTestId('remark-new')).toBeNull();
+  });
+
+  it('slide cells are one thumb wide and their caption fills the cell, never wider', async () => {
+    render(<BriefChecks api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('brief-thumb').length === 6);
+    for (const cell of screen.getAllByTestId('brief-thumb')) {
+      expect(cell.style.width).toBe('var(--thumb-w)');
+      const caption = within(cell).getByTestId('brief-thumb-caption');
+      expect(caption.style.width).toBe('100%');
+      expect(caption.style.overflow).toBe('hidden');
+      expect(caption.style.whiteSpace).toBe('nowrap');
+    }
   });
 });

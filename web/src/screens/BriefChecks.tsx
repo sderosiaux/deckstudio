@@ -276,8 +276,11 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
   const [thumbs, setThumbs] = useState<Record<SlideId, string | undefined>>({});
   const [expanded, setExpanded] = useState<ReadonlySet<CheckName>>(new Set());
   const [runError, setRunError] = useState<string | null>(null);
-  /** The run request itself, before the server's checks.status says which checks started. */
-  const [starting, setStarting] = useState(false);
+  /**
+   * Who the run in flight belongs to. 'requested': this screen asked, the server has not said a check started yet;
+   * 'running': this screen's run is under way. A run seen while 'idle' was started by the system (after a deck change).
+   */
+  const [ownRun, setOwnRun] = useState<'idle' | 'requested' | 'running'>('idle');
   const [showSettled, setShowSettled] = useState<ReadonlySet<CheckName>>(new Set());
   /** Per check, when this screen saw its current run start: the fallback reference when the check had never run before. */
   const runStart = useRef<Partial<Record<CheckName, string>>>({});
@@ -287,7 +290,14 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
   // Per check, the lastRun this screen saw before the current one: remarks created after it came from the latest run.
   // Absent until a run finishes while the screen is open (the first look has nothing to compare with); null = it had never run.
   const lastSeen = useRef<Partial<Record<CheckName, string | null>>>({});
-  const [since, setSince] = useState<Partial<Record<CheckName, string | null>>>({});
+  /** Per check, the reference of its latest finished run: the lastRun before it, and the remark ids listed before it started. */
+  const [since, setSince] = useState<Partial<Record<CheckName, { at: string | null; ids: ReadonlySet<string> }>>>({});
+  /** Remark ids of the latest list loaded; a run's "before" is this list when the run is seen starting. */
+  const listed = useRef<ReadonlySet<string> | null>(null);
+  /** Per check, the ids listed when this screen saw its current run start. */
+  const runIds = useRef<Partial<Record<CheckName, ReadonlySet<string>>>>({});
+  /** What the first load listed: never "new", even when a run that was already in flight produced it. */
+  const [firstIds, setFirstIds] = useState<ReadonlySet<string> | null>(null);
   const pendingThumbs = useRef(new Map<string, SlideId>());
 
   const reportLive = useCallback((err: unknown) => setLiveError(message(err)), []);
@@ -320,6 +330,9 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
     const [rs, ls] = await Promise.all([api.getRemarks(), api.getLanes('all')]);
     setRemarks(rs);
     setLanes(ls);
+    const ids: ReadonlySet<string> = new Set(rs.map((r) => r.id));
+    if (listed.current === null) setFirstIds(ids);
+    listed.current = ids;
     setLiveError(null);
     if (!autoExpanded.current) {
       autoExpanded.current = true;
@@ -327,7 +340,38 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
     }
   }, [api]);
 
-  const loadStatus = useCallback(async () => setStatus(await api.getChecksStatus()), [api]);
+  /**
+   * Applies a status as it arrives, outside render: a run's "before" list must be the one listed when its start was
+   * announced, not whatever list is loaded by the time an effect would run.
+   */
+  const statusNow = useRef<ChecksStatus | null>(null);
+  const applyStatus = useCallback((status: ChecksStatus): void => {
+    statusNow.current = status;
+    setStatus(status);
+    const changed: Partial<Record<CheckName, { at: string | null; ids: ReadonlySet<string> }>> = {};
+    const now = new Date().toISOString();
+    for (const { name } of CHECK_ROWS) {
+      if (status.running.includes(name) && runStart.current[name] === undefined) {
+        runStart.current[name] = now;
+        runIds.current[name] = listed.current ?? new Set();
+      }
+      const at = status.lastRun[name];
+      // The reference is the previous lastRun; a check that never ran falls back to when this screen saw the run start.
+      if (name in lastSeen.current && lastSeen.current[name] !== at) {
+        changed[name] = { at: lastSeen.current[name] ?? runStart.current[name] ?? null, ids: runIds.current[name] ?? new Set() };
+      }
+      if (!status.running.includes(name)) {
+        delete runStart.current[name];
+        delete runIds.current[name];
+      }
+      lastSeen.current[name] = at;
+    }
+    if (Object.keys(changed).length > 0) setSince((prev) => ({ ...prev, ...changed }));
+    // This screen's run is under way once a check reports running, and over once none does.
+    setOwnRun((own) => (status.running.length > 0 ? (own === 'requested' ? 'running' : own) : own === 'running' ? 'idle' : own));
+  }, []);
+
+  const loadStatus = useCallback(async () => applyStatus(await api.getChecksStatus()), [api, applyStatus]);
 
   useEffect(() => {
     void loadDeck();
@@ -345,44 +389,38 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
       } else if (e.type === 'remarks.changed') loadRemarks().catch(reportLive);
       else if (e.type === 'lane.created' || e.type === 'lane.updated' || e.type === 'lane.closed') api.getLanes('all').then(setLanes, reportLive);
       // The event carries the running list: no refetch per event.
-      else if (e.type === 'checks.status') setStatus((prev) => applyRunning(prev, e.running, new Date().toISOString()));
+      else if (e.type === 'checks.status') applyStatus(applyRunning(statusNow.current, e.running, new Date().toISOString()));
       else if (e.type === 'deck.changed') void loadDeck();
       else if (e.type === 'thumb.ready') {
         const id = pendingThumbs.current.get(e.hash);
         if (id) loadThumb(id).catch(reportLive);
       }
     });
-  }, [api, subscribe, loadDeck, loadRemarks, loadStatus, loadThumb, reportLive]);
+  }, [api, subscribe, loadDeck, loadRemarks, loadStatus, loadThumb, reportLive, applyStatus]);
 
-  useEffect(() => {
-    if (!status) return;
-    const changed: Partial<Record<CheckName, string | null>> = {};
-    const now = new Date().toISOString();
-    for (const { name } of CHECK_ROWS) {
-      if (status.running.includes(name)) runStart.current[name] ??= now;
-      const at = status.lastRun[name];
-      // The reference is the previous lastRun; a check that never ran falls back to when this screen saw the run start.
-      if (name in lastSeen.current && lastSeen.current[name] !== at) changed[name] = lastSeen.current[name] ?? runStart.current[name] ?? null;
-      if (!status.running.includes(name)) delete runStart.current[name];
-      lastSeen.current[name] = at;
-    }
-    if (Object.keys(changed).length > 0) setSince((prev) => ({ ...prev, ...changed }));
-  }, [status]);
 
-  // Never on the first look, and never without a reference: "new" means "since the run before this one".
+  // Never on the first look, and never without a reference: "new" means created since the run before this one and not
+  // listed before this run started (a remark the creator already saw is not new because the run ended after it).
   const isNew = (r: Remark, name: CheckName): boolean => {
     const before = since[name];
-    return typeof before === 'string' && Date.parse(r.createdAt) > Date.parse(before);
+    if (!before || typeof before.at !== 'string' || !firstIds) return false;
+    return Date.parse(r.createdAt) > Date.parse(before.at) && !before.ids.has(r.id) && !firstIds.has(r.id);
   };
 
   const run = (): void => {
     setRunError(null);
-    setStarting(true);
+    setOwnRun('requested');
     // Progress arrives as checks.status events; merging `started` here could re-mark a check that already finished.
-    api
-      .runChecks()
-      .catch((err: unknown) => setRunError(message(err)))
-      .finally(() => setStarting(false));
+    api.runChecks().then(
+      // Nothing started (every check already queued): no run of this screen's to wait for.
+      ({ started }) => {
+        if (started.length === 0) setOwnRun((own) => (own === 'requested' ? 'idle' : own));
+      },
+      (err: unknown) => {
+        setRunError(message(err));
+        setOwnRun('idle');
+      },
+    );
   };
 
   const toggleSettled = (name: CheckName): void =>
@@ -414,7 +452,8 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
 
   const { deck } = load;
   const running = new Set(status?.running ?? []);
-  const inFlight = starting || running.size > 0;
+  // A run nobody asked for here: the system started it after a deck change.
+  const systemRun = running.size > 0 && ownRun === 'idle';
   const show = (anchor: Anchor): void => navigate(mainPath(anchor));
   // Slides pointed at by an open remark of an expanded check, or by any open check remark when none is expanded.
   const lit = new Set<SlideId>();
@@ -440,10 +479,17 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
         <span className="meta">v{deck.state.version}</span>
         {runError ? <span style={{ color: 'var(--warn)', fontSize: 13 }}>{runError}</span> : null}
         <BackToMain navigate={navigate} />
-        {/* One check still running is a run in flight: a second run would restart all four on top of it. */}
-        <button type="button" className="btn-primary" onClick={run} disabled={inFlight} style={{ marginLeft: 8, alignSelf: 'center' }}>
-          {inFlight ? 'Checks running…' : 'Run checks'}
-        </button>
+        {/* One check still running is a run in flight: a second run would only join it. A run the system started says
+            why it runs instead of showing a button that stays disabled for minutes. */}
+        {systemRun ? (
+          <span data-testid="checks-auto" role="status" className="meta" style={{ marginLeft: 8, alignSelf: 'center' }}>
+            running after a deck change
+          </span>
+        ) : (
+          <button type="button" className="btn-primary" onClick={run} disabled={ownRun !== 'idle' || running.size > 0} style={{ marginLeft: 8, alignSelf: 'center' }}>
+            {running.size > 0 ? 'Checks running…' : 'Run checks'}
+          </button>
+        )}
       </ScreenHeader>
       <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(300px, 1fr) minmax(380px, 1.2fr) minmax(300px, 1fr)', gap: 0, padding: '8px 24px 20px' }}>
         <BriefCard initial={brief} api={api} />
@@ -524,9 +570,9 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
               {deck.order.map((id, i) => {
                 const title = deck.slides[id]?.title ?? id;
                 return (
-                  <div key={id} data-testid="brief-thumb" data-slide={id} data-lit={lit.has(id)} style={{ minWidth: 0, opacity: lit.has(id) ? 1 : 0.45, transition: 'opacity .15s ease' }}>
+                  <div key={id} data-testid="brief-thumb" data-slide={id} data-lit={lit.has(id)} style={{ width: 'var(--thumb-w)', minWidth: 0, opacity: lit.has(id) ? 1 : 0.45, transition: 'opacity .15s ease' }}>
                     <Thumb slideId={id} n={i + 1} title={title} url={thumbs[id]} selected={lit.has(id)} hoverTitle={false} onClick={() => show({ kind: 'slide', slide: id })} />
-                    <div data-testid="brief-thumb-caption" title={title} style={{ width: 'var(--thumb-w)', fontSize: 'var(--fs-meta)', lineHeight: '16px', color: 'var(--ink)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <div data-testid="brief-thumb-caption" title={title} style={{ width: '100%', fontSize: 'var(--fs-meta)', lineHeight: '16px', color: 'var(--ink)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {title}
                     </div>
                   </div>
