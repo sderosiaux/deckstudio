@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { Thread, describeTool, formatElapsed } from '../../web/src/components/Thread.js';
 import type { BusEvent, LanePreviewPayload, ProposalApi, ThreadApi } from '../../web/src/api.js';
 import type { Change, Lane, Slide, SlideId, ThreadMessage, Version } from '../../src/model/types.js';
+import { waitFor } from '../helpers/waitFor.js';
 
 const slide = (id: string, title = `Title ${id}`): Slide => ({ id, title, story: '', notes: '', body: '', assets: [], kind: 'text' });
 const order: SlideId[] = ['s1', 's2', 's3'];
@@ -201,5 +202,53 @@ describe('Thread replies carry their proposal', () => {
       />,
     );
     await vi.waitFor(() => expect(screen.getAllByTestId('thread-note').map((n) => n.textContent)).toEqual(['accepted into main as v8']));
+  });
+});
+
+describe('Thread scoped to a selection', () => {
+  const msg = (id: string, role: 'user' | 'assistant', context: ThreadMessage['context'], at: string): ThreadMessage => ({ id, thread: 'global', role, text: `text ${id}`, context, at });
+  const range = { kind: 'range' as const, from: 's1', to: 's2' };
+
+  it('with `only`, shows the turns whose message was sent on that anchor: the user message and the replies after it', async () => {
+    const t = setup();
+    t.stored.push(
+      msg('u1', 'user', range, '2026-09-30T00:00:01.000Z'),
+      msg('a1', 'assistant', null, '2026-09-30T00:00:02.000Z'),
+      msg('u2', 'user', { kind: 'arc' }, '2026-09-30T00:00:03.000Z'),
+      msg('a2', 'assistant', null, '2026-09-30T00:00:04.000Z'),
+      msg('u3', 'user', { kind: 'range', from: 's2', to: 's3' }, '2026-09-30T00:00:05.000Z'),
+      msg('u4', 'user', range, '2026-09-30T00:00:06.000Z'),
+    );
+    render(<Thread threadKey="global" context={range} only={range} order={order} slides={slides} api={t.api} subscribe={t.subscribe} />);
+    await waitFor(() => screen.queryAllByTestId('thread-message').length > 0);
+    expect(screen.getAllByTestId('thread-message').map((m) => m.textContent)).toEqual([
+      expect.stringContaining('text u1'),
+      expect.stringContaining('text a1'),
+      expect.stringContaining('text u4'),
+    ]);
+    // A message sent here is about the range: it shows at once.
+    send('tighter');
+    await waitFor(() => screen.getAllByTestId('thread-message').length === 4);
+    expect(t.api.postMessage).toHaveBeenCalledWith('global', 'tighter', range);
+  });
+
+  it('a message sent on another anchor than the current context keeps its own context under it', async () => {
+    const t = setup();
+    t.stored.push(msg('u1', 'user', range, '2026-09-30T00:00:01.000Z'), msg('u2', 'user', { kind: 'arc' }, '2026-09-30T00:00:02.000Z'));
+    render(<Thread threadKey="global" context={{ kind: 'arc' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} />);
+    await waitFor(() => screen.queryAllByTestId('thread-message').length === 2);
+    const [first, second] = screen.getAllByTestId('thread-message');
+    expect(within(first!).getByTestId('message-context').textContent).toBe('on slides 1–2');
+    expect(within(second!).queryByTestId('message-context')).toBeNull();
+  });
+
+  it('autoFocus puts the caret in the composer; `lead` renders between the header and the messages', async () => {
+    const t = setup();
+    render(
+      <Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} autoFocus lead={<p data-testid="lead">remarks</p>} />,
+    );
+    expect(document.activeElement).toBe(screen.getByLabelText('message'));
+    const lead = screen.getByTestId('lead');
+    expect(lead.compareDocumentPosition(screen.getByRole('log')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

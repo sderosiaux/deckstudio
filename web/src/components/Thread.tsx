@@ -46,6 +46,14 @@ export interface ThreadProps {
   navigate?(path: string): void;
   /** Lines the screen adds to the conversation, merged by time. */
   notes?: ThreadNote[];
+  /** Only the turns sent on this anchor: each user message with that context and the replies that follow it. */
+  only?: Anchor;
+  /** Puts the caret in the composer when the thread mounts or changes key. */
+  autoFocus?: boolean;
+  /** Shown between the header and the messages, eg the remarks of the selection. */
+  lead?: React.ReactNode;
+  /** Inline only: the log stops growing at this height and scrolls, following the latest message. */
+  logMaxHeight?: string;
 }
 
 const time = (iso: string): string => {
@@ -90,7 +98,8 @@ export function renderInline(text: string): React.ReactNode[] {
 const targetOf = (c: Change): SlideId => (c.kind === 'insert' ? c.slide.id : c.slide);
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-function sameAnchor(a: Anchor, b: Anchor): boolean {
+function sameAnchor(a: Anchor | null, b: Anchor | null): boolean {
+  if (!a || !b) return false;
   if (a.kind === 'slide' && b.kind === 'slide') return a.slide === b.slide;
   if (a.kind === 'range' && b.kind === 'range') return a.from === b.from && a.to === b.to;
   return a.kind === 'arc' && b.kind === 'arc';
@@ -125,6 +134,15 @@ function merge(messages: ThreadMessage[], notes: ThreadNote[]): ({ kind: 'messag
   }
   for (const n of rest) out.push({ kind: 'note', n });
   return out;
+}
+
+/** The turns sent on `anchor`: a user message with that context opens a turn, the replies up to the next user message belong to it. */
+export function turnsOn(messages: readonly ThreadMessage[], anchor: Anchor): ThreadMessage[] {
+  let inside = false;
+  return messages.filter((m) => {
+    if (m.role === 'user') inside = sameAnchor(m.context, anchor);
+    return inside;
+  });
 }
 
 const PAIR_WIDTH = 220;
@@ -329,6 +347,10 @@ export function Thread({
   layout = 'panel',
   navigate = defaultNavigate,
   notes,
+  only,
+  autoFocus = false,
+  lead,
+  logMaxHeight,
 }: ThreadProps) {
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -345,6 +367,7 @@ export function Thread({
   const [ownNotes, setOwnNotes] = useState<ThreadNote[]>([]);
   const turn = useRef<Turn | null>(null);
   const log = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async (): Promise<ThreadMessage[] | null> => {
     try {
@@ -417,11 +440,17 @@ export function Thread({
     return () => clearInterval(id);
   }, [since]);
 
-  // Scroll the log itself: scrollIntoView would also scroll every ancestor, the page included. Inline, the screen scrolls.
+  useEffect(() => {
+    if (autoFocus) composer.current?.focus({ preventScroll: true });
+  }, [autoFocus, threadKey]);
+
+  // Scroll the log itself: scrollIntoView would also scroll every ancestor, the page included. Inline, the screen
+  // scrolls, unless the log has a height of its own.
+  const ownScroll = layout === 'panel' || logMaxHeight !== undefined;
   useEffect(() => {
     const el = log.current;
-    if (el && layout === 'panel') el.scrollTop = el.scrollHeight;
-  }, [messages, streaming, pending, layout]);
+    if (el && ownScroll) el.scrollTop = el.scrollHeight;
+  }, [messages, streaming, pending, ownScroll]);
 
   const addNote = useCallback((text: string) => {
     const at = new Date().toISOString();
@@ -454,11 +483,12 @@ export function Thread({
   };
 
   const proposals = hasProposals(api) ? api : null;
-  const items = merge(messages, [...(notes ?? []), ...ownNotes]);
+  const shown = only ? turnsOn(messages, only) : messages;
+  const items = merge(shown, [...(notes ?? []), ...ownNotes]);
   const inline = layout === 'inline';
   const root: CSSProperties = inline ? { display: 'flex', flexDirection: 'column', gap: 12 } : { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 };
   const logStyle: CSSProperties = inline
-    ? { display: 'flex', flexDirection: 'column', gap: 16 }
+    ? { display: 'flex', flexDirection: 'column', gap: 16, ...(logMaxHeight ? { maxHeight: logMaxHeight, overflowY: 'auto' } : {}) }
     : { flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 20px', display: 'flex', flexDirection: 'column', gap: 16 };
   const textStyle: CSSProperties = { fontSize: inline ? 'var(--fs-body)' : 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' };
 
@@ -475,9 +505,10 @@ export function Thread({
           <ContextChip context={context} order={order} slides={slides} onClear={onClearContext} onEdit={onEditContext} />
         </div>
       </div>
+      {lead}
       <div ref={log} role="log" aria-live="polite" style={logStyle}>
         {loadError ? <p style={{ color: 'var(--warn)', fontSize: 12, margin: 0 }}>Could not load the thread: {loadError}</p> : null}
-        {!loadError && messages.length === 0 && !streaming && !pending ? (
+        {!loadError && shown.length === 0 && !streaming && !pending ? (
           <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.5 }}>
             {hint}
           </p>
@@ -492,6 +523,11 @@ export function Thread({
               <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}>
                 <strong style={{ fontWeight: 700, color: 'var(--ink)' }}>{item.m.role === 'assistant' ? 'co-author' : 'you'}</strong>
                 <span className="muted">{time(item.m.at)}</span>
+                {item.m.role === 'user' && item.m.context && !sameAnchor(item.m.context, context) ? (
+                  <span data-testid="message-context" className="muted">
+                    on {describeAnchor(item.m.context, order, slides)}
+                  </span>
+                ) : null}
               </div>
               <div style={textStyle}>{renderInline(item.m.text)}</div>
               {proposals && attached[item.m.id]
@@ -537,6 +573,7 @@ export function Thread({
       </div>
       <form onSubmit={(e) => void submit(e)} style={inline ? { display: 'flex', gap: 8 } : { display: 'flex', gap: 8, padding: 16, borderTop: '1px solid var(--line)' }}>
         <input
+          ref={composer}
           aria-label="message"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
