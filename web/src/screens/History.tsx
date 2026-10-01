@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react';
 import type { DiffEntry, Slide, SlideId, Snapshot, Version } from '../../../src/model/types.js';
 import {
   ApiError,
   historyApi,
+  historyPath,
   laneOnMainPath,
   navigate as defaultNavigate,
   pairFromSearch,
@@ -90,6 +91,34 @@ export function describeEntry(e: DiffEntry, c: Compared): { where: string; what:
   }
 }
 
+/** A version's box on the rail, in the rail's scroll coordinates. */
+export interface RailBox {
+  left: number;
+  right: number;
+}
+
+/** Inset kept between a compared version and the rail's edges (its side padding). */
+const RAIL_PAD = 6;
+
+/**
+ * Where the rail scrolls for a compared pair: both versions in view when they fit (moving as little as possible),
+ * otherwise the earlier one at the start, the later one reached through the edge chip.
+ */
+export function railScrollFor(view: { scrollLeft: number; width: number }, lo: RailBox, hi: RailBox): number {
+  const fits = hi.right - lo.left <= view.width - 2 * RAIL_PAD;
+  if (!fits) return Math.max(0, lo.left - RAIL_PAD);
+  if (lo.left < view.scrollLeft + RAIL_PAD) return Math.max(0, lo.left - RAIL_PAD);
+  if (hi.right > view.scrollLeft + view.width - RAIL_PAD) return hi.right - view.width + RAIL_PAD;
+  return view.scrollLeft;
+}
+
+/** A compared version the rail has scrolled out of view, and on which side it lies. */
+interface RailChip {
+  n: number;
+  role: 'from' | 'to';
+  side: 'left' | 'right';
+}
+
 const rowButton: CSSProperties = { padding: '4px 10px', fontSize: 12, whiteSpace: 'nowrap' };
 const chip: CSSProperties = { flex: '0 0 auto', padding: '2px 6px', borderRadius: 4, border: '1px solid var(--line)', fontSize: 12, whiteSpace: 'nowrap' };
 
@@ -108,6 +137,9 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
   const [done, setDone] = useState<Done | null>(null);
   const [focused, setFocused] = useState<SlideId | undefined>(undefined);
   const [mainThumbs, setMainThumbs] = useState<Record<SlideId, ThumbStatus>>({});
+  /** Renders of slides as they were in a past version, keyed `${n}:${id}`: a version never changes, so neither do they. */
+  const [versionThumbs, setVersionThumbs] = useState<Record<string, ThumbStatus>>({});
+  const versionAsked = useRef(new Set<string>());
   const [reload, setReload] = useState(0);
   /** Whether main already has v<n>'s slides, from diff(current, n), keyed `${current}:${n}`. */
   const [mainHas, setMainHas] = useState<Record<string, boolean>>({});
@@ -118,6 +150,9 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
   /** Serialized content of each slide of the main last shown; tells which thumbnails a new main invalidates. */
   const shownSlides = useRef<Record<SlideId, string>>({});
   const generation = useRef(0);
+  /** Holds the versions rail; its <ol> is the scroller. */
+  const railBox = useRef<HTMLDivElement>(null);
+  const [railChips, setRailChips] = useState<RailChip[]>([]);
 
   /**
    * Reloads versions and main. When b was the latest version, b follows the new latest so the comparison stays "against now".
@@ -167,6 +202,13 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
     return subscribe((e) => {
       if (e.type === 'deck.changed' || e.type === 'hello') void refresh();
       else if (e.type === 'thumb.ready') {
+        setVersionThumbs((prev) => {
+          const hit = Object.entries(prev).filter(([, t]) => t.hash === e.hash && !t.ready);
+          if (hit.length === 0) return prev;
+          const next = { ...prev };
+          for (const [key, t] of hit) next[key] = { ...t, ready: true };
+          return next;
+        });
         setMainThumbs((prev) => {
           const hit = Object.entries(prev).filter(([, t]) => t.hash === e.hash && !t.ready);
           if (hit.length === 0) return prev;
@@ -216,11 +258,29 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
     };
   }, [api, needsCheck, hasKey, current, pair]);
 
-  // Slides whose content equals main's can borrow main's thumbnail; the others keep the title card.
+  // Slides whose content equals main's borrow main's thumbnail; the others are rendered as they were in their version.
+  // The title card only stands in while a render is on its way.
   useEffect(() => {
     if (!compared || !deck) return;
     const ids = new Set<SlideId>();
-    for (const s of [compared.a, compared.b]) for (const id of s.order) if (s.slides[id] && sameSlide(s.slides[id], deck.slides[id])) ids.add(id);
+    const sides: [number, Snapshot][] = [[compared.pair.a, compared.a], [compared.pair.b, compared.b]];
+    for (const [n, s] of sides) {
+      for (const id of s.order) {
+        const slide = s.slides[id];
+        if (!slide) continue;
+        if (sameSlide(slide, deck.slides[id])) {
+          ids.add(id);
+          continue;
+        }
+        const key = `${n}:${id}`;
+        if (versionAsked.current.has(key)) continue;
+        versionAsked.current.add(key);
+        api.thumbForVersion(n, id).then(
+          (t) => setVersionThumbs((prev) => ({ ...prev, [key]: t })),
+          () => versionAsked.current.delete(key),
+        );
+      }
+    }
     for (const id of ids) {
       if (requested.current.has(id)) continue;
       const token = {};
@@ -235,6 +295,59 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
       );
     }
   }, [api, compared, deck]);
+
+  // The pair lives in the URL: leaving the history and coming back (or reloading) finds the same compare.
+  useEffect(() => {
+    if (!pair) return;
+    const path = historyPath(pair.a, pair.b);
+    if (`${location.pathname}${location.search}` !== path) history.replaceState(history.state, '', path);
+  }, [pair]);
+
+  /** The compared versions out of the rail's view, as chips on the edge they lie past. */
+  const measureRail = useCallback((): void => {
+    const ol = railBox.current?.querySelector('ol');
+    const next: RailChip[] = [];
+    if (ol && pair) {
+      for (const [n, role] of [[pair.a, 'from'], [pair.b, 'to']] as const) {
+        if (role === 'to' && n === pair.a) continue;
+        const li = ol.querySelector<HTMLElement>(`[data-version="${n}"]`);
+        if (!li) continue;
+        const left = li.offsetLeft;
+        const right = left + li.offsetWidth;
+        if (right <= ol.scrollLeft) next.push({ n, role, side: 'left' });
+        else if (left >= ol.scrollLeft + ol.clientWidth) next.push({ n, role, side: 'right' });
+      }
+    }
+    setRailChips((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+  }, [pair]);
+
+  // After the rail's own scroll into view (a child's layout effect runs first): both compared versions when they fit,
+  // else the earlier one, with a chip at the edge for the other.
+  const versionCount = versions?.length ?? 0;
+  useLayoutEffect(() => {
+    const ol = railBox.current?.querySelector('ol');
+    if (!ol || !pair) return;
+    const box = (n: number): RailBox | null => {
+      const li = ol.querySelector<HTMLElement>(`[data-version="${n}"]`);
+      return li ? { left: li.offsetLeft, right: li.offsetLeft + li.offsetWidth } : null;
+    };
+    const lo = box(Math.min(pair.a, pair.b));
+    const hi = box(Math.max(pair.a, pair.b));
+    if (lo && hi) ol.scrollLeft = railScrollFor({ scrollLeft: ol.scrollLeft, width: ol.clientWidth }, lo, hi);
+    measureRail();
+    ol.addEventListener('scroll', measureRail, { passive: true });
+    return () => ol.removeEventListener('scroll', measureRail);
+  }, [pair, versionCount, measureRail]);
+
+  const revealOnRail = (n: number): void => {
+    const ol = railBox.current?.querySelector('ol');
+    const li = ol?.querySelector<HTMLElement>(`[data-version="${n}"]`);
+    if (!ol || !li) return;
+    const left = li.offsetLeft;
+    const right = left + li.offsetWidth;
+    ol.scrollLeft = left < ol.scrollLeft ? Math.max(0, left - RAIL_PAD) : right - ol.clientWidth + RAIL_PAD;
+    measureRail();
+  };
 
   // A plain click on the version already compared to would compare it with itself: it does nothing.
   const select = (n: number, which: keyof VersionPair): void =>
@@ -329,12 +442,12 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
   }
   if (!versions || !deck) return <div style={{ padding: 32 }} className="muted">Loading versions…</div>;
 
-  const thumbsOf = (s: Snapshot): Record<SlideId, string | undefined> =>
+  const thumbsOf = (n: number, s: Snapshot): Record<SlideId, string | undefined> =>
     Object.fromEntries(
       s.order.map((id) => {
-        const t = mainThumbs[id];
         const slide = s.slides[id];
-        return [id, t?.ready && slide && sameSlide(slide, deck.slides[id]) ? thumbUrl(t.hash) : undefined];
+        const t = slide && sameSlide(slide, deck.slides[id]) ? mainThumbs[id] : versionThumbs[`${n}:${id}`];
+        return [id, t?.ready ? thumbUrl(t.hash) : undefined];
       }),
     );
   const shown = compared && pair && compared.pair.a === pair.a && compared.pair.b === pair.b ? compared : null;
@@ -377,8 +490,8 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
             <p className="muted">Comparing v{pair.a} and v{pair.b}…</p>
           ) : (
             <DiffFilmstrips
-              a={{ n: shown.pair.a, snapshot: shown.a, thumbs: thumbsOf(shown.a) }}
-              b={{ n: shown.pair.b, snapshot: shown.b, thumbs: thumbsOf(shown.b) }}
+              a={{ n: shown.pair.a, snapshot: shown.a, thumbs: thumbsOf(shown.pair.a, shown.a) }}
+              b={{ n: shown.pair.b, snapshot: shown.b, thumbs: thumbsOf(shown.pair.b, shown.b) }}
               entries={shown.entries}
               focused={focused}
               onFocus={(id) => setFocused((prev) => (prev === id ? undefined : id))}
@@ -393,7 +506,23 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
               <button type="button" className="link" onClick={swap} style={{ fontSize: 12, color: 'var(--ink)' }}>swap</button>
             ) : null}
           </p>
-          <VersionLine versions={versions} current={deck.state.version} selection={pair ?? undefined} onSelect={select} />
+          <div ref={railBox} style={{ position: 'relative' }}>
+            <VersionLine versions={versions} current={deck.state.version} selection={pair ?? undefined} onSelect={select} />
+            {railChips.map((c) => (
+              <button
+                key={c.n}
+                type="button"
+                className="edge-chip"
+                data-testid="rail-edge-chip"
+                data-side={c.side}
+                title={`Scroll the rail to v${c.n}`}
+                onClick={() => revealOnRail(c.n)}
+                style={{ position: 'absolute', top: -4, zIndex: 4, cursor: 'pointer', ...(c.side === 'left' ? { left: 'calc(var(--gutter) + 6px)' } : { right: 0 }) }}
+              >
+                {`${c.role} v${c.n}`}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
       <aside aria-label="what changed" style={{ width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', padding: '18px 20px', overflowY: 'auto' }}>

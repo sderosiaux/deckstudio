@@ -241,6 +241,29 @@ describe('server core', () => {
     expect((await app.inject({ method: 'GET', url: '/api/thumbs/nothex.png' })).statusCode).toBe(404);
   });
 
+  it('GET /api/thumbs/version/:n/:slideId renders the slide as it was in version n, from the same hash cache', async () => {
+    // v2 retitles s3: v1's s3 is no longer main's.
+    expect((await app.inject({ method: 'PATCH', url: '/api/slides/s3', payload: { title: 'New title' } })).statusCode).toBe(200);
+    const oldHash = await thumbs.thumbHash(five[2]!);
+    const res = await app.inject({ method: 'GET', url: '/api/thumbs/version/1/s3' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ hash: oldHash, ready: false });
+    const mainHash = (await app.inject({ method: 'GET', url: '/api/thumbs/for/s3' })).json().hash;
+    expect(mainHash).not.toBe(oldHash);
+
+    // A past version's render is not main's slide: the event carries no slide id, clients match it by hash.
+    await waitFor(() => events.some((e) => e.type === 'thumb.ready' && e.hash === oldHash), { timeout: 20_000 });
+    expect(events.find((e) => e.type === 'thumb.ready' && e.hash === oldHash)).toEqual({ type: 'thumb.ready', hash: oldHash, slideId: null });
+    expect((await app.inject({ method: 'GET', url: `/api/thumbs/${oldHash}.png` })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/thumbs/version/1/s3' })).json()).toEqual({ hash: oldHash, ready: true });
+
+    expect((await app.inject({ method: 'GET', url: '/api/thumbs/version/1/zz' })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: '/api/thumbs/version/9/s3' })).statusCode).toBe(404);
+    // v0 is the empty deck before the import.
+    expect((await app.inject({ method: 'GET', url: '/api/thumbs/version/0/s3' })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: '/api/thumbs/version/abc/s3' })).statusCode).toBe(400);
+  });
+
   it('a failed thumbnail render emits thumb.failed for that slide', async () => {
     class FailingThumbs extends ThumbService {
       override thumb(): Promise<never> {

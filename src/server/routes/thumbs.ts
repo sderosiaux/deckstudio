@@ -1,6 +1,7 @@
 import { createReadStream } from 'node:fs';
 import { access } from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
+import type { Slide } from '../../model/types.js';
 import type { ThumbService } from '../../render/thumbs.js';
 import type { DeckStore } from '../../store/deckStore.js';
 import type { Bus } from '../bus.js';
@@ -12,9 +13,11 @@ const PNG_NAME = /^([a-f0-9]{64})\.png$/;
 export function thumbRoutes(app: FastifyInstance, store: DeckStore, thumbs: ThumbService, bus: Bus): void {
   const inflight = new Set<string>();
 
-  app.get<{ Params: { slideId: string } }>('/api/thumbs/for/:slideId', async (req, reply) => {
-    const slide = await store.slide(req.params.slideId);
-    if (!slide) return reply.code(404).send({ error: `unknown slide ${req.params.slideId}` });
+  /**
+   * The slide's hash and whether its PNG exists; enqueues the render when it does not. `slideId` goes on the bus
+   * events: null for a past version's slide, which clients must not take for main's slide of that id.
+   */
+  const status = async (slide: Slide, slideId: string | null): Promise<{ hash: string; ready: boolean }> => {
     const hash = await thumbs.thumbHash(slide);
     const ready = await exists(thumbs.thumbPath(hash));
     if (!ready && !inflight.has(hash)) {
@@ -22,15 +25,31 @@ export function thumbRoutes(app: FastifyInstance, store: DeckStore, thumbs: Thum
       thumbs
         .thumb(slide)
         .then(
-          () => bus.emit({ type: 'thumb.ready', hash, slideId: slide.id }),
+          () => bus.emit({ type: 'thumb.ready', hash, slideId }),
           (err: unknown) => {
             app.log.error({ err, slideId: slide.id }, 'thumbnail render failed');
-            bus.emit({ type: 'thumb.failed', hash, slideId: slide.id, message: err instanceof Error ? err.message : String(err) });
+            bus.emit({ type: 'thumb.failed', hash, slideId, message: err instanceof Error ? err.message : String(err) });
           },
         )
         .finally(() => inflight.delete(hash));
     }
     return { hash, ready };
+  };
+
+  app.get<{ Params: { slideId: string } }>('/api/thumbs/for/:slideId', async (req, reply) => {
+    const slide = await store.slide(req.params.slideId);
+    if (!slide) return reply.code(404).send({ error: `unknown slide ${req.params.slideId}` });
+    return status(slide, slide.id);
+  });
+
+  // A slide as it was in version n: the history shows past versions as renders, not as title cards.
+  app.get<{ Params: { n: string; slideId: string } }>('/api/thumbs/version/:n/:slideId', async (req, reply) => {
+    if (!/^\d+$/.test(req.params.n)) return reply.code(400).send({ error: `invalid version "${req.params.n}"` });
+    const n = Number(req.params.n);
+    if (!(await store.versions()).some((v) => v.n === n)) return reply.code(404).send({ error: `version ${n} does not exist` });
+    const slide = (await store.snapshotAt(n)).slides[req.params.slideId];
+    if (!slide) return reply.code(404).send({ error: `slide ${req.params.slideId} is not in v${n}` });
+    return status(slide, null);
   });
 
   app.get<{ Params: { file: string } }>('/api/thumbs/:file', async (req, reply) => {
