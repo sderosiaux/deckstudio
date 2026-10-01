@@ -11,13 +11,14 @@ import {
   type BusEvent,
   type DeckPayload,
   type LaneApi,
+  type LanePreviewPayload,
   type SlideApi,
   type ThumbStatus,
 } from '../api.js';
 import { ChangeButtons } from '../components/ChangeButtons.js';
 import { originTag, targetOf, useLaneActions } from '../components/LaneRow.js';
 import { BackToMain, ScreenHeader } from '../components/ScreenHeader.js';
-import { SlidePreview } from '../components/SlidePreview.js';
+import { SlidePreview, type SlidePreviewProps } from '../components/SlidePreview.js';
 import { Thread } from '../components/Thread.js';
 import { modified, typingIn } from '../keys.js';
 
@@ -42,10 +43,14 @@ const liveOn = (lane: Lane, slideId: SlideId): Change[] =>
 const SLIDE_CSS = `
 .slide-stage { width: min(100%, 800px); }
 .slide-stage > [data-testid="slide-preview"] { width: 100% !important; flex: none !important; }
+.slide-toggle { display: flex; flex-wrap: wrap; gap: 4px; max-width: 800px; }
+.slide-toggle > button { all: unset; cursor: pointer; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 10px; border-radius: 4px; font-size: var(--fs-meta); font-weight: 500; color: var(--grey); box-shadow: 0 0 0 1px var(--line); transition: color .15s ease, box-shadow .15s ease; }
+.slide-toggle > button:hover { color: var(--ink); }
+.slide-toggle > button[aria-pressed='true'] { color: var(--ink); background: var(--card); box-shadow: 0 0 0 1.5px var(--accent); }
 `;
 const TEXT_WIDTH = 800;
 
-const HINT = 'Ask for a change to this slide. When it needs other slides or the narrative, the co-author says so and anchors its lane there.';
+const HINT = 'Ask for a change to this slide. The co-author answers here with a lane: its render shows on the slide above, to accept or refuse in place.';
 
 /** One slide's text field under the render: its name, then the text as written. */
 function Field({ name, text, testId, empty }: { name: string; text: string; testId: string; empty: string }) {
@@ -99,8 +104,8 @@ function LaneOnSlide({ lane, changes, api, navigate }: { lane: Lane; changes: Ch
 }
 
 /**
- * One slide of main, to change it by talking to the co-author: the slide large with its story and notes, the open
- * lanes that change it, and the `slide:<id>` thread. The co-author picks the scope and answers with a lane.
+ * One slide of main, to change it by talking to the co-author: the slide large (main's render, or a lane's proposal),
+ * the `slide:<id>` conversation right under it, then its story, notes and the open lanes that change it.
  */
 export function Slide({ slideId, api = slideApi, subscribe = defaultSubscribe, navigate = defaultNavigate }: SlideProps) {
   const [deckLoad, setDeckLoad] = useState<DeckLoad>({ status: 'loading' });
@@ -109,7 +114,9 @@ export function Slide({ slideId, api = slideApi, subscribe = defaultSubscribe, n
   const [thumbError, setThumbError] = useState<string | null>(null);
   const thumbHash = useRef<string | null>(null);
   thumbHash.current = thumb?.hash ?? null;
-  const [ready, setReady] = useState<string | null>(null);
+  // Which render the stage shows: main's, or the preview of one lane that changes this slide.
+  const [view, setView] = useState<'main' | string>('main');
+  const [previews, setPreviews] = useState<Record<string, LanePreviewPayload>>({});
   const deckGen = useRef(0);
   const lanesGen = useRef(0);
   const slideRef = useRef(slideId);
@@ -142,10 +149,17 @@ export function Slide({ slideId, api = slideApi, subscribe = defaultSubscribe, n
       const lanes = await api.getLanes();
       if (gen !== lanesGen.current) return;
       setLanesLoad({ status: 'ready', lanes });
+      // A new lane that changes this slide is what the creator waits for: the stage shows its proposal.
       for (const lane of lanes) {
         if (!announced.current.delete(lane.id)) continue;
-        if (lane.anchor.kind === 'slide' && lane.anchor.slide === slideRef.current) setReady(lane.label);
+        if (liveOn(lane, slideRef.current).length > 0) setView(lane.id);
       }
+      // Each lane that changes this slide brings its preview, for the stage's proposed render.
+      const here = lanes.filter((l) => liveOn(l, slideRef.current).length > 0);
+      // A preview that fails leaves that lane's proposed render out; the lane rows still show.
+      const loaded = await Promise.all(here.map((l) => api.getLanePreview(l.id).then((p) => [[l.id, p] as const], () => [])));
+      if (gen !== lanesGen.current) return;
+      setPreviews(Object.fromEntries(loaded.flat()));
     } catch (err) {
       if (gen === lanesGen.current) setLanesLoad({ status: 'error', message: message(err) });
     }
@@ -163,13 +177,35 @@ export function Slide({ slideId, api = slideApi, subscribe = defaultSubscribe, n
         if (e.type === 'lane.created') announced.current.add(e.laneId);
         void reloadLanes();
       }
-      else if (e.type === 'thumb.ready') setThumb((t) => (t && t.hash === e.hash && !t.ready ? { hash: t.hash, ready: true } : t));
+      else if (e.type === 'thumb.ready') {
+        setThumb((t) => (t && t.hash === e.hash && !t.ready ? { hash: t.hash, ready: true } : t));
+        setPreviews((prev) => {
+          let hit = false;
+          const next = Object.fromEntries(
+            Object.entries(prev).map(([id, p]) => {
+              const ids = Object.keys(p.thumbs).filter((x) => p.thumbs[x]!.hash === e.hash && !p.thumbs[x]!.ready);
+              if (ids.length === 0) return [id, p];
+              hit = true;
+              return [id, { ...p, thumbs: { ...p.thumbs, ...Object.fromEntries(ids.map((x) => [x, { hash: e.hash, ready: true }])) } }];
+            }),
+          );
+          return hit ? next : prev;
+        });
+      }
       else if (e.type === 'thumb.failed' && e.hash === thumbHash.current) setThumbError(e.message);
     });
   }, [reloadDeck, reloadLanes, subscribe]);
 
-  // The note belongs to the slide it was announced on.
-  useEffect(() => setReady(null), [slideId]);
+  // The stage starts on main for every slide; another slide needs the previews of its own lanes.
+  const firstSlide = useRef(true);
+  useEffect(() => {
+    setView('main');
+    if (firstSlide.current) {
+      firstSlide.current = false;
+      return;
+    }
+    void reloadLanes();
+  }, [slideId, reloadLanes]);
 
   const deck = deckLoad.status === 'ready' ? deckLoad.deck : null;
   const slide = deck && deck.order.includes(slideId) ? deck.slides[slideId] : undefined;
@@ -245,75 +281,97 @@ export function Slide({ slideId, api = slideApi, subscribe = defaultSubscribe, n
       </span>
     );
 
+  const shown = rows.find((r) => r.lane.id === view);
+  const proposal = shown ? previews[shown.lane.id] : undefined;
+  const mainUrl = thumb?.ready ? thumbUrl(thumb.hash) : undefined;
+  let stage: SlidePreviewProps = { label: `main, slide ${at + 1}`, variant: 'main', title: slide.title, url: mainUrl };
+  if (shown) {
+    const laneAt = proposal ? proposal.order.indexOf(slideId) : -1;
+    const own = proposal?.thumbs[slideId];
+    const label = `proposed in ${shown.lane.label}`;
+    stage =
+      proposal && laneAt < 0
+        ? { label, variant: 'missing', missingText: 'this lane removes the slide' }
+        : {
+            label: proposal && laneAt !== at ? `${label}, slide ${laneAt + 1} (was ${at + 1})` : label,
+            variant: 'lane',
+            title: proposal?.slides[slideId]?.title ?? slide.title,
+            // A slide the lane only moves keeps main's render; until the preview is in, the title stands in.
+            url: proposal ? (own ? (own.ready ? thumbUrl(own.hash) : undefined) : mainUrl) : undefined,
+          };
+  }
+
   return (
-    <div style={{ display: 'flex', height: '100%' }}>
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-        <ScreenHeader>
-          <h1 data-testid="slide-crumb" className="screen-title" title={slide.title} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            slide {at + 1} of {deck.order.length}, {slide.title}
-          </h1>
-          {stepLink(prev, 'previous slide')}
-          {stepLink(next, 'next slide')}
-          <BackToMain navigate={navigate} />
-        </ScreenHeader>
-        {/* One left edge: the body starts on the title's column (24px padding + the 120px gutter). */}
-        <main style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 24px 32px calc(24px + var(--gutter))', display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <style>{SLIDE_CSS}</style>
-          <div className="slide-stage">
-            <SlidePreview label={`main, slide ${at + 1}`} variant="main" title={slide.title} url={thumb?.ready ? thumbUrl(thumb.hash) : undefined} />
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <ScreenHeader>
+        <h1 data-testid="slide-crumb" className="screen-title" title={slide.title} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          slide {at + 1} of {deck.order.length}, {slide.title}
+        </h1>
+        {stepLink(prev, 'previous slide')}
+        {stepLink(next, 'next slide')}
+        <BackToMain navigate={navigate} />
+      </ScreenHeader>
+      {/* One column, one left edge on the title's (24px padding + the 120px gutter): the slide, the conversation about it, then its text and lanes. */}
+      <main data-testid="slide-body" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 24px 48px calc(24px + var(--gutter))', display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <style>{SLIDE_CSS}</style>
+        {rows.length > 0 ? (
+          <div data-testid="slide-toggle" role="group" aria-label="render shown" className="slide-toggle">
+            <button type="button" aria-pressed={!shown} onClick={() => setView('main')}>
+              main
+            </button>
+            {rows.map((r) => (
+              <button key={r.lane.id} type="button" aria-pressed={shown?.lane.id === r.lane.id} title={r.lane.label} onClick={() => setView(r.lane.id)}>
+                proposed in {r.lane.label}
+              </button>
+            ))}
           </div>
-          {thumbError ? (
-            <p role="alert" style={{ margin: 0, fontSize: 12, color: 'var(--warn)' }}>
-              Could not render this slide: {thumbError}
-            </p>
-          ) : null}
-          <Field name="story" text={slide.story} testId="slide-story" empty="No story yet: ask the co-author to write the message this slide carries." />
-          <Field name="notes" text={slide.notes} testId="slide-notes" empty="No speaker notes yet." />
-          <section aria-label="lanes on this slide" style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: TEXT_WIDTH, marginTop: 8 }}>
-            {ready ? (
-              <p role="status" style={{ margin: 0, display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 'var(--fs-body)' }}>
-                <span data-testid="lane-ready" style={{ color: 'var(--ink)', fontWeight: 500 }}>lane ready: {ready}</span>
-                <button type="button" aria-label="dismiss" className="link" onClick={() => setReady(null)} style={{ fontSize: 12 }}>
-                  ×
-                </button>
-              </p>
-            ) : null}
-            <h2 className="row-label" style={{ margin: 0 }}>lanes on this slide</h2>
-            {lanesLoad.status === 'loading' ? (
-              <p className="meta" style={{ margin: 0 }}>Loading lanes…</p>
-            ) : lanesLoad.status === 'error' ? (
-              <p role="alert" style={{ margin: 0, fontSize: 'var(--fs-body)', color: 'var(--warn)' }}>
-                <span>Lanes: {lanesLoad.message}</span>{' '}
-                <button type="button" className="btn" onClick={() => void reloadLanes()}>Retry</button>
-              </p>
-            ) : rows.length === 0 ? (
-              <p data-testid="slide-lanes-empty" className="muted" style={{ margin: 0, fontSize: 'var(--fs-body)', lineHeight: 1.5 }}>
-                No open lane changes this slide. Ask the co-author on the right; its lane shows up here.
-              </p>
-            ) : (
-              <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-                {rows.map((r) => (
-                  <LaneOnSlide key={r.lane.id} lane={r.lane} changes={r.changes} api={api} navigate={navigate} />
-                ))}
-              </ul>
-            )}
-          </section>
-        </main>
-      </div>
-      <aside style={{ position: 'relative', width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0 }}>
-        <div style={{ position: 'absolute', inset: 0 }}>
+        ) : null}
+        <div data-testid="slide-stage" className="slide-stage">
+          <SlidePreview {...stage} />
+        </div>
+        {thumbError && !shown ? (
+          <p role="alert" style={{ margin: 0, fontSize: 12, color: 'var(--warn)' }}>
+            Could not render this slide: {thumbError}
+          </p>
+        ) : null}
+        <section aria-label="conversation about this slide" style={{ maxWidth: TEXT_WIDTH, padding: '4px 0 8px', borderBottom: '1px solid var(--line)' }}>
           <Thread
             threadKey={`slide:${slideId}`}
-            subtitle="about this slide; the co-author answers with a lane"
+            title="conversation about this slide"
             hint={HINT}
             context={context}
             order={deck.order}
             slides={deck.slides}
             api={api}
             subscribe={fanout}
+            navigate={navigate}
+            layout="inline"
           />
-        </div>
-      </aside>
+        </section>
+        <Field name="story" text={slide.story} testId="slide-story" empty="No story yet: ask the co-author to write the message this slide carries." />
+        <Field name="notes" text={slide.notes} testId="slide-notes" empty="No speaker notes yet." />
+        <section data-testid="slide-lanes" aria-label="lanes on this slide" style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: TEXT_WIDTH, marginTop: 8 }}>
+          <h2 className="row-label" style={{ margin: 0 }}>lanes on this slide</h2>
+          {lanesLoad.status === 'loading' ? (
+            <p className="meta" style={{ margin: 0 }}>Loading lanes…</p>
+          ) : lanesLoad.status === 'error' ? (
+            <p role="alert" style={{ margin: 0, fontSize: 'var(--fs-body)', color: 'var(--warn)' }}>
+              <span>Lanes: {lanesLoad.message}</span>{' '}
+              <button type="button" className="btn" onClick={() => void reloadLanes()}>Retry</button>
+            </p>
+          ) : rows.length === 0 ? (
+            <p data-testid="slide-lanes-empty" className="muted" style={{ margin: 0, fontSize: 'var(--fs-body)', lineHeight: 1.5 }}>
+              No open lane changes this slide. Ask the co-author above; its lane shows on the slide and here.
+            </p>
+          ) : (
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+              {rows.map((r) => (
+                <LaneOnSlide key={r.lane.id} lane={r.lane} changes={r.changes} api={api} navigate={navigate} />
+              ))}
+            </ul>
+          )}
+        </section>
+      </main>
     </div>
   );
 }

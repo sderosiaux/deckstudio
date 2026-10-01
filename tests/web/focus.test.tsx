@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { Focus } from '../../web/src/screens/Focus.js';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { Focus, BAR_HEIGHT, excerpt } from '../../web/src/screens/Focus.js';
 import type { BusEvent, DeckPayload, FocusApi, LanePreviewPayload } from '../../web/src/api.js';
 import type { Change, Lane, Slide, SlideId, Version } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
@@ -58,34 +58,70 @@ const stubApi = (l: Lane = lane()) => {
 const noEvents = (_h: (e: BusEvent) => void) => () => undefined;
 const crumb = () => screen.queryByTestId('focus-crumb')?.textContent ?? '';
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+/** A subscribe the test can push events through. */
+const bus = () => {
+  const handlers = new Set<(e: BusEvent) => void>();
+  return {
+    subscribe: (h: (e: BusEvent) => void) => {
+      handlers.add(h);
+      return () => {
+        handlers.delete(h);
+      };
+    },
+    emit: (e: BusEvent) => act(() => handlers.forEach((h) => h(e))),
+  };
+};
 
 describe('Focus', () => {
-  it('next/prev cycle through the pending changes only, wrapping around', async () => {
+  it('next/previous step through the pending changes only and stop at the ends', async () => {
     const api = stubApi();
     const navigate = vi.fn();
+    const prevBtn = () => screen.getByRole('button', { name: 'previous change' }) as HTMLButtonElement;
+    const nextBtn = () => screen.getByRole('button', { name: 'next change' }) as HTMLButtonElement;
     const { rerender } = render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={navigate} />);
     await waitFor(() => crumb().includes('change 1 of 3'));
-    expect(crumb()).toContain('lane B');
-
-    fireEvent.click(screen.getByRole('button', { name: /next change/ }));
+    expect(prevBtn().disabled).toBe(true);
+    fireEvent.click(nextBtn());
     expect(navigate).toHaveBeenLastCalledWith('/lane/l1/change/c3');
+
     rerender(<Focus laneId="l1" changeId="c3" api={api} subscribe={noEvents} navigate={navigate} />);
     await waitFor(() => crumb().includes('change 2 of 3'));
-
-    fireEvent.click(screen.getByRole('button', { name: /next change/ }));
+    expect(prevBtn().disabled).toBe(false);
+    expect(nextBtn().disabled).toBe(false);
+    fireEvent.click(nextBtn());
     expect(navigate).toHaveBeenLastCalledWith('/lane/l1/change/c5');
+
     rerender(<Focus laneId="l1" changeId="c5" api={api} subscribe={noEvents} navigate={navigate} />);
     await waitFor(() => crumb().includes('change 3 of 3'));
-
-    fireEvent.click(screen.getByRole('button', { name: /next change/ }));
-    expect(navigate).toHaveBeenLastCalledWith('/lane/l1/change/c1');
-
-    fireEvent.click(screen.getByRole('button', { name: /previous change/ }));
+    expect(nextBtn().disabled).toBe(true);
+    navigate.mockClear();
+    fireEvent.click(nextBtn());
+    expect(navigate).not.toHaveBeenCalled();
+    fireEvent.click(prevBtn());
     expect(navigate).toHaveBeenLastCalledWith('/lane/l1/change/c3');
     // never lands on the accepted or refused ones
     expect(navigate.mock.calls.flat()).not.toContain('/lane/l1/change/c2');
     expect(navigate.mock.calls.flat()).not.toContain('/lane/l1/change/c4');
+  });
+
+  it('the header shows the full lane title and where the lane comes from', async () => {
+    const long = { ...lane(), label: 'Pull the decision-layer detour out of the opening run' };
+    render(<Focus laneId="l1" changeId="c1" api={stubApi(long)} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => crumb().includes('change 1 of 3'));
+    const title = screen.getByTestId('focus-title');
+    expect(title.textContent).toBe('Pull the decision-layer detour out of the opening run');
+    expect(title.style.whiteSpace).toBe('normal');
+    expect(screen.getByTestId('focus-origin').textContent).toBe('from your request on slides 2–4');
+
+    cleanup();
+    render(<Focus laneId="l1" changeId="c1" api={stubApi({ ...long, origin: 'check:arc' })} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('focus-origin'));
+    expect(screen.getByTestId('focus-origin').textContent).toBe('unsolicited, from check: arc, on slides 2–4');
   });
 
   it('shows main vs lane for a modify, with the reason', async () => {
@@ -118,21 +154,47 @@ describe('Focus', () => {
     expect(right!.textContent).toContain('removed');
   });
 
-  it('accept calls the api with the current change id, then moves to the next pending change', async () => {
+  it('accept acknowledges in place for 6 s, notes it in the lane thread, then moves to the next pending change', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const after = lane([{ ...c1, status: 'accepted' }, c2, c3, c4, c5]);
     const api = stubApi();
-    api.acceptChange.mockResolvedValueOnce({ version: { n: 4, order, slides: {}, cause: { kind: 'accept', laneId: 'l1', changeId: 'c1' }, createdAt: '' }, lane: after });
+    api.acceptChange.mockResolvedValueOnce({ version: { n: 8, order, slides: {}, cause: { kind: 'accept', laneId: 'l1', changeId: 'c1' }, createdAt: '' }, lane: after });
+    const navigate = vi.fn();
+    render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={navigate} />);
+    await vi.waitFor(() => expect(crumb()).toContain('change 1 of 3'));
+    fireEvent.click(screen.getByRole('button', { name: 'accept' }));
+    await vi.waitFor(() => expect(screen.queryByTestId('decide-ack')).not.toBeNull());
+    expect(api.acceptChange).toHaveBeenCalledWith('l1', 'c1');
+    expect(api.refuseChange).not.toHaveBeenCalled();
+    const ack = screen.getByTestId('decide-ack');
+    expect(ack.textContent).toContain('accepted into main as v8');
+    expect(screen.queryByTestId('decide-bar')).toBeNull();
+    expect(within(ack).getByRole('button', { name: 'next change' }).className).toBe('btn-primary');
+    expect(screen.getAllByTestId('thread-note').map((n) => n.textContent)).toEqual(['accepted into main as v8']);
+    expect(navigate).not.toHaveBeenCalled();
+
+    act(() => vi.advanceTimersByTime(5_900));
+    expect(navigate).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(200));
+    expect(navigate).toHaveBeenCalledWith('/lane/l1/change/c3');
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it('"next change" on the acknowledgement moves at once', async () => {
+    const after = lane([{ ...c1, status: 'refused' }, c2, c3, c4, c5]);
+    const api = stubApi();
+    api.refuseChange.mockResolvedValueOnce(after);
     const navigate = vi.fn();
     render(<Focus laneId="l1" changeId="c1" api={api} subscribe={noEvents} navigate={navigate} />);
     await waitFor(() => crumb().includes('change 1 of 3'));
-    fireEvent.click(screen.getByRole('button', { name: 'accept' }));
-    await waitFor(() => navigate.mock.calls.length === 1);
-    expect(api.acceptChange).toHaveBeenCalledWith('l1', 'c1');
-    expect(api.refuseChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'refuse' }));
+    await waitFor(() => screen.queryByTestId('decide-ack'));
+    expect(screen.getByTestId('decide-ack').textContent).toContain('refused');
+    fireEvent.click(within(screen.getByTestId('decide-ack')).getByRole('button', { name: 'next change' }));
     expect(navigate).toHaveBeenCalledWith('/lane/l1/change/c3');
   });
 
-  it('refusing the last pending change goes back to main', async () => {
+  it('refusing the last pending change goes back to that slide', async () => {
     const only = lane([c2, c5]);
     const api = stubApi(only);
     api.refuseChange.mockResolvedValueOnce(lane([c2, { ...c5, status: 'refused' }]));
@@ -140,9 +202,26 @@ describe('Focus', () => {
     render(<Focus laneId="l1" changeId="c5" api={api} subscribe={noEvents} navigate={navigate} />);
     await waitFor(() => crumb().includes('change 1 of 1'));
     fireEvent.click(screen.getByRole('button', { name: 'refuse' }));
-    await waitFor(() => navigate.mock.calls.length === 1);
+    await waitFor(() => screen.queryByTestId('decide-ack'));
     expect(api.refuseChange).toHaveBeenCalledWith('l1', 'c5');
-    expect(navigate).toHaveBeenCalledWith('/');
+    fireEvent.click(within(screen.getByTestId('decide-ack')).getByRole('button', { name: 'back to the slide' }));
+    expect(navigate).toHaveBeenCalledWith('/slide/s4');
+  });
+
+  it('a lane revised in place (the current change id is gone) moves to its first pending change and says so', async () => {
+    const api = stubApi();
+    const b = bus();
+    const navigate = vi.fn();
+    const { rerender } = render(<Focus laneId="l1" changeId="c1" api={api} subscribe={b.subscribe} navigate={navigate} />);
+    await waitFor(() => crumb().includes('change 1 of 3'));
+    const n1: Change = { ...c1, id: 'n1', reason: 'tighter title, revised' };
+    api.getLane.mockResolvedValue(lane([n1, c3]));
+    b.emit({ type: 'lane.updated', laneId: 'l1' });
+    await waitFor(() => navigate.mock.calls.length === 1);
+    expect(navigate).toHaveBeenCalledWith('/lane/l1/change/n1');
+    rerender(<Focus laneId="l1" changeId="n1" api={api} subscribe={b.subscribe} navigate={navigate} />);
+    await waitFor(() => crumb().includes('change 1 of 2'));
+    expect(screen.getByTestId('focus-notice').textContent).toBe('the co-author revised this lane');
   });
 
   it('labels each card on its own line above an inset slide frame, and keeps the header gutter empty', async () => {
@@ -170,6 +249,17 @@ describe('Focus', () => {
     // Each underline says what it marks, at its left end.
     expect(screen.getAllByTestId('range-label').map((l) => l.textContent)).toEqual(["this lane's slides on main", 'changed in this lane']);
     expect(screen.getByTestId('thread').getAttribute('data-thread')).toBe('lane:l1');
+  });
+
+  it('the lane thread sits under the pair inside the scrolling body; no right bar', async () => {
+    render(<Focus laneId="l1" changeId="c1" api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('thread'));
+    expect(document.querySelector('aside')).toBeNull();
+    const scroll = screen.getByTestId('focus-scroll');
+    const thread = screen.getByTestId('thread');
+    expect(scroll.contains(thread)).toBe(true);
+    expect(thread.getAttribute('data-layout')).toBe('inline');
+    expect(screen.getByTestId('focus-pair').compareDocumentPosition(thread) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 
@@ -230,17 +320,86 @@ describe('Focus text diff and layout', () => {
     expect(screen.queryAllByTestId('text-diff')).toHaveLength(0);
   });
 
-  it('previews sit in a pair that goes side by side from 1280px; the decision bar sticks to the bottom', async () => {
+  it('previews sit side by side as long as two fit; the sticky decision bar never covers content', async () => {
     render(<Focus laneId="l1" changeId="c1" api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
     await waitFor(() => screen.queryAllByTestId('slide-preview').length === 2);
     const pair = screen.getByTestId('focus-pair');
     expect(pair.className).toBe('focus-pair');
     expect(pair.querySelectorAll('[data-testid="slide-preview"]')).toHaveLength(2);
-    expect(document.querySelector('style')!.textContent).toMatch(/@media \(min-width: 1280px\)\s*\{\s*\.focus-pair/);
+    expect(document.querySelector('style')!.textContent).toMatch(/\.focus-pair \{[^}]*auto-fit/);
+    const scroll = screen.getByTestId('focus-scroll');
     const bar = screen.getByTestId('decide-bar');
+    // The bar is the scroll area's last child, sticky at its bottom, with a fixed height the scroll area pads for.
+    expect(scroll.lastElementChild).toBe(bar);
     expect(bar.style.position).toBe('sticky');
     expect(bar.style.bottom).toBe('0px');
+    expect(bar.style.height).toBe(`${BAR_HEIGHT}px`);
+    expect(scroll.style.scrollPaddingBottom).toBe(`${BAR_HEIGHT}px`);
     expect(bar.contains(screen.getByRole('button', { name: 'accept' }))).toBe(true);
+  });
+});
+
+describe('Focus move changes', () => {
+  const move: Change = { id: 'm1', kind: 'move', slide: 's2', after: 's5', reason: 'later', status: 'pending' };
+  const moved: LanePreviewPayload = { order: ['s1', 's3', 's4', 's5', 's2'], slides: mainSlides, skipped: [], thumbs: {} };
+
+  it('excerpt keeps 5 slides centred on a position, clamped at the deck ends', () => {
+    const o = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    expect(excerpt(o, 4)).toEqual({ start: 2, ids: ['c', 'd', 'e', 'f', 'g'] });
+    expect(excerpt(o, 0)).toEqual({ start: 0, ids: ['a', 'b', 'c', 'd', 'e'] });
+    expect(excerpt(o, 7)).toEqual({ start: 3, ids: ['d', 'e', 'f', 'g', 'h'] });
+    expect(excerpt(['a', 'b'], 1)).toEqual({ start: 0, ids: ['a', 'b'] });
+  });
+
+  it('a move shows two strip excerpts centred on the slide, "was N" on main and "now M" in the lane', async () => {
+    const api = stubApi(lane([move]));
+    api.getLanePreview.mockResolvedValue(moved);
+    render(<Focus laneId="l1" changeId="m1" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('move-excerpt').length === 2);
+    expect(screen.queryAllByTestId('slide-preview')).toHaveLength(0);
+    const [main, laneSide] = screen.getAllByTestId('move-excerpt');
+    const ids = (el: HTMLElement) => within(el).getAllByTestId('thumb').map((t) => t.getAttribute('data-slide'));
+    const sel = (el: HTMLElement) => within(el).getAllByTestId('thumb').find((t) => t.getAttribute('aria-pressed') === 'true')?.getAttribute('data-slide');
+    expect(main!.getAttribute('data-side')).toBe('main');
+    expect(ids(main!)).toEqual(['s1', 's2', 's3', 's4', 's5']);
+    expect(sel(main!)).toBe('s2');
+    expect(within(main!).getByTestId('move-caption').textContent).toBe('main, was 2');
+    expect(laneSide!.getAttribute('data-side')).toBe('lane');
+    expect(ids(laneSide!)).toEqual(['s1', 's3', 's4', 's5', 's2']);
+    expect(sel(laneSide!)).toBe('s2');
+    expect(within(laneSide!).getByTestId('move-caption').textContent).toBe('this lane, now 5');
+  });
+
+  it('the bottom strips scroll so the destination column is visible', async () => {
+    const many: SlideId[] = Array.from({ length: 30 }, (_, i) => `s${i + 1}`);
+    const slidesMany = Object.fromEntries(many.map((id) => [id, slide(id)]));
+    const far: Change = { id: 'm2', kind: 'move', slide: 's2', after: 's28', reason: 'later', status: 'pending' };
+    const after = [...many.filter((x) => x !== 's2').slice(0, 27), 's2', ...many.filter((x) => x !== 's2').slice(27)];
+    const api = stubApi({ ...lane([far]), anchor: { kind: 'slide', slide: 's2' } });
+    api.getDeck.mockResolvedValue({ ...deck, order: many, slides: slidesMany, state: { ...deck.state, order: many } });
+    api.getLanePreview.mockResolvedValue({ order: after, slides: slidesMany, skipped: [], thumbs: {} });
+    // Columns 100px apart from x = 144 in a 1000px wide strip area.
+    const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const el = this as HTMLElement;
+      if (el.tagName === 'FOOTER') return { left: 0, right: 1000, width: 1000, top: 0, bottom: 200, height: 200, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      const item = el.closest('[role="listitem"]');
+      if (item && el.getAttribute('data-testid') === 'thumb') {
+        const i = Array.from(item.parentElement!.children).indexOf(item);
+        const left = 144 + i * 100 - (el.closest('footer')?.scrollLeft ?? 0);
+        return { left, right: left + 96, width: 96, top: 0, bottom: 54, height: 54, x: left, y: 0, toJSON: () => ({}) } as DOMRect;
+      }
+      return { left: 0, right: 0, width: 0, top: 0, bottom: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      render(<Focus laneId="l1" changeId="m2" api={api} subscribe={noEvents} navigate={vi.fn()} />);
+      await waitFor(() => screen.queryAllByTestId('move-excerpt').length === 2);
+      const footer = document.querySelector('footer')!;
+      // s2 lands at column 28 (index 27): x = 144 + 2700, centred in the strip area.
+      await waitFor(() => footer.scrollLeft > 0);
+      expect(footer.scrollLeft).toBe(144 + 27 * 100 + 48 - 500);
+    } finally {
+      rect.mockRestore();
+    }
   });
 });
 

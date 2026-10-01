@@ -1,0 +1,205 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { Thread, describeTool, formatElapsed } from '../../web/src/components/Thread.js';
+import type { BusEvent, LanePreviewPayload, ProposalApi, ThreadApi } from '../../web/src/api.js';
+import type { Change, Lane, Slide, SlideId, ThreadMessage, Version } from '../../src/model/types.js';
+
+const slide = (id: string, title = `Title ${id}`): Slide => ({ id, title, story: '', notes: '', body: '', assets: [], kind: 'text' });
+const order: SlideId[] = ['s1', 's2', 's3'];
+const slides: Record<SlideId, Slide> = Object.fromEntries(order.map((id) => [id, slide(id)]));
+
+const onS2: Change = { id: 'c1', kind: 'modify', slide: 's2', patch: { title: 'Shorter' }, reason: 'shorter labels', status: 'pending' };
+const onS3: Change = { id: 'c2', kind: 'modify', slide: 's3', patch: { title: 'Other' }, reason: 'other slide', status: 'pending' };
+const mkLane = (id: string, anchor: Lane['anchor'], changes: Change[], label = 'Shorter labels on the three jobs'): Lane => ({
+  id,
+  label,
+  anchor,
+  origin: 'user',
+  baseVersion: 3,
+  changes,
+  status: 'open',
+  createdAt: '2026-09-30T00:00:00.000Z',
+});
+const preview: LanePreviewPayload = {
+  order,
+  slides: { ...slides, s2: slide('s2', 'Shorter') },
+  skipped: [],
+  thumbs: { s2: { hash: 'lane_s2', ready: true }, s3: { hash: 'lane_s3', ready: true } },
+};
+const version = (n: number): Version => ({ n, order, slides: {}, cause: { kind: 'import' }, createdAt: '' });
+
+function setup(lanes: Record<string, Lane> = {}) {
+  const handlers = new Set<(e: BusEvent) => void>();
+  const emit = (e: BusEvent) => act(() => handlers.forEach((h) => h(e)));
+  const stored: ThreadMessage[] = [];
+  const api = {
+    getThread: vi.fn(async () => [...stored]),
+    postMessage: vi.fn(async () => undefined),
+    getLane: vi.fn(async (id: string) => lanes[id]!),
+    getLanePreview: vi.fn(async () => preview),
+    thumbFor: vi.fn(async (id: SlideId) => ({ hash: `main_${id}`, ready: true })),
+    acceptChange: vi.fn(async (laneId: string) => ({ version: version(8), lane: { ...lanes[laneId]!, changes: lanes[laneId]!.changes.map((c) => ({ ...c, status: 'accepted' as const })) } })),
+    refuseChange: vi.fn(async (laneId: string) => lanes[laneId]!),
+  } satisfies ThreadApi & ProposalApi;
+  const subscribe = (h: (e: BusEvent) => void) => {
+    handlers.add(h);
+    return () => {
+      handlers.delete(h);
+    };
+  };
+  return { api, emit, subscribe, stored, navigate: vi.fn() };
+}
+
+const send = (text: string) => {
+  fireEvent.change(screen.getByLabelText('message'), { target: { value: text } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+};
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+describe('Thread pending state', () => {
+  it('right after Send shows who works on what with a live timer and the last tool in plain words; done clears it', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    const t = setup();
+    render(<Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} />);
+    send('shorter labels please');
+    const pending = () => screen.queryByTestId('thread-pending');
+    expect(pending()!.textContent).toContain('co-author is working on slide 2');
+    expect(within(pending()!).getByTestId('thread-elapsed').textContent).toBe('0:00');
+    act(() => vi.advanceTimersByTime(12_000));
+    expect(within(pending()!).getByTestId('thread-elapsed').textContent).toBe('0:12');
+
+    t.emit({ type: 'tool.call', thread: 'slide:s2', name: 'mcp__deck__render_slide' });
+    expect(pending()!.textContent).toContain('rendering');
+    // the stream starts: the row keeps the last tool and the timer
+    t.emit({ type: 'assistant.delta', thread: 'slide:s2', text: 'Done.' });
+    expect(pending()!.textContent).toContain('rendering');
+    t.emit({ type: 'tool.call', thread: 'slide:s2', name: 'mcp__deck__propose_lane' });
+    expect(pending()!.textContent).toContain('proposing a lane');
+    expect(pending()!.textContent).not.toContain('·');
+
+    t.emit({ type: 'assistant.done', thread: 'slide:s2', messageId: 'm2' });
+    await vi.waitFor(() => expect(pending()).toBeNull());
+  });
+
+  it('an agent error clears the pending row', async () => {
+    const t = setup();
+    render(<Thread threadKey="global" context={{ kind: 'arc' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} />);
+    send('hi');
+    expect(screen.getByTestId('thread-pending').textContent).toContain('co-author is working on whole deck');
+    t.emit({ type: 'agent.error', thread: 'global', message: 'boom' });
+    expect(screen.queryByTestId('thread-pending')).toBeNull();
+  });
+
+  it('formats elapsed time as m:ss and names tools in plain words', () => {
+    expect(formatElapsed(0)).toBe('0:00');
+    expect(formatElapsed(12_400)).toBe('0:12');
+    expect(formatElapsed(125_000)).toBe('2:05');
+    expect(describeTool('mcp__deck__render_slide')).toBe('rendering');
+    expect(describeTool('mcp__deck__get_slide')).toBe('reading a slide');
+  });
+});
+
+describe('Thread replies carry their proposal', () => {
+  it('a lane created for this context during the turn shows under the reply: title link, before/after thumbs on this slide, accept, refuse, open in focus', async () => {
+    const lane = mkLane('l1', { kind: 'slide', slide: 's2' }, [onS2, onS3]);
+    const unrelated = mkLane('l9', { kind: 'slide', slide: 's3' }, [onS3], 'Elsewhere');
+    const t = setup({ l1: lane, l9: unrelated });
+    render(
+      <Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} navigate={t.navigate} layout="inline" />,
+    );
+    await vi.waitFor(() => expect(t.api.getThread).toHaveBeenCalled());
+    send('shorter labels please');
+    await vi.waitFor(() => expect(t.api.postMessage).toHaveBeenCalled());
+    t.emit({ type: 'lane.created', laneId: 'l1' });
+    t.emit({ type: 'lane.created', laneId: 'l9' });
+    t.stored.push(
+      { id: 'm1', thread: 'slide:s2', role: 'user', text: 'shorter labels please', context: { kind: 'slide', slide: 's2' }, at: '2026-09-30T10:00:00.000Z' },
+      { id: 'm2', thread: 'slide:s2', role: 'assistant', text: 'Proposed shorter labels.', context: null, at: '2026-09-30T10:00:05.000Z' },
+    );
+    t.emit({ type: 'assistant.done', thread: 'slide:s2', messageId: 'm2' });
+
+    await vi.waitFor(() => expect(screen.queryAllByTestId('thread-proposal')).toHaveLength(1));
+    const reply = screen.getAllByTestId('thread-message').find((m) => m.getAttribute('data-role') === 'assistant')!;
+    const block = within(reply).getByTestId('thread-proposal');
+    expect(block.getAttribute('data-lane')).toBe('l1');
+    const title = within(block).getByRole('link', { name: 'Shorter labels on the three jobs' });
+    expect(title.getAttribute('href')).toBe('/lane/l1/change/c1');
+    fireEvent.click(title);
+    expect(t.navigate).toHaveBeenLastCalledWith('/lane/l1/change/c1');
+
+    // only the change on this slide, as a main/lane thumb pair
+    await vi.waitFor(() => expect(within(block).getAllByTestId('proposal-change')).toHaveLength(1));
+    const change = within(block).getByTestId('proposal-change');
+    expect(change.getAttribute('data-change')).toBe('c1');
+    await vi.waitFor(() => expect(change.querySelectorAll('img')).toHaveLength(2));
+    expect(Array.from(change.querySelectorAll('img')).map((i) => i.getAttribute('src'))).toEqual(['/api/thumbs/main_s2.png', '/api/thumbs/lane_s2.png']);
+
+    fireEvent.click(within(change).getByRole('link', { name: 'open in focus' }));
+    expect(t.navigate).toHaveBeenLastCalledWith('/lane/l1/change/c1');
+
+    fireEvent.click(within(change).getByRole('button', { name: 'accept' }));
+    await vi.waitFor(() => expect(t.api.acceptChange).toHaveBeenCalledWith('l1', 'c1'));
+    await vi.waitFor(() => expect(within(block).getByRole('status').textContent).toBe('accepted into main as v8'));
+    // the acknowledgement is also a line of the thread
+    expect(screen.getAllByTestId('thread-note').map((n) => n.textContent)).toContain('accepted into main as v8');
+  });
+
+  it('a lane revised in a lane thread attaches to the reply; nothing attaches without a lane event or for another context', async () => {
+    const lane = mkLane('l1', { kind: 'range', from: 's1', to: 's3' }, [onS2]);
+    const t = setup({ l1: lane });
+    render(<Thread threadKey="lane:l1" context={{ kind: 'slide', slide: 's1' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await vi.waitFor(() => expect(t.api.getThread).toHaveBeenCalled());
+
+    send('no lane this time');
+    t.stored.push({ id: 'a1', thread: 'lane:l1', role: 'assistant', text: 'Nothing to change.', context: null, at: '2026-09-30T10:00:01.000Z' });
+    t.emit({ type: 'assistant.done', thread: 'lane:l1', messageId: 'a1' });
+    await vi.waitFor(() => expect(screen.queryAllByTestId('thread-message')).toHaveLength(1));
+    expect(screen.queryByTestId('thread-proposal')).toBeNull();
+
+    send('revise it');
+    await vi.waitFor(() => expect(t.api.postMessage).toHaveBeenCalledTimes(2));
+    t.emit({ type: 'lane.updated', laneId: 'l1' });
+    t.stored.push({ id: 'a2', thread: 'lane:l1', role: 'assistant', text: 'Revised.', context: null, at: '2026-09-30T10:00:09.000Z' });
+    t.emit({ type: 'assistant.done', thread: 'lane:l1', messageId: 'a2' });
+    await vi.waitFor(() => expect(screen.queryAllByTestId('thread-proposal')).toHaveLength(1));
+    const reply = screen.getAllByTestId('thread-message').find((m) => m.textContent?.includes('Revised.'))!;
+    expect(within(reply).getByTestId('thread-proposal').getAttribute('data-lane')).toBe('l1');
+  });
+
+  it('refuse says refused, in the block and in the thread', async () => {
+    const lane = mkLane('l1', { kind: 'slide', slide: 's2' }, [onS2]);
+    const t = setup({ l1: lane });
+    t.api.refuseChange.mockResolvedValueOnce({ ...lane, status: 'closed', changes: [{ ...onS2, status: 'refused' }] });
+    render(<Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    send('x');
+    await vi.waitFor(() => expect(t.api.postMessage).toHaveBeenCalled());
+    t.emit({ type: 'lane.created', laneId: 'l1' });
+    t.stored.push({ id: 'm2', thread: 'slide:s2', role: 'assistant', text: 'ok', context: null, at: '2026-09-30T10:00:05.000Z' });
+    t.emit({ type: 'assistant.done', thread: 'slide:s2', messageId: 'm2' });
+    await vi.waitFor(() => expect(screen.queryAllByRole('button', { name: 'refuse' })).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'refuse' }));
+    await vi.waitFor(() => expect(within(screen.getByTestId('thread-proposal')).getByRole('status').textContent).toBe('refused'));
+    expect(screen.getAllByTestId('thread-note').map((n) => n.textContent)).toContain('refused');
+  });
+
+  it('shows notes given by the screen as thread lines', async () => {
+    const t = setup();
+    render(
+      <Thread
+        threadKey="lane:l1"
+        context={{ kind: 'arc' }}
+        order={order}
+        slides={slides}
+        api={t.api}
+        subscribe={t.subscribe}
+        notes={[{ id: 'n1', text: 'accepted into main as v8', at: '2026-09-30T10:00:00.000Z' }]}
+      />,
+    );
+    await vi.waitFor(() => expect(screen.getAllByTestId('thread-note').map((n) => n.textContent)).toEqual(['accepted into main as v8']));
+  });
+});

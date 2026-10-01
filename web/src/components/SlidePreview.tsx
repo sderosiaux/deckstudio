@@ -12,14 +12,16 @@ export interface SlidePreviewProps {
   url?: string;
   /** Text of the dashed card for `missing`, eg "not in main". */
   missingText?: string;
+  /** Card width in px; 560 by default (the reading size). */
+  width?: number;
 }
 
 const WIDTH = 560;
 
 /** The card: white, its ring saying which side it is, 12px of padding around the label line and the slide frame. */
-const card = (variant: SlidePreviewVariant): CSSProperties => ({
-  width: WIDTH,
-  flex: `0 0 ${WIDTH}px`,
+const card = (variant: SlidePreviewVariant, width: number): CSSProperties => ({
+  width,
+  flex: `0 0 ${width}px`,
   display: 'flex',
   flexDirection: 'column',
   gap: 8,
@@ -46,11 +48,11 @@ const frame = (variant: SlidePreviewVariant): CSSProperties => ({
  * One slide at reading size (560px wide unless its container sets the width): the label line, then the whole slide
  * in an inset 16:9 frame, from its thumbnail; or a dashed frame when the slide does not exist on that side.
  */
-export function SlidePreview({ label, variant, title = '', url, missingText = '' }: SlidePreviewProps) {
+export function SlidePreview({ label, variant, title = '', url, missingText = '', width = WIDTH }: SlidePreviewProps) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [url]);
   return (
-    <figure data-testid="slide-preview" data-variant={variant} aria-label={label} style={{ margin: 0, ...card(variant) }}>
+    <figure data-testid="slide-preview" data-variant={variant} aria-label={label} style={{ margin: 0, ...card(variant, width) }}>
       <figcaption style={caption} title={label}>{label}</figcaption>
       <div data-testid="slide-frame" style={frame(variant)}>
         {variant === 'missing' ? (
