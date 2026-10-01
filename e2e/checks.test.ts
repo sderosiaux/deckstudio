@@ -58,6 +58,8 @@ describe.skipIf(!ENABLED)('checks: real SDK gaps check on the SF deck', () => {
       if (r.anchor.kind === 'slide') expect(valid(r.anchor.slide)).toBe(true);
       if (r.anchor.kind === 'range') expect(valid(r.anchor.from) && valid(r.anchor.to)).toBe(true);
     }
-    expect((await store.remarks()).filter((r) => r.origin === 'check:gaps')).toHaveLength(remarks.length);
+    // The deck copy may already hold gaps remarks that the run kept (dedupe by similarity): every returned remark is stored.
+    const stored = new Set((await store.remarks()).filter((r) => r.origin === 'check:gaps').map((r) => r.id));
+    for (const r of remarks) expect(stored.has(r.id)).toBe(true);
   });
 });
