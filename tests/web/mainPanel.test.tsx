@@ -63,8 +63,7 @@ vi.mock('../../web/src/api.js', async (importOriginal) => {
   };
 });
 
-const { Main, deckTurns, panelSpan, revealColumn, StripPager } = await import('../../web/src/screens/Main.js');
-const { placeCards } = await import('../../web/src/components/RemarkRow.js');
+const { Main, deckTurns, revealColumn, sheetLayout, StripPager } = await import('../../web/src/screens/Main.js');
 
 const remark = (id: string, anchor: Remark['anchor']): Remark => ({
   id, anchor, text: `text ${id}`, origin: 'check:render', severity: 'warn', status: 'open', laneId: null, createdAt: '2026-09-30T00:00:00.000Z',
@@ -102,18 +101,53 @@ describe('Main selection panel', () => {
   it('nothing selected: no panel, the whole-deck conversation in the right bar', async () => {
     await mounted();
     expect(panel()).toBeNull();
+    expect(screen.queryByTestId('selection-stage')).toBeNull();
     const bar = screen.getByTestId('thread-panel');
     expect(within(bar).getByTestId('thread').getAttribute('data-thread')).toBe('global');
     expect(within(bar).getByRole('heading', { name: 'whole deck' })).toBeTruthy();
     expect(within(bar).getByTestId('context-chip').getAttribute('data-kind')).toBe('arc');
   });
 
-  it('a selected slide opens the panel under its column, on the slide:<id> thread, above the lane rows', async () => {
+  it('nothing selected: the whole deck fills the room left under the lanes, every slide large; a click selects it', async () => {
+    await mounted();
+    const sheet = screen.getByTestId('deck-sheet');
+    const cells = within(sheet).getAllByTestId('sheet-slide');
+    expect(cells.map((c) => c.getAttribute('data-slide'))).toEqual(order);
+    expect(cells[2]!.querySelector('img')!.getAttribute('src')).toBe('/api/thumbs/h_s3.png');
+    // After the lanes (here their empty state): the work comes first, the deck takes what is left.
+    expect(screen.getByText(/^No open lanes/).compareDocumentPosition(sheet) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(cells[2]!, { detail: 1 });
+    const p = await waitFor(() => panel());
+    expect(p.getAttribute('data-slide')).toBe('s3');
+    expect(pressed()).toEqual(['s3']);
+    expect(screen.queryByTestId('deck-sheet')).toBeNull();
+  });
+
+  it('the deck sheet picks the largest 16:9 cells that fit every slide in its box, else the smallest readable ones', () => {
+    // 6 slides in 900x600: 3 per line, 292px each (2 lines of 164px + label).
+    expect(sheetLayout(6, 900, 600)).toEqual({ cols: 3, cell: 292 });
+    // 30 slides in 900x600: 6 per line is the fewest that fits (5 lines of 79px and their label).
+    expect(sheetLayout(30, 900, 600)).toEqual({ cols: 6, cell: 140 });
+    // Never above 320px: a short deck spreads over more columns instead.
+    expect(sheetLayout(2, 1400, 900).cell).toBeLessThanOrEqual(320);
+    // No room at all: as many 112px+ cells per line as the width holds; the canvas scrolls.
+    const tight = sheetLayout(30, 900, 100);
+    expect(tight.cell).toBeGreaterThanOrEqual(112);
+    expect(tight.cols * tight.cell + (tight.cols - 1) * 12).toBeLessThanOrEqual(900);
+  });
+
+  it('a selected slide opens the stage under the strip: its render large, the slide:<id> conversation beside it, above the lane rows', async () => {
     await mounted();
     fireEvent.click(thumb('s3'));
     const p = await waitFor(() => panel());
     expect(p.getAttribute('data-slide')).toBe('s3');
-    expect(p.closest('[data-testid="selection-slot"]')!.getAttribute('data-col')).toBe('2');
+    const stage = screen.getByTestId('selection-stage');
+    expect(stage.contains(p)).toBe(true);
+    const render = within(stage).getByTestId('stage-render');
+    expect(within(render).getAllByTestId('slide-preview')).toHaveLength(1);
+    expect(within(render).getByRole('img').getAttribute('src')).toBe('/api/thumbs/h_s3.png');
+    // The render comes first, the conversation beside it.
+    expect(render.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(p).getByTestId('thread').getAttribute('data-thread')).toBe('slide:s3');
     await waitFor(() => m.getThread.mock.calls.some((c) => c[0] === 'slide:s3'));
     // Sent from the panel: on the slide thread, about that slide.
@@ -191,15 +225,15 @@ describe('Main selection panel', () => {
     expect(deckTurns([msg('x', 'assistant', null, '2026-09-30T00:00:00.000Z')]).map((x) => x.id)).toEqual(['x']);
   });
 
-  it('the panel is 5 to 9 columns wide from its column, and keeps that left edge with the canvas scrolled away', () => {
-    expect(panelSpan(3, undefined)).toBe(9);
-    expect(panelSpan(3, { first: 0, end: 9 })).toBe(6);
-    expect(panelSpan(7, { first: 0, end: 9 })).toBe(5);
-    expect(panelSpan(3, { first: 0, end: 20 })).toBe(9);
-    // Slides 4-6 selected, the canvas at its end (columns 21..29 in view): the panel is out of view, so placed
-    // without a view, at its own column and nine columns wide, never stretched over the columns in sight.
-    const [placed] = placeCards([{ id: 'p', col: 3, span: panelSpan(3, undefined), selected: true }], 30, 1);
-    expect(placed).toMatchObject({ start: 3, width: 9 });
+  it('the stage stays pinned to the visible canvas whatever its sideways scroll: its render and panel never page out', async () => {
+    await mounted();
+    const canvas = screen.getByTestId('canvas');
+    canvas.scrollLeft = 400;
+    fireEvent.click(thumb('s1'));
+    const stage = await waitFor(() => screen.queryByTestId('selection-stage'));
+    expect(stage.className).toContain('main-stage');
+    expect(panel()).not.toBeNull();
+    expect(screen.queryByTestId('panel-bar')).toBeNull();
   });
 
   it("the panel's height stops above the versions rail: the canvas height less the strip, the log scrolls inside", async () => {
@@ -286,7 +320,9 @@ describe('Main selection panel', () => {
     fireEvent.click(thumb('s4'), { shiftKey: true });
     const p = await waitFor(() => (panel()?.getAttribute('data-kind') === 'range' ? panel() : null));
     expect(p.getAttribute('data-slide')).toBe('s2');
-    expect(p.closest('[data-testid="selection-slot"]')!.getAttribute('data-col')).toBe('1');
+    // The stage shows every slide of the range.
+    const render = within(screen.getByTestId('selection-stage')).getByTestId('stage-render');
+    expect(within(render).getAllByTestId('slide-preview').map((x) => x.getAttribute('aria-label'))).toEqual([expect.stringMatching(/^slide 2/), expect.stringMatching(/^slide 3/), expect.stringMatching(/^slide 4/)]);
     expect(within(p).getByTestId('thread').getAttribute('data-thread')).toBe('global');
     await waitFor(() => within(p).queryAllByTestId('thread-message').length === 2);
     expect(within(p).getAllByTestId('thread-message').map((x) => x.textContent)).toEqual([expect.stringContaining('text u_range'), expect.stringContaining('text a_range')]);
@@ -488,40 +524,6 @@ describe('Main panel QA3', () => {
     } finally {
       Object.defineProperty(Element.prototype, 'scrollHeight', sh);
       Object.defineProperty(Element.prototype, 'clientHeight', ch);
-    }
-  });
-
-  it('a panel whose slide pages out of view folds to a one-line bar at the strip\'s left edge; "show" brings the column back', async () => {
-    const rect = (left: number, width: number) => ({ left, right: left + width, top: 0, bottom: 50, width, height: 50, x: left, y: 0, toJSON: () => ({}) });
-    const gbcr = Element.prototype.getBoundingClientRect;
-    const cw = Object.getOwnPropertyDescriptor(Element.prototype, 'clientWidth')!;
-    // Columns 0-2 sit under the gutter (the strip paged on): slides 4-6 are in view.
-    Element.prototype.getBoundingClientRect = function (this: Element) {
-      if (this.getAttribute('data-testid') === 'canvas') return rect(0, 1000);
-      if (this.classList.contains('gutter')) return rect(24, 120);
-      if (this.getAttribute('data-testid') === 'thumb' && this.closest('[data-strip="main"]')) {
-        const i = order.indexOf(this.getAttribute('data-slide')!);
-        return rect(150 + (i - 3) * 108, 100);
-      }
-      return rect(0, 0);
-    };
-    Object.defineProperty(Element.prototype, 'clientWidth', { configurable: true, get(this: Element) { return this.getAttribute('data-testid') === 'canvas' ? 1000 : 0; } });
-    try {
-      await mounted();
-      const canvas = screen.getByTestId('canvas');
-      canvas.scrollLeft = 400;
-      fireEvent.click(thumb('s1'));
-      const bar = await waitFor(() => screen.queryByTestId('panel-bar'));
-      // No panel holding its height off-screen.
-      expect(panel()).toBeNull();
-      expect(bar.textContent).toContain('conversation about slide 1');
-      fireEvent.click(within(bar).getByRole('button', { name: 'show' }));
-      // revealColumn(0): slide 1 at -174 comes to the row start (150): 324px back.
-      expect(canvas.scrollLeft).toBe(76);
-      expect(pressed()).toEqual(['s1']);
-    } finally {
-      Element.prototype.getBoundingClientRect = gbcr;
-      Object.defineProperty(Element.prototype, 'clientWidth', cw);
     }
   });
 

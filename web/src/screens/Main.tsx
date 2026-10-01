@@ -32,8 +32,8 @@ import { END_W, EdgeFade, useVisibleColumns, type VisibleColumns } from '../comp
 import { Filmstrip } from '../components/Filmstrip.js';
 import { FAILED_THUMB, LaneRow, MoveRisers, VariantRow, anchorColumns, variantGroups, type VariantGroup } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
-import { RemarkRow } from '../components/RemarkRow.js';
 import { ScreenHeader } from '../components/ScreenHeader.js';
+import { SlidePreview } from '../components/SlidePreview.js';
 import { Thread } from '../components/Thread.js';
 import type { RemarkDot } from '../components/Thumb.js';
 import { VersionLine } from '../components/VersionLine.js';
@@ -69,9 +69,6 @@ interface ProposeNote {
   touched: ReadonlySet<string>;
 }
 const MAX_NOTES = 5;
-/** The selection panel runs from its column to the visible right edge, never narrower than 5 columns nor wider than 9. */
-const PANEL_MIN_COLS = 5;
-const PANEL_MAX_COLS = 9;
 /** Room kept between the panel's bottom and the canvas's visible bottom (the versions rail starts there). */
 const PANEL_CLEAR = 16;
 /** What lies above the panel besides the strip: the canvas's 8px top padding, the pin row (8px and its 10px gap), 2px of margin. */
@@ -119,10 +116,131 @@ export function deckTurns(messages: readonly ThreadMessage[]): ThreadMessage[] {
   });
 }
 
-/** Width of the selection panel in columns, from its 0-based column: to the visible end, clamped to 5..9 (9 when its column is out of view). */
-export function panelSpan(col: number, view: { first: number; end: number } | undefined): number {
-  const toEdge = view && col >= view.first && col < view.end ? view.end - col : PANEL_MAX_COLS;
-  return Math.min(PANEL_MAX_COLS, Math.max(PANEL_MIN_COLS, toEdge));
+/** Deck sheet cells: never under 112px (a slide stays legible as a slide), never over 320px; 12px apart, a 22px number and title line under each. */
+const SHEET_MIN = 112;
+const SHEET_MAX = 320;
+const SHEET_GAP = 12;
+const SHEET_LABEL = 22;
+/** The canvas's padding: 8px over the strip, 24px under the last row. */
+const CANVAS_TOP = 8;
+const CANVAS_BOTTOM = 24;
+/** A SlidePreview card around its 16:9 frame: 12px of padding each side, the 16px label line and its 8px gap. */
+const PREVIEW_PAD_W = 24;
+const PREVIEW_PAD_H = 48;
+const STAGE_GAP = 12;
+
+/**
+ * The deck sheet's grid: the fewest columns (so the largest 16:9 cells) that fit all `n` slides in `width` x `height`,
+ * at most 320px a cell; when even 112px cells overflow the height, as many 112px+ cells per line as the width holds
+ * (the canvas scrolls on).
+ */
+export function sheetLayout(n: number, width: number, height: number): { cols: number; cell: number } {
+  const fit = (cols: number): number => Math.floor((width - (cols - 1) * SHEET_GAP) / cols);
+  if (n > 0 && width > 0) {
+    for (let cols = 1; cols <= n; cols++) {
+      const cell = fit(cols);
+      if (cell < SHEET_MIN) break;
+      const rows = Math.ceil(n / cols);
+      if (rows * ((cell * 9) / 16 + SHEET_LABEL) + (rows - 1) * SHEET_GAP > height) continue;
+      if (cell <= SHEET_MAX) return { cols, cell };
+      const wide = Math.min(n, Math.ceil((width + SHEET_GAP) / (SHEET_MAX + SHEET_GAP)));
+      return { cols: wide, cell: Math.min(SHEET_MAX, fit(wide)) };
+    }
+  }
+  const cols = Math.max(1, Math.floor((width + SHEET_GAP) / (SHEET_MIN + SHEET_GAP)));
+  return { cols, cell: Math.max(SHEET_MIN, fit(cols)) };
+}
+
+/**
+ * Width of a box pinned to the visible canvas under the strip: up to where the "+N" cover starts (EdgeFade paints
+ * paper over everything from there), less the canvas's 24px left padding. Before any measure, the canvas less the slot.
+ */
+const pinnedWidth = (visible: VisibleColumns | null): string => (visible ? `${Math.max(0, visible.cut - 24)}px` : 'calc(100cqw - var(--end-slot))');
+
+/**
+ * Nothing selected: the whole deck as a sheet under the lanes, its cells as large as the room left above the versions
+ * rail allows, so no band of paper sits between the work and the rail. A click selects the slide, a double-click presents it.
+ */
+function DeckSheet({
+  order,
+  slides,
+  thumbs,
+  dots,
+  width,
+  canvasHeight,
+  onPick,
+  onOpen,
+}: {
+  order: readonly SlideId[];
+  slides: DeckPayload['slides'];
+  thumbs: Record<SlideId, string | undefined>;
+  dots: Record<SlideId, RemarkDot>;
+  width: string;
+  canvasHeight: number;
+  onPick(id: SlideId, e: MouseEvent<HTMLElement>): void;
+  onOpen(id: SlideId): void;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const grid = useRef<HTMLDivElement>(null);
+  const [room, setRoom] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  const measure = useCallback(() => {
+    const el = box.current;
+    const g = grid.current;
+    if (!el || !g) return;
+    const w = g.clientWidth;
+    const h = canvasHeight - CANVAS_TOP - el.offsetTop - CANVAS_BOTTOM;
+    setRoom((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
+  }, [canvasHeight]);
+  // Its top moves with every lane row above it: measured after each render, and when the rows box resizes.
+  useLayoutEffect(measure);
+  useEffect(() => {
+    const el = box.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    if (el.parentElement) ro.observe(el.parentElement);
+    return () => ro.disconnect();
+  }, [measure]);
+  const { cols, cell } = room.w > 0 ? sheetLayout(order.length, room.w, room.h) : { cols: 8, cell: SHEET_MIN };
+  return (
+    <div ref={box} data-testid="deck-sheet" className="main-pinned" style={{ width }}>
+      <div className="gutter row-label" style={{ paddingTop: 2 }}>
+        all slides
+      </div>
+      <div ref={grid} role="list" aria-label="all slides" className="deck-sheet-grid" style={{ gridTemplateColumns: `repeat(${cols}, ${cell}px)` }}>
+        {order.map((id, i) => {
+          const title = slides[id]?.title ?? id;
+          const url = thumbs[id];
+          const dot = dots[id];
+          return (
+            <button
+              key={id}
+              type="button"
+              role="listitem"
+              data-testid="sheet-slide"
+              data-slide={id}
+              className="sheet-slide"
+              aria-label={`Slide ${i + 1}: ${title}${dot ? `, ${dot.count} open ${dot.count === 1 ? 'remark' : 'remarks'}` : ''}`}
+              title="Click to select, double-click to present"
+              onClick={(e) => onPick(id, e)}
+              onDoubleClick={() => onOpen(id)}
+            >
+              <span className="sheet-frame">{url ? <img src={url} alt="" draggable={false} /> : null}</span>
+              <span className="sheet-label">
+                <span className="sheet-n">{i + 1}</span>
+                <span className="sheet-title">{title}</span>
+                {dot ? (
+                  <span className="sheet-dot" data-severity={dot.severity} aria-hidden>
+                    {dot.count}
+                  </span>
+                ) : null}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 /** Scrolls `canvas` sideways so that main's column `col` (0-based) is the first one right of the gutter. */
@@ -196,7 +314,7 @@ function PanelRemarks({ remarks, card }: { remarks: readonly Remark[]; card(r: R
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div data-testid="panel-remarks" className="panel-remarks" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
         {shown.map((r) => (
-          <div key={r.id} style={{ width: 280, maxWidth: '100%' }}>
+          <div key={r.id} style={{ flex: '1 1 240px', minWidth: 0 }}>
             {card(r)}
           </div>
         ))}
@@ -713,20 +831,6 @@ export function Main() {
     return () => el.removeEventListener('wheel', onWheel);
   }, [load.status]);
 
-  // The versions rail is pinned under the canvas, outside it: the canvas ends on a blank as tall as the rail, so the
-  // last lane row scrolls well clear of the rail's edge.
-  const rail = useRef<HTMLDivElement>(null);
-  const [railHeight, setRailHeight] = useState(0);
-  useLayoutEffect(() => {
-    const el = rail.current;
-    if (!el) return;
-    const measure = (): void => setRailHeight(el.offsetHeight);
-    measure();
-    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
-    ro?.observe(el);
-    return () => ro?.disconnect();
-  }, [load.status]);
-
   // The strip header stays on top of the canvas: the selection panel never grows past the space left under it, so its
   // composer stays above the versions rail; the log scrolls inside.
   const stripHeader = useRef<HTMLDivElement>(null);
@@ -745,7 +849,7 @@ export function Main() {
 
   // Clicking empty space (not a thumb, not a button) clears the selection back to the whole deck.
   const clearOnEmpty = (e: MouseEvent<HTMLElement>): void => {
-    if (e.target instanceof Element && e.target.closest('button, a, input, textarea, [data-testid="thumb"], [data-testid="post-it"], [data-testid="selection-panel"], [data-testid="panel-bar"]')) return;
+    if (e.target instanceof Element && e.target.closest('button, a, input, textarea, [data-testid="thumb"], [data-testid="post-it"], [data-testid="selection-panel"], [data-testid="selection-stage"]')) return;
     setContext({ kind: 'arc' });
   };
 
@@ -920,12 +1024,6 @@ export function Main() {
             })}
           </div>
         ) : null;
-  const panelCol = selectedCols?.start ?? null;
-  // Anchored on the selection's first column, it runs to the visible right edge. Once the strip pages its column out
-  // of view it folds to a one-line bar at the strip's left edge: no empty band holds its height, the lanes move up.
-  const panelOff = view !== undefined && panelCol !== null && (panelCol < view.first || panelCol >= view.end);
-  const panelView = view && !panelOff ? view : undefined;
-  const panelCols = panelCol === null ? 0 : panelSpan(panelCol, panelView);
   const panelMax = room.canvas > 0 ? Math.max(160, room.canvas - PANEL_TOP - room.strip - PANEL_CLEAR) : null;
   const panelSlide = context.kind === 'slide' ? context.slide : context.kind === 'range' ? deck.order[selectedCols?.start ?? 0] : undefined;
   const panelTitle = context.kind === 'slide' ? 'conversation about this slide' : 'conversation about these slides';
@@ -933,78 +1031,85 @@ export function Main() {
   const remarkCard = (r: Remark): React.ReactNode => (
     <RemarkPostIt remark={r} onPropose={propose} onResolve={remarkApi.resolveRemark} draftLaneId={draftOf(r)} onOpenLane={openFromRemark} openedLane={openedLane(r)} expandable />
   );
-  const panelBar =
-    panelOff && panelCol !== null && context.kind !== 'arc' ? (
-      <div style={{ display: 'flex', marginTop: 2 }}>
-        <div className="gutter" />
-        <div data-testid="panel-bar" className="panel-bar">
-          <span>conversation about {anchorLabel(context, deck.order)}:</span>
-          <button type="button" className="link" onClick={() => reveal(panelCol)} style={{ color: 'var(--ink)' }}>
-            show
-          </button>
+  const pinned = pinnedWidth(visible);
+  // The stage's slides: the selected one, or every slide of the range, in a near-square grid.
+  const stageIds = selectedCols ? deck.order.slice(selectedCols.start, selectedCols.start + selectedCols.span) : [];
+  const stageCols = Math.max(1, Math.ceil(Math.sqrt(stageIds.length)));
+  const stageRows = Math.max(1, Math.ceil(stageIds.length / stageCols));
+  // As wide as its column allows, but never taller than the room under the strip: the whole render stays in view.
+  const stageMaxW =
+    panelMax === null
+      ? undefined
+      : Math.max(
+          240,
+          Math.floor(stageCols * ((((panelMax - (stageRows - 1) * STAGE_GAP) / stageRows - PREVIEW_PAD_H) * 16) / 9 + PREVIEW_PAD_W) + (stageCols - 1) * STAGE_GAP),
+        );
+  const selectionStage =
+    selectedCols && context.kind !== 'arc' ? (
+      <div data-testid="selection-stage" className="main-pinned main-stage" style={{ width: pinned }}>
+        <div className="gutter row-label" style={{ paddingTop: 12 }}>
+          {anchorLabel(context, deck.order)}
+        </div>
+        <div className="main-stage-body">
+          <div
+            data-testid="stage-render"
+            className="stage-render"
+            style={{ gridTemplateColumns: `repeat(${stageCols}, minmax(0, 1fr))`, ...(stageMaxW === undefined ? {} : { maxWidth: stageMaxW }) }}
+          >
+            {stageIds.map((id) => {
+              const n = deck.order.indexOf(id) + 1;
+              const title = deck.slides[id]?.title ?? id;
+              return (
+                <div key={id} onDoubleClick={() => presentFrom(id)} title="Double-click to present from here">
+                  <SlidePreview label={`slide ${n}: ${title}`} variant="main" title={title} url={shownThumbs[id]} />
+                </div>
+              );
+            })}
+          </div>
+          <PanelBox
+            data-testid="selection-panel"
+            data-slide={panelSlide}
+            data-kind={context.kind}
+            aria-label={panelTitle}
+            className="selection-panel"
+            style={{ ...(panelMax === null ? {} : { '--panel-max-h': `${panelMax}px` }), position: 'relative', zIndex: 1, padding: 16, borderRadius: 'var(--radius)', background: 'var(--card)', border: '1px solid var(--line)', boxShadow: 'var(--shadow)', cursor: 'auto' } as CSSProperties}
+          >
+            <Thread
+              key={context.kind === 'slide' ? `slide:${context.slide}` : 'range'}
+              threadKey={context.kind === 'slide' ? `slide:${context.slide}` : 'global'}
+              title={panelTitle}
+              hint={context.kind === 'slide' ? SLIDE_HINT : RANGE_HINT}
+              context={context}
+              only={context.kind === 'range' ? context : undefined}
+              order={deck.order}
+              slides={deck.slides}
+              api={panelApi}
+              subscribe={fanout}
+              onClearContext={() => setContext({ kind: 'arc' })}
+              onEditContext={editSlide}
+              autoFocus={focusComposer}
+              layout="inline"
+              logMaxHeight={panelMax === null ? 'min(360px, 40vh)' : 'var(--panel-max-h)'}
+              knownLanes={lanes}
+              onShowLane={showLane}
+              lead={
+                panelRemarks.length > 0 || notesBlock ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {panelRemarks.length > 0 ? <PanelRemarks key={selectionKey} remarks={panelRemarks} card={remarkCard} /> : null}
+                    {notesBlock}
+                  </div>
+                ) : null
+              }
+            />
+          </PanelBox>
         </div>
       </div>
     ) : null;
-  const selectionPanel =
-    panelCol !== null && context.kind !== 'arc' && !panelOff ? (
-      <div style={{ display: 'flex', marginTop: 2 }}>
-        <div className="gutter" />
-        <RemarkRow
-          testId="selection-row"
-          slotTestId="selection-slot"
-          columns={deck.order.length}
-          maxRows={1}
-          view={panelView}
-          items={[
-            {
-              id: 'selection',
-              col: panelCol,
-              span: panelCols,
-              selected: true,
-              slide: panelSlide,
-              card: (
-                <PanelBox
-                  data-testid="selection-panel"
-                  data-slide={panelSlide}
-                  data-kind={context.kind}
-                  aria-label={panelTitle}
-                  className="selection-panel"
-                  style={{ ...(panelMax === null ? {} : { '--panel-max-h': `${panelMax}px` }), position: 'relative', zIndex: 1, padding: 16, borderRadius: 'var(--radius)', background: 'var(--card)', border: '1px solid var(--line)', boxShadow: 'var(--shadow)', cursor: 'auto' } as CSSProperties}
-                >
-                  <Thread
-                    key={context.kind === 'slide' ? `slide:${context.slide}` : 'range'}
-                    threadKey={context.kind === 'slide' ? `slide:${context.slide}` : 'global'}
-                    title={panelTitle}
-                    hint={context.kind === 'slide' ? SLIDE_HINT : RANGE_HINT}
-                    context={context}
-                    only={context.kind === 'range' ? context : undefined}
-                    order={deck.order}
-                    slides={deck.slides}
-                    api={panelApi}
-                    subscribe={fanout}
-                    onClearContext={() => setContext({ kind: 'arc' })}
-                    onEditContext={editSlide}
-                    autoFocus={focusComposer}
-                    layout="inline"
-                    logMaxHeight={panelMax === null ? 'min(360px, 40vh)' : 'var(--panel-max-h)'}
-                    knownLanes={lanes}
-                    onShowLane={showLane}
-                    lead={
-                      panelRemarks.length > 0 || notesBlock ? (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                          {panelRemarks.length > 0 ? <PanelRemarks key={selectionKey} remarks={panelRemarks} card={remarkCard} /> : null}
-                          {notesBlock}
-                        </div>
-                      ) : null
-                    }
-                  />
-                </PanelBox>
-              ),
-            },
-          ]}
-        />
-      </div>
-    ) : null;
+  const pickFromSheet = (id: SlideId, e: MouseEvent<HTMLElement>): void => {
+    shift.current = e.shiftKey;
+    pointer.current = e.detail > 0;
+    onSelect(id);
+  };
   return (
     <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
@@ -1033,7 +1138,7 @@ export function Main() {
             data-testid="canvas"
             className="fit-columns"
             onClick={clearOnEmpty}
-            style={{ '--strip-h': `${room.strip}px`, flex: 1, minHeight: 0, overflow: 'auto', paddingTop: 8, paddingRight: 24, paddingLeft: 24, paddingBottom: railHeight } as CSSProperties}
+            style={{ '--strip-h': `${room.strip}px`, flex: 1, minHeight: 0, overflow: 'auto', paddingTop: 8, paddingRight: 24, paddingLeft: 24, paddingBottom: CANVAS_BOTTOM } as CSSProperties}
           >
             {deck.order.length === 0 ? (
               <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
@@ -1073,10 +1178,9 @@ export function Main() {
                       )
                     : null}
                 </div>
-                {selectionPanel || panelBar || remarkError ? (
-                  <div style={{ marginTop: -24 }}>
-                    {selectionPanel}
-                    {panelBar}
+                {selectionStage || remarkError ? (
+                  <div style={{ marginTop: -8 }}>
+                    {selectionStage}
                     {remarkError ? (
                       <p style={{ margin: '6px 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>
                         <span>Remarks: {remarkError}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
@@ -1096,13 +1200,16 @@ export function Main() {
                 ) : (
                   laneRows
                 )}
+                {context.kind === 'arc' ? (
+                  <DeckSheet order={deck.order} slides={deck.slides} thumbs={shownThumbs} dots={dots} width={pinned} canvasHeight={room.canvas} onPick={pickFromSheet} onOpen={presentFrom} />
+                ) : null}
               </div>
             )}
           </main>
           <EdgeFade visible={visible} />
           <StripPager visible={visible} onPage={page} />
         </div>
-        <div ref={rail} data-testid="versions-rail" style={{ flex: '0 0 auto', padding: '16px 24px', borderTop: '1px solid var(--line)', background: 'var(--paper)' }}>
+        <div data-testid="versions-rail" style={{ flex: '0 0 auto', padding: '16px 24px', borderTop: '1px solid var(--line)', background: 'var(--paper)' }}>
           <VersionLine versions={versions} current={deck.state.version} />
         </div>
       </div>
