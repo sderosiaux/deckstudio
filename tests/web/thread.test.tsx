@@ -252,3 +252,73 @@ describe('Thread scoped to a selection', () => {
     expect(lead.compareDocumentPosition(screen.getByRole('log')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
+
+describe('Thread proposal actions and seed', () => {
+  /** Sends a turn on slide s2 that creates lane l1, and waits for its proposal under the reply. */
+  const proposeOnS2 = async (t: ReturnType<typeof setup>) => {
+    send('shorter labels please');
+    await vi.waitFor(() => expect(t.api.postMessage).toHaveBeenCalled());
+    t.emit({ type: 'lane.created', laneId: 'l1' });
+    t.stored.push({ id: 'm2', thread: 'slide:s2', role: 'assistant', text: 'Proposed.', context: null, at: '2026-09-30T10:00:05.000Z' });
+    t.emit({ type: 'assistant.done', thread: 'slide:s2', messageId: 'm2' });
+    await vi.waitFor(() => expect(screen.queryAllByTestId('proposal-change')).toHaveLength(1));
+    return screen.getByTestId('proposal-change');
+  };
+
+  it('proposalActions="focus-link" keeps the before/after pair and open in focus, without accept or refuse', async () => {
+    const t = setup({ l1: mkLane('l1', { kind: 'slide', slide: 's2' }, [onS2]) });
+    render(
+      <Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} navigate={t.navigate} proposalActions="focus-link" />,
+    );
+    const change = await proposeOnS2(t);
+    await vi.waitFor(() => expect(change.querySelectorAll('img')).toHaveLength(2));
+    expect(within(change).queryByRole('button', { name: 'accept' })).toBeNull();
+    expect(within(change).queryByRole('button', { name: 'refuse' })).toBeNull();
+    expect(within(change).getByRole('link', { name: 'open in focus' })).toBeTruthy();
+  });
+
+  it('proposalActions="none" keeps only the pair: no decision, no link to the screen it is already on', async () => {
+    const t = setup({ l1: mkLane('l1', { kind: 'slide', slide: 's2' }, [onS2]) });
+    render(
+      <Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} navigate={t.navigate} proposalActions="none" />,
+    );
+    const change = await proposeOnS2(t);
+    await vi.waitFor(() => expect(change.querySelectorAll('img')).toHaveLength(2));
+    const block = screen.getByTestId('thread-proposal');
+    expect(within(block).queryAllByRole('button')).toHaveLength(0);
+    expect(within(block).queryAllByRole('link')).toHaveLength(0);
+    expect(block.textContent).toContain('Shorter labels on the three jobs');
+  });
+
+  it('a seed shows read-only before the thread’s own messages, under its label', async () => {
+    const t = setup();
+    t.stored.push({ id: 'own', thread: 'lane:l1', role: 'user', text: 'own message', context: null, at: '2026-09-30T09:00:00.000Z' });
+    const seed: ThreadMessage[] = [
+      { id: 'u', thread: 'slide:s2', role: 'user', text: 'make it shorter', context: { kind: 'slide', slide: 's2' }, at: '2026-09-30T10:00:00.000Z' },
+      { id: 'a', thread: 'slide:s2', role: 'assistant', text: 'Opened a lane.', context: null, at: '2026-09-30T10:00:05.000Z' },
+    ];
+    render(
+      <Thread threadKey="lane:l1" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} seed={{ label: 'from the slide conversation', messages: seed }} />,
+    );
+    await waitFor(() => screen.queryAllByTestId('thread-message').length === 1);
+    const block = screen.getByTestId('thread-seed');
+    expect(within(block).getByText('from the slide conversation')).toBeTruthy();
+    expect(within(block).getAllByTestId('seed-message').map((m) => m.textContent)).toEqual([expect.stringContaining('make it shorter'), expect.stringContaining('Opened a lane.')]);
+    expect(within(block).queryAllByRole('button')).toHaveLength(0);
+    expect(block.compareDocumentPosition(screen.getByTestId('thread-message')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The seed is no message of this thread: the hint for an empty thread still reads as such.
+    expect(screen.getAllByTestId('thread-message')).toHaveLength(1);
+  });
+});
+
+describe('Thread heading', () => {
+  it('a panel with heading="section" titles itself like the sections beside it, not like a screen', () => {
+    const t = setup();
+    render(<Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} title="conversation about this slide" heading="section" />);
+    const h = screen.getByRole('heading', { name: 'conversation about this slide' });
+    expect(h.className).toBe('row-label');
+    cleanup();
+    render(<Thread threadKey="slide:s2" context={{ kind: 'slide', slide: 's2' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} title="Thread" />);
+    expect(screen.getByRole('heading', { name: 'Thread' }).className).toBe('screen-title');
+  });
+});

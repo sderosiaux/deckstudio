@@ -54,7 +54,19 @@ export interface ThreadProps {
   lead?: React.ReactNode;
   /** Inline only: the log stops growing at this height and scrolls, following the latest message. */
   logMaxHeight?: string;
+  /**
+   * What a reply's proposal offers besides its before/after pair: `all` decides in place (accept, refuse, open in
+   * focus); `focus-link` when the screen already lists the lane with its own accept and refuse; `none` on the focus
+   * screen of that lane, where deciding and opening it are the screen itself.
+   */
+  proposalActions?: ProposalActions;
+  /** `section` titles a panel like the sections beside it in a side column; `screen` (the default) like a screen's bar. */
+  heading?: 'screen' | 'section';
+  /** Messages of another thread shown read-only before this one's, under `label`: where the conversation started. */
+  seed?: { label: string; messages: ThreadMessage[] };
 }
+
+export type ProposalActions = 'all' | 'focus-link' | 'none';
 
 const time = (iso: string): string => {
   const d = new Date(iso);
@@ -157,13 +169,14 @@ interface ProposalProps {
   subscribe(handler: (e: BusEvent) => void): () => void;
   navigate(path: string): void;
   onNote(text: string): void;
+  actions: ProposalActions;
 }
 
 /**
  * The lane a reply proposed, under that reply: its title as a link to its first pending change in focus, then per
  * change main's thumb against the lane's, the reason, accept, refuse and open in focus. A decision says itself here.
  */
-function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, navigate, onNote }: ProposalProps) {
+function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, navigate, onNote, actions }: ProposalProps) {
   const [data, setData] = useState<{ lane: Lane; preview: LanePreviewPayload | null } | null>(null);
   const [mainThumbs, setMainThumbs] = useState<Record<SlideId, ThumbStatus>>({});
   const [busy, setBusy] = useState(false);
@@ -274,7 +287,7 @@ function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, n
       data-lane={lane.id}
       style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 6, padding: 12, borderRadius: 'var(--radius)', background: 'var(--card)', boxShadow: '0 0 0 1px var(--line)' }}
     >
-      {first ? (
+      {first && actions !== 'none' ? (
         <a href={focusPath(lane.id, first.id)} onClick={follow(focusPath(lane.id, first.id))} className="link" style={{ color: 'var(--ink)', fontWeight: 700, whiteSpace: 'normal' }}>
           {lane.label}
         </a>
@@ -293,17 +306,23 @@ function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, n
             <p className="meta" style={{ margin: 0, lineHeight: 1.4 }}>
               {c.kind}: {c.reason}
             </p>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <button type="button" className="btn-primary" disabled={busy} onClick={() => void decide('accept', c)}>
-                accept
-              </button>
-              <button type="button" className="btn" disabled={busy} onClick={() => void decide('refuse', c)}>
-                refuse
-              </button>
-              <a href={href} onClick={follow(href)} className="link" style={{ marginLeft: 6 }}>
-                open in focus
-              </a>
-            </div>
+            {actions === 'none' ? null : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                {actions === 'all' ? (
+                  <>
+                    <button type="button" className="btn-primary" disabled={busy} onClick={() => void decide('accept', c)}>
+                      accept
+                    </button>
+                    <button type="button" className="btn" disabled={busy} onClick={() => void decide('refuse', c)}>
+                      refuse
+                    </button>
+                  </>
+                ) : null}
+                <a href={href} onClick={follow(href)} className="link" style={actions === 'all' ? { marginLeft: 6 } : undefined}>
+                  open in focus
+                </a>
+              </div>
+            )}
           </div>
         );
       })}
@@ -351,6 +370,9 @@ export function Thread({
   autoFocus = false,
   lead,
   logMaxHeight,
+  proposalActions = 'all',
+  seed,
+  heading = 'screen',
 }: ThreadProps) {
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -494,9 +516,9 @@ export function Thread({
 
   return (
     <div data-testid="thread" data-thread={threadKey} data-layout={layout} style={root}>
-      <div style={inline ? { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 12 } : { padding: '18px 20px 12px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={inline ? { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 12 } : { padding: heading === 'section' ? '14px 20px 8px' : '18px 20px 12px', display: 'flex', flexDirection: 'column', gap: heading === 'section' ? 8 : 12 }}>
         <div>
-          <h2 className={inline ? 'row-label' : 'screen-title'} style={inline ? { margin: 0 } : undefined}>
+          <h2 className={inline || heading === 'section' ? 'row-label' : 'screen-title'} style={inline || heading === 'section' ? { margin: 0 } : undefined}>
             {title}
           </h2>
           {subtitle ? <p className="meta" style={{ margin: '2px 0 0' }}>{subtitle}</p> : null}
@@ -507,6 +529,20 @@ export function Thread({
       </div>
       {lead}
       <div ref={log} role="log" aria-live="polite" style={logStyle}>
+        {seed && seed.messages.length > 0 ? (
+          <div data-testid="thread-seed" style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
+            <span className="meta">{seed.label}</span>
+            {seed.messages.map((m) => (
+              <div key={m.id} data-testid="seed-message" data-role={m.role} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}>
+                  <strong style={{ fontWeight: 700, color: 'var(--ink)' }}>{m.role === 'assistant' ? 'co-author' : 'you'}</strong>
+                  <span className="muted">{time(m.at)}</span>
+                </div>
+                <div style={{ ...textStyle, color: 'var(--grey)' }}>{renderInline(m.text)}</div>
+              </div>
+            ))}
+          </div>
+        ) : null}
         {loadError ? <p style={{ color: 'var(--warn)', fontSize: 12, margin: 0 }}>Could not load the thread: {loadError}</p> : null}
         {!loadError && shown.length === 0 && !streaming && !pending ? (
           <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.5 }}>
@@ -543,6 +579,7 @@ export function Thread({
                       subscribe={subscribe}
                       navigate={navigate}
                       onNote={addNote}
+                      actions={proposalActions}
                     />
                   ))
                 : null}

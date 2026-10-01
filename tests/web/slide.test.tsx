@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { Slide as SlideScreen } from '../../web/src/screens/Slide.js';
-import type { BusEvent, DeckPayload, LanePreviewPayload, SlideApi } from '../../web/src/api.js';
-import type { Change, Lane, Slide, SlideId, Version } from '../../src/model/types.js';
+import { Slide as SlideScreen, nameSlides } from '../../web/src/screens/Slide.js';
+import type { BusEvent, DeckPayload, LanePreviewPayload } from '../../web/src/api.js';
+import type { SlideScreenApi } from '../../web/src/screens/Slide.js';
+import type { Change, Lane, Remark, Slide, SlideId, ThreadMessage, Version } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
 
 const slide = (id: string, over: Partial<Slide> = {}): Slide => ({
@@ -54,22 +55,41 @@ const previewOf = (lane: Lane): LanePreviewPayload => ({
   thumbs: { s3: { hash: `${lane.id}_s3`, ready: true } },
 });
 
-function setup(opts: { lanes?: Lane[]; deck?: DeckPayload } = {}) {
+const remark = (id: string, anchor: Remark['anchor'], over: Partial<Remark> = {}): Remark => ({
+  id,
+  anchor,
+  text: `remark ${id}`,
+  origin: 'check:gaps',
+  severity: 'warn',
+  status: 'open',
+  laneId: null,
+  createdAt: '2026-09-30T00:00:00.000Z',
+  ...over,
+});
+
+function setup(opts: { lanes?: Lane[]; deck?: DeckPayload; remarks?: Remark[]; drafts?: Lane[] } = {}) {
   let lanes = opts.lanes ?? [onS3, rangeTouchingS3, elsewhere, decidedOnS3];
   let deck = opts.deck ?? deckOf();
+  let remarks = opts.remarks ?? [];
+  const drafts = opts.drafts ?? [];
+  const stored: ThreadMessage[] = [];
   const handlers = new Set<(e: BusEvent) => void>();
   const api = {
     getDeck: vi.fn(async () => deck),
-    getLanes: vi.fn(async () => lanes),
+    getLanes: vi.fn(async (status?: string) => (status === 'draft' ? drafts : lanes)),
     getLane: vi.fn(async (id: string) => lanes.find((l) => l.id === id)!),
     getLanePreview: vi.fn(async (id: string) => previewOf(lanes.find((l) => l.id === id)!)),
     thumbFor: vi.fn(async (id: SlideId) => ({ hash: `h_${id}`, ready: true })),
     acceptChange: vi.fn(async (): Promise<{ version: Version; lane: Lane }> => ({ version: { n: 4, order, slides: {}, cause: { kind: 'import' }, createdAt: '' }, lane: onS3 })),
     refuseChange: vi.fn(async (): Promise<Lane> => onS3),
     discardLane: vi.fn(async () => undefined),
-    getThread: vi.fn(async () => []),
+    getThread: vi.fn(async () => [...stored]),
     postMessage: vi.fn(async () => undefined),
-  } satisfies SlideApi;
+    getRemarks: vi.fn(async () => remarks),
+    proposeRemark: vi.fn(async () => undefined),
+    resolveRemark: vi.fn(async () => undefined),
+    openLane: vi.fn(async () => undefined),
+  } satisfies SlideScreenApi;
   const subscribe = (h: (e: BusEvent) => void) => {
     handlers.add(h);
     return () => {
@@ -89,6 +109,10 @@ function setup(opts: { lanes?: Lane[]; deck?: DeckPayload } = {}) {
     setDeck: (d: DeckPayload) => {
       deck = d;
     },
+    setRemarks: (r: Remark[]) => {
+      remarks = r;
+    },
+    stored,
   };
 }
 
@@ -100,7 +124,26 @@ const pressed = (): string | undefined =>
     .getAllByRole('button')
     .find((b) => b.getAttribute('aria-pressed') === 'true')?.textContent ?? undefined;
 
-afterEach(() => cleanup());
+/** Lane list reloads: the calls without a status filter (drafts are asked for with `draft`). */
+const laneLoads = (api: ReturnType<typeof setup>['api']): number => api.getLanes.mock.calls.filter((c) => c[0] === undefined).length;
+
+/** The window narrower than the two-column breakpoint: matchMedia answers false. */
+const narrow = () => {
+  vi.stubGlobal('matchMedia', (query: string) => ({ matches: false, media: query, addEventListener: () => undefined, removeEventListener: () => undefined }));
+};
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+describe('nameSlides', () => {
+  it('replaces whole slide ids by "slide N, Title"; a slide off main by its title; other words stay', () => {
+    const all = { ...slides, s_gone: slide('s_gone', { title: 'Old one' }) };
+    expect(nameSlides('s3 already makes it; see s_gone, not s33 or as3', order, all)).toBe('slide 3, Title s3 already makes it; see Old one, not s33 or as3');
+    expect(nameSlides('nothing here', order, all)).toBe('nothing here');
+  });
+});
 
 describe('Slide screen', () => {
   it('loads the slide large, its story and notes, and every open lane with a live change on it', async () => {
@@ -118,7 +161,9 @@ describe('Slide screen', () => {
     const [first, second] = laneRows();
     expect(first!.textContent).toContain('Sharper claim');
     expect(first!.textContent).toContain('modify');
-    expect(first!.textContent).toContain('sharper claim on s3');
+    // Slide ids in a reason read as the slide's number and title.
+    expect(first!.textContent).toContain('sharper claim on slide 3, Title s3');
+    expect(first!.textContent).not.toContain('on s3');
     // Only the change on this slide: the range lane's change on s2 is not listed here.
     expect(within(second!).getAllByTestId('change-buttons').map((b) => b.getAttribute('data-change'))).toEqual(['c3']);
     expect(second!.textContent).toContain('move');
@@ -137,7 +182,6 @@ describe('Slide screen', () => {
     render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
     await waitFor(() => screen.queryByTestId('thread'));
     expect(screen.getByTestId('thread').getAttribute('data-thread')).toBe('slide:s3');
-    expect(screen.getByTestId('thread').getAttribute('data-layout')).toBe('inline');
     expect(screen.queryByLabelText('clear context')).toBeNull();
     await waitFor(() => t.api.getThread.mock.calls.length > 0);
     expect(t.api.getThread).toHaveBeenCalledWith('slide:s3');
@@ -184,11 +228,12 @@ describe('Slide screen', () => {
     const t = setup();
     render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
     await waitFor(() => laneRows().length === 2);
-    fireEvent.click(screen.getByLabelText('accept change c1'));
+    fireEvent.click(screen.getByLabelText('accept: modify slide 3, Sharper claim s3'));
     await waitFor(() => t.api.acceptChange.mock.calls.length === 1);
     expect(t.api.acceptChange).toHaveBeenCalledWith('l1', 'c1');
-    await waitFor(() => !(screen.getByLabelText('refuse change c3') as HTMLButtonElement).disabled);
-    fireEvent.click(screen.getByLabelText('refuse change c3'));
+    const refuseMove = () => screen.getByLabelText('refuse: move slide 3, Tighter middle s3, to 3') as HTMLButtonElement;
+    await waitFor(() => !refuseMove().disabled);
+    fireEvent.click(refuseMove());
     await waitFor(() => t.api.refuseChange.mock.calls.length === 1);
     expect(t.api.refuseChange).toHaveBeenCalledWith('l2', 'c3');
     fireEvent.click(within(laneRows()[0]!).getByRole('link', { name: 'open in focus' }));
@@ -203,7 +248,7 @@ describe('Slide screen', () => {
     // A lane elsewhere reloads the list but changes nothing here.
     t.setLanes([elsewhere]);
     t.emit({ type: 'lane.created', laneId: 'l3' });
-    await waitFor(() => t.api.getLanes.mock.calls.length === 2);
+    await waitFor(() => laneLoads(t.api) === 2);
     expect(screen.queryByTestId('slide-toggle')).toBeNull();
 
     t.setLanes([elsewhere, onS3]);
@@ -235,19 +280,159 @@ describe('Slide screen', () => {
     fireEvent.click(screen.getByRole('link', { name: 'back to main' }));
     expect(t.navigate).toHaveBeenLastCalledWith('/');
   });
-  it('lays out the body column: the slide, its conversation with the composer, then story, notes and lanes on this slide; no right bar', async () => {
+  it('two columns: the render, its story and notes on the left; lanes, remarks, then the conversation on the right', async () => {
+    const t = setup({ remarks: [remark('r1', { kind: 'slide', slide: 's3' })] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => laneRows().length === 2 && screen.queryAllByTestId('post-it').length === 1);
+    expect(screen.getByTestId('slide-layout').getAttribute('data-columns')).toBe('2');
+    // The screen's rules live in the theme: no style element inside the content.
+    expect(document.querySelector('style')).toBeNull();
+    const left = screen.getByTestId('slide-body');
+    const right = screen.getByTestId('slide-side');
+    for (const id of ['slide-toggle', 'slide-stage', 'slide-story', 'slide-notes']) expect(left.contains(screen.getByTestId(id))).toBe(true);
+    const side = ['slide-lanes', 'slide-remarks', 'thread'].map((id) => screen.getByTestId(id));
+    for (const el of side) expect(right.contains(el)).toBe(true);
+    for (let i = 1; i < side.length; i++) expect(side[i - 1]!.compareDocumentPosition(side[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The conversation fills the rest of the column, its composer at the bottom.
+    const thread = screen.getByTestId('thread');
+    expect(thread.getAttribute('data-layout')).toBe('panel');
+    expect(thread.lastElementChild!.tagName).toBe('FORM');
+  });
+
+  it('below the breakpoint, one column: render, lanes, remarks, conversation, story, notes', async () => {
+    narrow();
+    const t = setup({ remarks: [remark('r1', { kind: 'slide', slide: 's3' })] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => laneRows().length === 2 && screen.queryAllByTestId('post-it').length === 1);
+    expect(screen.getByTestId('slide-layout').getAttribute('data-columns')).toBe('1');
+    expect(screen.queryByTestId('slide-side')).toBeNull();
+    const body = screen.getByTestId('slide-body');
+    const seq = ['slide-stage', 'slide-lanes', 'slide-remarks', 'thread', 'slide-story', 'slide-notes'].map((id) => screen.getByTestId(id));
+    for (const el of seq) expect(body.contains(el)).toBe(true);
+    for (let i = 1; i < seq.length; i++) expect(seq[i - 1]!.compareDocumentPosition(seq[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByTestId('thread').getAttribute('data-layout')).toBe('inline');
+  });
+
+  it('clicking a lane row shows its proposal on the render; the selected row is marked', async () => {
     const t = setup();
     render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
     await waitFor(() => laneRows().length === 2);
-    expect(document.querySelector('aside')).toBeNull();
+    expect(pressed()).toBe('main');
+    fireEvent.click(laneRows()[1]!);
+    expect(pressed()).toBe('proposed in Tighter middle');
+    expect(laneRows()[1]!.getAttribute('aria-current')).toBe('true');
+    expect(laneRows()[0]!.getAttribute('aria-current')).toBeNull();
+    fireEvent.click(within(laneRows()[0]!).getByRole('button', { name: 'Sharper claim' }));
+    expect(pressed()).toBe('proposed in Sharper claim');
+    await waitFor(() => stage()?.querySelector('img')?.getAttribute('src') === '/api/thumbs/l1_s3.png');
+    // Deciding on a row is that decision only: it does not switch the render.
+    fireEvent.click(screen.getByLabelText(/^accept: move slide 3/));
+    expect(pressed()).toBe('proposed in Sharper claim');
+  });
+
+  it('a lane that removes this slide draws a dashed "removed in lane" overlay on the main render', async () => {
+    const drop = mkLane('l5', 'Drop the wire format', { kind: 'slide', slide: 's3' }, [{ id: 'c9', kind: 'remove', slide: 's3', reason: 'redundant', status: 'pending' }]);
+    const t = setup({ lanes: [drop, onS3] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => screen.queryByTestId('removed-overlay'));
+    expect(stage()!.getAttribute('data-variant')).toBe('main');
+    const overlay = screen.getByTestId('removed-overlay');
+    expect(screen.getByTestId('slide-stage').contains(overlay)).toBe(true);
+    expect(overlay.textContent).toBe('removed in lane Drop the wire format');
+    expect(overlay.style.border).toContain('dashed');
+    // Not on a lane's own render.
+    fireEvent.click(within(screen.getByTestId('slide-toggle')).getByRole('button', { name: 'proposed in Sharper claim' }));
+    expect(screen.queryByTestId('removed-overlay')).toBeNull();
+  });
+
+  it('lists the open remarks on this slide with propose and resolve; remarks.changed reloads them', async () => {
+    const mine = remark('r1', { kind: 'slide', slide: 's3' }, { text: 'the claim is buried' });
+    const range = remark('r2', { kind: 'range', from: 's2', to: 's4' }, { text: 'slides 2 to 4 detour', severity: 'info' });
+    const others = [
+      remark('r3', { kind: 'slide', slide: 's5' }),
+      remark('r4', { kind: 'arc' }),
+      remark('r5', { kind: 'slide', slide: 's3' }, { status: 'resolved' }),
+      remark('r6', { kind: 'slide', slide: 's3' }, { sourceLaneId: 'l1' }),
+    ];
+    const t = setup({ remarks: [mine, range, ...others] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => screen.queryAllByTestId('post-it').length === 2);
+    const cards = () => within(screen.getByTestId('slide-remarks')).getAllByTestId('post-it');
+    expect(cards().map((c) => c.getAttribute('data-remark'))).toEqual(['r1', 'r2']);
+    fireEvent.click(within(cards()[0]!).getByRole('button', { name: 'propose' }));
+    await waitFor(() => t.api.proposeRemark.mock.calls.length === 1);
+    expect(t.api.proposeRemark).toHaveBeenCalledWith('r1');
+    fireEvent.click(within(cards()[1]!).getByRole('button', { name: 'resolve' }));
+    await waitFor(() => t.api.resolveRemark.mock.calls.length === 1);
+    expect(t.api.resolveRemark).toHaveBeenCalledWith('r2');
+    t.setRemarks([mine]);
+    t.emit({ type: 'remarks.changed' });
+    await waitFor(() => cards().length === 1);
+  });
+
+  it('a remark whose lane is a draft offers to open it', async () => {
+    const draft = { ...mkLane('l7', 'Draft fix', { kind: 'slide', slide: 's3' }, [change('c7', 's3')]), status: 'draft' as const };
+    const t = setup({ lanes: [], drafts: [draft], remarks: [remark('r1', { kind: 'slide', slide: 's3' }, { laneId: 'l7' })] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => screen.queryByRole('button', { name: 'open lane' }));
+    fireEvent.click(screen.getByRole('button', { name: 'open lane' }));
+    await waitFor(() => t.api.openLane.mock.calls.length === 1);
+    expect(t.api.openLane).toHaveBeenCalledWith('l7');
+  });
+
+  it('no remark on this slide: the section says so', async () => {
+    const t = setup({ remarks: [remark('r3', { kind: 'slide', slide: 's5' })] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => screen.queryByTestId('slide-remarks-empty'));
+    expect(screen.queryAllByTestId('post-it')).toHaveLength(0);
+  });
+
+  it('the proposal under a reply keeps its before/after pair but leaves accept and refuse to the lane list', async () => {
+    const t = setup({ lanes: [] });
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => screen.queryByTestId('slide-lanes-empty'));
+    fireEvent.change(screen.getByLabelText('message'), { target: { value: 'sharper' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => t.api.postMessage.mock.calls.length === 1);
+    t.setLanes([onS3]);
+    t.emit({ type: 'lane.created', laneId: 'l1' });
+    t.stored.push(
+      { id: 'u1', thread: 'slide:s3', role: 'user', text: 'sharper', context: { kind: 'slide', slide: 's3' }, at: '2026-09-30T10:00:00.000Z' },
+      { id: 'a1', thread: 'slide:s3', role: 'assistant', text: 'Proposed.', context: null, at: '2026-09-30T10:00:05.000Z' },
+    );
+    t.emit({ type: 'assistant.done', thread: 'slide:s3', messageId: 'a1' });
+    await waitFor(() => screen.queryAllByTestId('proposal-change').length === 1 && laneRows().length === 1);
+    const card = screen.getByTestId('thread-proposal');
+    await waitFor(() => card.querySelectorAll('img').length === 2);
+    expect(within(card).queryByRole('button', { name: 'accept' })).toBeNull();
+    expect(within(card).queryByRole('button', { name: 'refuse' })).toBeNull();
+    // One place to decide: the lane row.
+    expect(screen.getAllByLabelText(/^accept: /)).toHaveLength(1);
+  });
+
+  it('moving to another slide brings both columns back to the top', async () => {
+    const t = setup();
+    const { rerender } = render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => laneRows().length === 2);
     const body = screen.getByTestId('slide-body');
-    const order = ['slide-stage', 'thread', 'slide-story', 'slide-notes', 'slide-lanes'].map((id) => screen.getByTestId(id));
-    for (const el of order) expect(body.contains(el)).toBe(true);
-    for (let i = 1; i < order.length; i++) expect(order[i - 1]!.compareDocumentPosition(order[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // the composer closes the conversation block
-    const thread = screen.getByTestId('thread');
-    expect(thread.lastElementChild!.tagName).toBe('FORM');
-    expect(thread.contains(screen.getByLabelText('message'))).toBe(true);
+    const side = screen.getByTestId('slide-side-scroll');
+    body.scrollTop = 192;
+    side.scrollTop = 80;
+    rerender(<SlideScreen slideId="s4" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => crumb().startsWith('slide 4'));
+    expect(screen.getByTestId('slide-body').scrollTop).toBe(0);
+    expect(screen.getByTestId('slide-side-scroll').scrollTop).toBe(0);
+  });
+
+  it('below the breakpoint too, moving to another slide scrolls the column to the top', async () => {
+    narrow();
+    const t = setup();
+    const { rerender } = render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => crumb().startsWith('slide 3'));
+    screen.getByTestId('slide-body').scrollTop = 192;
+    rerender(<SlideScreen slideId="s2" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => crumb().startsWith('slide 2'));
+    expect(screen.getByTestId('slide-body').scrollTop).toBe(0);
   });
 
   it('a main | proposed toggle above the slide names each lane that changes it and swaps the render for its preview', async () => {
