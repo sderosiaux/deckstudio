@@ -3,7 +3,9 @@ import type { Anchor, Change, Lane, Slide, SlideId } from '../../../src/model/ty
 import {
   focusApi,
   focusPath,
+  mainPath,
   navigate as defaultNavigate,
+  slidePath,
   subscribe as defaultSubscribe,
   thumbUrl,
   type BusEvent,
@@ -15,10 +17,12 @@ import {
 import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
 import { BackToMain, ScreenHeader } from '../components/ScreenHeader.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { anchorColumns, offSlideFields, shortLabel, type OffSlideField } from '../components/LaneRow.js';
+import { anchorColumns, offSlideFields, originTag, type OffSlideField } from '../components/LaneRow.js';
+import { describeAnchor } from '../components/ContextChip.js';
+import { Thumb } from '../components/Thumb.js';
 import { SlidePreview, type SlidePreviewProps } from '../components/SlidePreview.js';
 import { TextDiff, plainText } from '../components/TextDiff.js';
-import { Thread } from '../components/Thread.js';
+import { Thread, type ThreadNote } from '../components/Thread.js';
 
 export interface FocusProps {
   laneId: string;
@@ -38,13 +42,29 @@ const targetOf = (c: Change): SlideId => (c.kind === 'insert' ? c.slide.id : c.s
 const pendingOf = (lane: Lane): Change[] => (lane.status === 'open' ? lane.changes.filter((c) => c.status === 'pending') : []);
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-/** Where to go once `changeId` is decided: the next pending change after it in lane order, else the first one, else main. */
-export function pathAfter(lane: Lane, changeId: string): string {
-  const pending = pendingOf(lane);
-  if (pending.length === 0) return '/';
+/**
+ * Where to go once `changeId` is decided: the next pending change of the lane after it in lane order, else the first
+ * one; with none left, the edit screen of the slide it changed when main still has it, else main.
+ */
+export function pathAfter(lane: Lane, changeId: string, slide: SlideId, mainOrder: readonly SlideId[]): string {
+  const pending = pendingOf(lane).filter((c) => c.id !== changeId);
+  if (pending.length === 0) return mainOrder.includes(slide) ? slidePath(slide) : '/';
   const pos = lane.changes.findIndex((c) => c.id === changeId);
   const next = pending.find((c) => lane.changes.indexOf(c) > pos) ?? pending[0]!;
   return focusPath(lane.id, next.id);
+}
+
+/** Five slides of `order` centred on position `at`, slid inward at the deck ends; fewer when the deck is shorter. */
+export function excerpt(order: readonly SlideId[], at: number, size = 5): { start: number; ids: SlideId[] } {
+  const start = Math.max(0, Math.min(at - Math.floor(size / 2), order.length - size));
+  return { start, ids: order.slice(start, start + size) };
+}
+
+/** "from your request on slide 3", "unsolicited, from check: arc, on slides 2–4": where the lane comes from and what it is anchored on. */
+export function originLine(lane: Lane, order: SlideId[], slides: Record<SlideId, Slide>): string {
+  const on = describeAnchor(lane.anchor, order, slides);
+  const tag = originTag(lane.origin);
+  return tag ? `${tag}, on ${on}` : `from your request on ${on}`;
 }
 
 /**
@@ -81,14 +101,18 @@ export function sameRenderNote(fields: readonly OffSlideField[]): string | null 
 }
 
 /*
- * Before/after side by side from 1280px, stacked below. SlidePreview has a fixed reading width; inside the pair it
- * takes its column's width (its frame keeps the slide 16:9), so both fit next to the thread instead of one falling under the fold.
+ * Before/after side by side as long as two 320px cards fit the body, stacked below. SlidePreview has a fixed reading
+ * width; inside the pair it takes its column's width (its frame keeps the slide 16:9).
  */
 const FOCUS_CSS = `
-.focus-pair { display: grid; grid-template-columns: minmax(0, 450px); justify-content: start; gap: 24px; }
-@media (min-width: 1280px) { .focus-pair { grid-template-columns: repeat(2, minmax(0, 450px)); } }
+.focus-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 450px)); justify-content: start; gap: 24px; }
 .focus-pair > [data-testid="slide-preview"] { width: 100% !important; flex: none !important; }
 `;
+
+/** The decision bar's height: the scroll area pads its scroll-to positions by it, so the bar never sits over what is brought into view. */
+export const BAR_HEIGHT = 56;
+/** How long the acknowledgement of a decision stays before the screen moves on. */
+const ACK_MS = 6000;
 
 const navBtn: CSSProperties = { padding: '8px 0' };
 
@@ -108,7 +132,41 @@ function RangeUnderline({ count, cols, label }: { count: number; cols: { start: 
   );
 }
 
-/** One change of a lane at reading size: main's slide against the lane's, the reason, accept or refuse, and the lane's thread. */
+/** A move as structure: five slides of one side around the moved one, which carries the selection ring. */
+function MoveExcerpt({ side, caption, order, slides, at, slide, url }: { side: 'main' | 'lane'; caption: string; order: SlideId[]; slides: Record<SlideId, Slide>; at: number; slide: SlideId; url(id: SlideId): string | undefined }) {
+  const { start, ids } = excerpt(order, at);
+  return (
+    <figure
+      data-testid="move-excerpt"
+      data-side={side}
+      style={{ margin: 0, display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderRadius: 'var(--radius)', background: 'var(--card)', boxShadow: side === 'lane' ? '0 0 0 2px var(--accent), var(--shadow)' : '0 0 0 1px var(--line), var(--shadow)' }}
+    >
+      <figcaption data-testid="move-caption" style={{ fontSize: 'var(--fs-meta)', lineHeight: '16px', color: 'var(--grey)' }}>
+        {caption}
+      </figcaption>
+      <div role="list" style={{ display: 'flex', gap: 'var(--col-gap)', padding: '4px 4px 6px', ['--thumb-w' as string]: '76px', ['--thumb-h' as string]: 'calc(76px * 9 / 16)' }}>
+        {ids.map((id, i) => (
+          <div role="listitem" key={id}>
+            <Thumb slideId={id} n={start + i + 1} title={slides[id]?.title ?? id} url={url(id)} selected={id === slide} hoverTitle={false} onClick={() => undefined} />
+          </div>
+        ))}
+      </div>
+    </figure>
+  );
+}
+
+/** Scrolls `strip` sideways so `el` sits in its middle, unless `el` already shows whole right of the sticky gutter. */
+function bringIntoStrip(strip: HTMLElement, el: HTMLElement): void {
+  const box = strip.getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  const gutter = strip.querySelector('.gutter')?.getBoundingClientRect().right ?? box.left;
+  if (r.left >= Math.max(box.left, gutter) && r.right <= box.right) return;
+  strip.scrollLeft += r.left + r.width / 2 - (box.left + box.width / 2);
+}
+
+type Ack = { changeId: string; text: string; next: string };
+
+/** One change of a lane at reading size: main's slide against the lane's, the reason, the lane's thread, accept or refuse. */
 export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSubscribe, navigate = defaultNavigate }: FocusProps) {
   const [load, setLoad] = useState<Load>({ status: 'loading' });
   const [mainThumbs, setMainThumbs] = useState<Record<SlideId, ThumbStatus>>({});
@@ -116,9 +174,17 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
   const thumbStamps = useRef<Record<SlideId, string>>({});
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // A decision says itself where it was made, then the screen moves on.
+  const [ack, setAck] = useState<Ack | null>(null);
+  // "the co-author revised this lane", until the creator moves on himself.
+  const [notice, setNotice] = useState<string | null>(null);
+  // Lines added to the lane thread by this screen (decisions); not stored.
+  const [notes, setNotes] = useState<ThreadNote[]>([]);
   const generation = useRef(0);
   const changeRef = useRef(changeId);
   changeRef.current = changeId;
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
   // One WebSocket for the screen; the thread registers here instead of opening its own.
   const listeners = useRef(new Set<(e: BusEvent) => void>());
   const fanout = useCallback((h: (e: BusEvent) => void) => {
@@ -128,40 +194,49 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
     };
   }, []);
 
-  const reload = useCallback(async () => {
-    const gen = ++generation.current;
-    try {
-      const [deck, lane, preview] = await Promise.all([api.getDeck(), api.getLane(laneId), api.getLanePreview(laneId)]);
-      if (gen !== generation.current) return;
-      setLoad({ status: 'ready', deck, lane, preview });
-      const stamp = (id: SlideId): string => JSON.stringify(deck.slides[id] ?? null);
-      const onMain = new Set(deck.order);
-      thumbStamps.current = Object.fromEntries(Object.entries(thumbStamps.current).filter(([id]) => onMain.has(id)));
-      setMainThumbs((prev) => (Object.keys(prev).every((id) => onMain.has(id)) ? prev : Object.fromEntries(Object.entries(prev).filter(([id]) => onMain.has(id)))));
-      // The focused slide first, then the rest left to right: the server renders one thumb at a time.
-      // Only slides never fetched, or whose content changed since: a stamp is recorded once its thumb is in,
-      // so a fetch cut short by a newer reload is retried by that reload.
-      const focused = lane.changes.find((c) => c.id === changeRef.current);
-      const first = focused ? targetOf(focused) : null;
-      const ids = first && deck.order.includes(first) ? [first, ...deck.order.filter((id) => id !== first)] : deck.order;
-      for (const id of ids.filter((x) => thumbStamps.current[x] !== stamp(x))) {
-        const t = await api.thumbFor(id);
+  const reload = useCallback(
+    async (cause: 'load' | 'lane' = 'load') => {
+      const gen = ++generation.current;
+      try {
+        const [deck, lane, preview] = await Promise.all([api.getDeck(), api.getLane(laneId), api.getLanePreview(laneId)]);
         if (gen !== generation.current) return;
-        thumbStamps.current[id] = stamp(id);
-        setMainThumbs((prev) => ({ ...prev, [id]: t }));
+        setLoad({ status: 'ready', deck, lane, preview });
+        // Revised in place: the change on screen was replaced. Follow the lane to its first pending change and say why.
+        const first = pendingOf(lane)[0];
+        if (cause === 'lane' && first && !lane.changes.some((c) => c.id === changeRef.current)) {
+          setNotice('the co-author revised this lane');
+          navigateRef.current(focusPath(lane.id, first.id));
+        }
+        const stamp = (id: SlideId): string => JSON.stringify(deck.slides[id] ?? null);
+        const onMain = new Set(deck.order);
+        thumbStamps.current = Object.fromEntries(Object.entries(thumbStamps.current).filter(([id]) => onMain.has(id)));
+        setMainThumbs((prev) => (Object.keys(prev).every((id) => onMain.has(id)) ? prev : Object.fromEntries(Object.entries(prev).filter(([id]) => onMain.has(id)))));
+        // The focused slide first, then the rest left to right: the server renders one thumb at a time.
+        // Only slides never fetched, or whose content changed since: a stamp is recorded once its thumb is in,
+        // so a fetch cut short by a newer reload is retried by that reload.
+        const focused = lane.changes.find((c) => c.id === changeRef.current);
+        const head = focused ? targetOf(focused) : null;
+        const ids = head && deck.order.includes(head) ? [head, ...deck.order.filter((id) => id !== head)] : deck.order;
+        for (const id of ids.filter((x) => thumbStamps.current[x] !== stamp(x))) {
+          const t = await api.thumbFor(id);
+          if (gen !== generation.current) return;
+          thumbStamps.current[id] = stamp(id);
+          setMainThumbs((prev) => ({ ...prev, [id]: t }));
+        }
+      } catch (err) {
+        if (gen !== generation.current) return;
+        setLoad({ status: 'error', message: message(err) });
       }
-    } catch (err) {
-      if (gen !== generation.current) return;
-      setLoad({ status: 'error', message: message(err) });
-    }
-  }, [api, laneId]);
+    },
+    [api, laneId],
+  );
 
   useEffect(() => {
     void reload();
     return subscribe((e) => {
       for (const h of listeners.current) h(e);
       if (e.type === 'deck.changed') void reload();
-      else if ((e.type === 'lane.updated' || e.type === 'lane.closed') && e.laneId === laneId) void reload();
+      else if ((e.type === 'lane.updated' || e.type === 'lane.closed') && e.laneId === laneId) void reload('lane');
       else if (e.type === 'thumb.ready') {
         setMainThumbs((prev) => {
           const hit = Object.keys(prev).filter((id) => prev[id]!.hash === e.hash && !prev[id]!.ready);
@@ -184,8 +259,32 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
 
   useEffect(() => setActionError(null), [changeId]);
 
+  // The acknowledgement stays ACK_MS, then the screen moves on by itself.
+  useEffect(() => {
+    if (!ack) return;
+    const id = setTimeout(() => {
+      setAck(null);
+      navigateRef.current(ack.next);
+    }, ACK_MS);
+    return () => clearTimeout(id);
+  }, [ack]);
+
   const strips = useRef<HTMLElement>(null);
   const visible = useVisibleColumns(strips, '[data-strip="main"] [data-testid="thumb"]', [load.status]);
+
+  // Once per change: the lane strip shows the column where the change lands (a move's destination included).
+  const ready = load.status === 'ready';
+  const laneAtForScroll = ready ? (() => {
+    const c = load.lane.changes.find((x) => x.id === changeId);
+    return c ? load.preview.order.indexOf(targetOf(c)) : -1;
+  })() : -1;
+  useEffect(() => {
+    const strip = strips.current;
+    if (!strip || laneAtForScroll < 0) return;
+    const row = strip.querySelectorAll('[role="list"]')[1];
+    const el = row?.children[laneAtForScroll]?.querySelector<HTMLElement>('[data-testid="thumb"]');
+    if (el) bringIntoStrip(strip, el);
+  }, [changeId, ready, laneAtForScroll]);
 
   const go = (path: string) => (e?: MouseEvent) => {
     e?.preventDefault();
@@ -207,7 +306,9 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
   const { deck, lane, preview } = load;
   const pending = pendingOf(lane);
   const index = pending.findIndex((c) => c.id === changeId);
-  const change = index >= 0 ? pending[index]! : undefined;
+  // While its acknowledgement shows, the decided change stays on screen.
+  const acked = ack && ack.changeId === changeId ? lane.changes.find((c) => c.id === changeId) : undefined;
+  const change = index >= 0 ? pending[index]! : acked;
   const target = change ? targetOf(change) : null;
 
   const mainUrl = (id: SlideId): string | undefined => {
@@ -223,43 +324,56 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
   const mainThumbUrls = Object.fromEntries(deck.order.map((id) => [id, mainUrl(id)]));
   const laneThumbUrls = Object.fromEntries(preview.order.map((id) => [id, laneUrl(id)]));
 
-  const run = async (fn: () => Promise<Lane>): Promise<void> => {
-    if (!change) return;
+  const leave = (path: string): void => {
+    setNotice(null);
+    navigate(path);
+  };
+
+  const decide = async (verb: 'accept' | 'refuse'): Promise<void> => {
+    if (!change || !target || acked) return;
     setBusy(true);
     setActionError(null);
+    setNotice(null);
     try {
-      const next = await fn();
-      navigate(pathAfter(next, change.id));
+      let text: string;
+      let next: string;
+      if (verb === 'accept') {
+        const res = await api.acceptChange(lane.id, change.id);
+        text = `accepted into main as v${res.version.n}`;
+        next = pathAfter(res.lane, change.id, target, res.version.order);
+      } else {
+        const after = await api.refuseChange(lane.id, change.id);
+        text = 'refused';
+        next = pathAfter(after, change.id, target, deck.order);
+      }
+      const at = new Date().toISOString();
+      setNotes((n) => [...n, { id: `decision-${change.id}`, text, at }]);
+      setAck({ changeId: change.id, text, next });
     } catch (err) {
       setActionError(message(err));
     } finally {
       setBusy(false);
     }
   };
-  const accept = () => void run(async () => (await api.acceptChange(lane.id, changeId)).lane);
-  const refuse = () => void run(() => api.refuseChange(lane.id, changeId));
 
   const n = pending.length;
-  const step = (d: 1 | -1): string | null => {
-    if (n === 0) return null;
-    if (index < 0) return focusPath(lane.id, pending[0]!.id);
-    return focusPath(lane.id, pending[(index + d + n) % n]!.id);
-  };
-  const prev = step(-1);
-  const next = step(1);
+  const prev = index > 0 ? focusPath(lane.id, pending[index - 1]!.id) : null;
+  const next = index >= 0 && index < n - 1 ? focusPath(lane.id, pending[index + 1]!.id) : null;
+  const firstPending = pending[0] ? focusPath(lane.id, pending[0].id) : null;
 
   const openSlide = (id: SlideId): void => {
     const c = pending.find((x) => targetOf(x) === id);
-    if (c && c.id !== changeId) navigate(focusPath(lane.id, c.id));
+    if (c && c.id !== changeId) leave(focusPath(lane.id, c.id));
   };
 
-  const short = shortLabel(lane.label);
   let left: SlidePreviewProps | null = null;
   let right: SlidePreviewProps | null = null;
   const skipped = change ? preview.skipped.includes(change.id) : false;
-  if (change && target) {
-    const mainAt = deck.order.indexOf(target);
-    const laneAt = preview.order.indexOf(target);
+  const mainAt = target ? deck.order.indexOf(target) : -1;
+  const laneAt = target ? preview.order.indexOf(target) : -1;
+  // A move shows as structure: the slide among its neighbours on each side, not two identical renders.
+  const asMove = change?.kind === 'move' && !skipped && mainAt >= 0 && laneAt >= 0 && !acked;
+  if (change && target && !asMove) {
     left =
       change.kind === 'insert'
         ? { label: 'main', variant: 'missing', missingText: 'not in main' }
@@ -267,11 +381,11 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
           ? { label: 'main', variant: 'missing', missingText: 'no longer in main' }
           : { label: `main, slide ${mainAt + 1}`, variant: 'main', title: deck.slides[target]?.title ?? target, url: mainUrl(target) };
     right = skipped
-      ? { label: short, variant: 'missing', missingText: 'no longer applies on main' }
+      ? { label: 'this lane', variant: 'missing', missingText: 'no longer applies on main' }
       : change.kind === 'remove' || laneAt < 0
-        ? { label: short, variant: 'missing', missingText: 'removed' }
+        ? { label: 'this lane', variant: 'missing', missingText: 'removed' }
         : {
-            label: `${short}, slide ${laneAt + 1}${change.kind === 'move' && mainAt >= 0 ? ` (was ${mainAt + 1})` : ''}`,
+            label: `this lane, slide ${laneAt + 1}${change.kind === 'move' && mainAt >= 0 ? ` (was ${mainAt + 1})` : ''}`,
             variant: 'lane',
             title: preview.slides[target]?.title ?? target,
             url: laneUrl(target),
@@ -279,111 +393,157 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
   }
 
   // Only when main still has the slide: a skipped change has nothing to diff against.
-  const texts = change && target && !skipped ? textChanges(change, deck.slides[target]) : [];
+  const texts = change && target && !skipped && !acked ? textChanges(change, deck.slides[target]) : [];
 
-  const sameRender = change && !skipped ? sameRenderNote(offSlideFields(change)) : null;
+  const sameRender = change && !skipped && !acked ? sameRenderNote(offSlideFields(change)) : null;
 
   const context: Anchor = target && deck.order.includes(target) ? { kind: 'slide', slide: target } : lane.anchor;
+  const step = acked ? 'decided' : change ? `change ${index + 1} of ${n}` : `change – of ${n}`;
 
   return (
-    <div style={{ display: 'flex', height: '100%' }}>
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-        {/* The top sizes to the pair, the story and the actions; the filmstrips below take the rest of the height. */}
-        <div style={{ flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <ScreenHeader>
-            <h1 data-testid="focus-crumb" className="screen-title" title={lane.label}>
-              {short}, change {change ? index + 1 : '–'} of {n}
-            </h1>
-            <BackToMain navigate={navigate} />
-          </ScreenHeader>
-          {/* One left edge: the body starts on the title's column (24px padding + the 120px gutter), as the strips below. */}
-          <main style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 24px 0 calc(24px + var(--gutter))', display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {!change ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
-                <p style={{ margin: 0 }}>
-                  {lane.status === 'closed'
-                    ? 'This lane is closed: all its changes were decided or it was discarded.'
-                    : `This change is ${lane.changes.find((c) => c.id === changeId)?.status ?? 'not part of this lane'}.`}
-                </p>
-                {next ? (
-                  <a href={next} onClick={go(next)} className="btn-primary">Review the first pending change</a>
-                ) : (
-                  <a href="/" onClick={go('/')} className="btn-primary">Back to main</a>
-                )}
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <ScreenHeader>
+        <div style={{ minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <h1 data-testid="focus-title" className="screen-title" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
+            {lane.label}
+          </h1>
+          <p style={{ margin: 0, display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+            <span data-testid="focus-origin" className="meta">{originLine(lane, deck.order, deck.slides)}</span>
+            <span data-testid="focus-crumb" className="meta" style={{ color: 'var(--ink)' }}>{step}</span>
+          </p>
+        </div>
+        <BackToMain navigate={navigate} style={{ alignSelf: 'flex-start' }} />
+      </ScreenHeader>
+      {/* One left edge: the body starts on the title's column (24px padding + the 120px gutter), as the strips below. */}
+      <main
+        data-testid="focus-scroll"
+        style={{ flex: 1, minHeight: 0, overflow: 'auto', scrollPaddingBottom: BAR_HEIGHT, padding: '4px 24px 0 calc(24px + var(--gutter))', display: 'flex', flexDirection: 'column', gap: 16 }}
+      >
+        {notice ? (
+          <p data-testid="focus-notice" role="status" style={{ margin: 0, fontSize: 'var(--fs-body)', fontWeight: 500, color: 'var(--ink)' }}>
+            {notice}
+          </p>
+        ) : null}
+        {!change ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start', paddingBottom: 24 }}>
+            <p style={{ margin: 0 }}>
+              {lane.status === 'closed'
+                ? 'This lane is closed: all its changes were decided or it was discarded.'
+                : `This change is ${lane.changes.find((c) => c.id === changeId)?.status ?? 'no longer part of this lane'}.`}
+            </p>
+            {firstPending ? (
+              <a href={firstPending} onClick={go(firstPending)} className="btn-primary">Review the first pending change</a>
+            ) : (
+              <a href={mainPath(lane.anchor)} onClick={go(mainPath(lane.anchor))} className="btn-primary">Back to main</a>
+            )}
+          </div>
+        ) : (
+          <>
+            <style>{FOCUS_CSS}</style>
+            {sameRender ? (
+              <p data-testid="focus-same-render" className="meta" style={{ margin: '0 0 -8px' }}>
+                {sameRender}
+              </p>
+            ) : null}
+            {asMove && target ? (
+              <div data-testid="focus-pair" className="focus-pair">
+                <MoveExcerpt side="main" caption={`main, was ${mainAt + 1}`} order={deck.order} slides={deck.slides} at={mainAt} slide={target} url={mainUrl} />
+                <MoveExcerpt side="lane" caption={`this lane, now ${laneAt + 1}`} order={preview.order} slides={preview.slides} at={laneAt} slide={target} url={laneUrl} />
               </div>
             ) : (
-              <>
-                <style>{FOCUS_CSS}</style>
-                {sameRender ? (
-                  <p data-testid="focus-same-render" className="meta" style={{ margin: '0 0 -8px' }}>
-                    {sameRender}
-                  </p>
-                ) : null}
-                <div data-testid="focus-pair" className="focus-pair">
-                  {left ? <SlidePreview {...left} /> : null}
-                  {right ? <SlidePreview {...right} /> : null}
-                </div>
-                <p data-testid="focus-reason" style={{ margin: 0, display: 'flex', gap: 12, alignItems: 'baseline', fontSize: 13, maxWidth: 924 }}>
-                  <span className="meta">{change.kind}</span>
-                  <span style={{ color: 'var(--grey)' }}>{change.reason}</span>
-                </p>
-                {texts.length > 0 ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 924, width: '100%' }}>
-                    {texts.map((t) => (
-                      <TextDiff key={t.field} label={t.field} before={t.before} after={t.after} />
-                    ))}
-                  </div>
-                ) : null}
-                {actionError ? (
-                  <p role="alert" style={{ margin: 0, color: 'var(--warn)', fontSize: 13 }}>
-                    {actionError}
-                  </p>
-                ) : null}
-                <div
-                  data-testid="decide-bar"
-                  style={{ position: 'sticky', bottom: 0, marginTop: 8, zIndex: 2, display: 'flex', alignItems: 'center', gap: 20, padding: '0 0 14px', background: 'var(--paper)' }}
-                >
-                  <button type="button" className="link" style={navBtn} disabled={!prev || n <= 1} onClick={() => prev && navigate(prev)}>
-                    previous change
-                  </button>
-                  <div style={{ display: 'flex', gap: 10 }}>
-                    <button type="button" className="btn-primary" disabled={busy} onClick={accept}>
-                      accept
-                    </button>
-                    <button type="button" className="btn" disabled={busy} onClick={refuse}>
-                      refuse
-                    </button>
-                  </div>
-                  <button type="button" className="link" style={navBtn} disabled={!next || n <= 1} onClick={() => next && navigate(next)}>
-                    next change
-                  </button>
-                </div>
-              </>
+              <div data-testid="focus-pair" className="focus-pair">
+                {left ? <SlidePreview {...left} /> : null}
+                {right ? <SlidePreview {...right} /> : null}
+              </div>
             )}
-          </main>
-        </div>
-        <div style={{ position: 'relative', flex: '1 0 auto', minHeight: 200, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--line)' }}>
-          <footer ref={strips} className="fit-columns" style={{ flex: 1, minHeight: 0, background: 'var(--paper)', overflow: 'auto', padding: '14px 24px 14px 24px' }}>
-            <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div>
-                <Filmstrip order={deck.order} slides={deck.slides} thumbs={mainThumbUrls} selected={target ?? undefined} onSelect={openSlide} label="main" />
-                <RangeUnderline count={deck.order.length} cols={anchorColumns(lane.anchor, deck.order)} label="this lane's slides on main" />
+            <p data-testid="focus-reason" style={{ margin: 0, display: 'flex', gap: 12, alignItems: 'baseline', fontSize: 13, maxWidth: 924 }}>
+              <span className="meta">{change.kind}</span>
+              <span style={{ color: 'var(--grey)' }}>{change.reason}</span>
+            </p>
+            {texts.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 924, width: '100%' }}>
+                {texts.map((t) => (
+                  <TextDiff key={t.field} label={t.field} before={t.before} after={t.after} />
+                ))}
               </div>
-              <div>
-                <Filmstrip order={preview.order} slides={preview.slides} thumbs={laneThumbUrls} selected={target ?? undefined} onSelect={openSlide} label={short} fullLabel={lane.label} />
-                <RangeUnderline count={preview.order.length} cols={laneColumns(lane, preview, deck.order)} label="changed in this lane" />
-              </div>
+            ) : null}
+          </>
+        )}
+        <section aria-label="lane thread" style={{ maxWidth: 924, padding: '8px 0 16px', borderTop: '1px solid var(--line)' }}>
+          <Thread
+            threadKey={`lane:${lane.id}`}
+            title="conversation about this lane"
+            hint="Your message revises this lane: ask for another wording, another render, or to drop a change."
+            context={context}
+            order={deck.order}
+            slides={deck.slides}
+            api={api}
+            subscribe={fanout}
+            navigate={navigate}
+            layout="inline"
+            notes={notes}
+          />
+        </section>
+        {actionError ? (
+          <p role="alert" style={{ margin: 0, color: 'var(--warn)', fontSize: 13 }}>
+            {actionError}
+          </p>
+        ) : null}
+        {change && acked && ack ? (
+          <div
+            data-testid="decide-ack"
+            role="status"
+            style={{ position: 'sticky', bottom: 0, marginTop: 'auto', zIndex: 2, height: BAR_HEIGHT, flex: `0 0 ${BAR_HEIGHT}px`, display: 'flex', alignItems: 'center', gap: 20, background: 'var(--paper)', borderTop: '1px solid var(--line)' }}
+          >
+            <span style={{ fontWeight: 500 }}>{ack.text}</span>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => {
+                setAck(null);
+                leave(ack.next);
+              }}
+            >
+              {ack.next.startsWith('/lane/') ? 'next change' : ack.next.startsWith('/slide/') ? 'back to the slide' : 'back to main'}
+            </button>
+          </div>
+        ) : change ? (
+          <div
+            data-testid="decide-bar"
+            style={{ position: 'sticky', bottom: 0, marginTop: 'auto', zIndex: 2, height: BAR_HEIGHT, flex: `0 0 ${BAR_HEIGHT}px`, display: 'flex', alignItems: 'center', gap: 20, background: 'var(--paper)', borderTop: '1px solid var(--line)' }}
+          >
+            <button type="button" className="link" style={navBtn} disabled={!prev} onClick={() => prev && leave(prev)}>
+              previous change
+            </button>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button type="button" className="btn-primary" disabled={busy} onClick={() => void decide('accept')}>
+                accept
+              </button>
+              <button type="button" className="btn" disabled={busy} onClick={() => void decide('refuse')}>
+                refuse
+              </button>
             </div>
-          </footer>
-          <EdgeFade visible={visible} />
-        </div>
+            <button type="button" className="link" style={navBtn} disabled={!next} onClick={() => next && leave(next)}>
+              next change
+            </button>
+          </div>
+        ) : null}
+      </main>
+      <div style={{ position: 'relative', flex: '0 0 auto', display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--line)' }}>
+        <footer ref={strips} className="fit-columns" style={{ background: 'var(--paper)', overflow: 'auto', padding: '14px 24px 14px 24px' }}>
+          <div style={{ width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div>
+              <Filmstrip order={deck.order} slides={deck.slides} thumbs={mainThumbUrls} selected={target ?? undefined} onSelect={openSlide} label="main" />
+              <RangeUnderline count={deck.order.length} cols={anchorColumns(lane.anchor, deck.order)} label="this lane's slides on main" />
+            </div>
+            <div>
+              <Filmstrip order={preview.order} slides={preview.slides} thumbs={laneThumbUrls} selected={target ?? undefined} onSelect={openSlide} label="this lane" fullLabel={lane.label} />
+              <RangeUnderline count={preview.order.length} cols={laneColumns(lane, preview, deck.order)} label="changed in this lane" />
+            </div>
+          </div>
+        </footer>
+        <EdgeFade visible={visible} />
       </div>
-      {/* The thread runs the full height, as on main. */}
-      <aside style={{ position: 'relative', width: 360, flex: '0 0 360px', borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0 }}>
-        <div style={{ position: 'absolute', inset: 0 }}>
-          <Thread threadKey={`lane:${lane.id}`} subtitle={`lane ${short}`} context={context} order={deck.order} slides={deck.slides} api={api} subscribe={fanout} />
-        </div>
-      </aside>
     </div>
   );
 }

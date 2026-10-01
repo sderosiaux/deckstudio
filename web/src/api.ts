@@ -236,9 +236,8 @@ export interface ThreadApi {
   postMessage(key: ThreadKey, text: string, context: Anchor | null): Promise<void>;
 }
 
-/** Everything the focus screen reads and writes, injectable for tests. */
-export interface FocusApi extends ThreadApi {
-  getDeck(): Promise<DeckPayload>;
+/** What a thread needs to show, under a reply, the lane that reply proposed and to decide its changes in place. */
+export interface ProposalApi {
   getLane(laneId: string): Promise<Lane>;
   getLanePreview(laneId: string): Promise<LanePreviewPayload>;
   thumbFor(slideId: SlideId): Promise<ThumbStatus>;
@@ -246,11 +245,21 @@ export interface FocusApi extends ThreadApi {
   refuseChange(laneId: string, changeId: string): Promise<Lane>;
 }
 
+/** True when `api` can also show a reply's proposal (every method of ProposalApi is there). */
+export function hasProposals(api: ThreadApi & Partial<ProposalApi>): api is ThreadApi & ProposalApi {
+  return !!(api.getLane && api.getLanePreview && api.thumbFor && api.acceptChange && api.refuseChange);
+}
+
+/** Everything the focus screen reads and writes, injectable for tests. */
+export interface FocusApi extends ThreadApi, ProposalApi {
+  getDeck(): Promise<DeckPayload>;
+}
+
 /** Everything the slide edit screen reads and writes, injectable for tests. */
-export interface SlideApi extends ThreadApi, LaneApi {
+export interface SlideApi extends ThreadApi, ProposalApi {
   getDeck(): Promise<DeckPayload>;
   getLanes(status?: LaneFilter): Promise<Lane[]>;
-  thumbFor(slideId: SlideId): Promise<ThumbStatus>;
+  discardLane(laneId: string): Promise<void>;
 }
 
 /** Remark actions available from a post-it on main. */
@@ -286,9 +295,9 @@ export interface HistoryApi {
 }
 
 export const laneApi: LaneApi = { acceptChange, refuseChange, discardLane };
-export const threadApi: ThreadApi = { getThread, postMessage };
+export const threadApi: ThreadApi & ProposalApi = { getThread, postMessage, getLane, getLanePreview, thumbFor, acceptChange, refuseChange };
 export const focusApi: FocusApi = { getDeck, getLane, getLanePreview, thumbFor, acceptChange, refuseChange, getThread, postMessage };
-export const slideApi: SlideApi = { getDeck, getLanes, thumbFor, acceptChange, refuseChange, discardLane, getThread, postMessage };
+export const slideApi: SlideApi = { getDeck, getLanes, getLane, getLanePreview, thumbFor, acceptChange, refuseChange, discardLane, getThread, postMessage };
 export const remarkApi: RemarkApi = { proposeRemark, resolveRemark };
 export const briefChecksApi: BriefChecksApi = { getDeck, getBrief, putBrief, getRemarks, proposeRemark, runChecks, getChecksStatus, getLanes, openLane, thumbFor, getDesign };
 export const historyApi: HistoryApi = { getDeck, getVersions, getVersionSnapshot, getHistoryDiff, restoreEntry, openVersionAsLane, thumbFor };
