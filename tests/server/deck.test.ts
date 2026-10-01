@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { copyFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { copyFile, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { DIAGRAM_STYLE } from '../../src/agent/imageGen.js';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/server/app.js';
 import type { BusEvent } from '../../src/server/bus.js';
@@ -206,6 +207,20 @@ describe('server core', () => {
     expect(put.statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/api/brief' })).json()).toEqual(next);
     expect((await app.inject({ method: 'PUT', url: '/api/brief', payload: { ...next, pattern: 'random' } })).statusCode).toBe(400);
+  });
+
+  it('PUT /api/brief keeps the design rules and image style', async () => {
+    const next: Brief = { ...brief, design: { rules: 'One accent colour.', imageStyle: 'Ink sketch.' } };
+    expect((await app.inject({ method: 'PUT', url: '/api/brief', payload: next })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/brief' })).json()).toEqual(next);
+  });
+
+  it('GET /api/brief/design names the built-in image style and where the theme.css of the deck lives', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/brief/design' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ defaultImageStyle: DIAGRAM_STYLE, themeCssPath: join(resolve(deckDir), 'theme.css'), themeCssPresent: true });
+    await rm(join(deckDir, 'theme.css'));
+    expect((await app.inject({ method: 'GET', url: '/api/brief/design' })).json()).toMatchObject({ themeCssPresent: false });
   });
 
   it('GET /api/thumbs/for/:slideId enqueues a render, emits thumb.ready, then serves the PNG', async () => {

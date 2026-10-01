@@ -18,6 +18,7 @@ body { background: var(--paper); color: var(--ink); font-family: var(--font); fo
 button { font: inherit; }
 .mono { font-family: var(--mono); }
 .muted { color: var(--grey); }
+.brief-design-field::placeholder { color: var(--grey); opacity: 1; }
 .accent { color: var(--accent); }
 
 .screen-title { margin: 0; font-size: var(--fs-title); font-weight: 700; line-height: 1.2; }

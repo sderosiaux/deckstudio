@@ -431,6 +431,13 @@ describe('CheckRunner', () => {
     expect(remark!.anchor).toEqual({ kind: 'slide', slide: 's_BBBBBBBBBB' });
   });
 
+  it('reads the design rules from the stored brief when it builds a check prompt', async () => {
+    await store.setBrief({ ...brief, design: { rules: 'No emoji on stage.', imageStyle: '' } });
+    const { r, calls } = runner([JSON.stringify({ remarks: [] })]);
+    await r.run('arc');
+    expect(calls[0]!.prompt).toContain('No emoji on stage.');
+  });
+
   it('parseCheckOutput takes the first { to the last } of a chatty answer', () => {
     const ok = parseCheckOutput(`Here you go:\n\`\`\`json\n${remarkJson({ kind: 'arc' }, 'x')}\n\`\`\`\nDone.`, new Set(['s1']));
     expect(ok.ok).toBe(true);

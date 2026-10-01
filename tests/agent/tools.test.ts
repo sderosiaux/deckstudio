@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { access, readdir, readFile } from 'node:fs/promises';
+import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createLane, makeDeckToolHandlers, makeDeckTools, type DeckToolContext } from '../../src/agent/tools.js';
+import { DIAGRAM_STYLE, makeImageGen } from '../../src/agent/imageGen.js';
+import { createLane, GENERATE_IMAGE_DESCRIPTION, makeDeckToolHandlers, makeDeckTools, type DeckToolContext } from '../../src/agent/tools.js';
 import { contextHeader, SYSTEM_APPEND } from '../../src/agent/prompts.js';
 import { DeckStore } from '../../src/store/deckStore.js';
 import { ThumbService } from '../../src/render/thumbs.js';
@@ -33,7 +34,7 @@ describe('deck tools', () => {
   let bus: Bus;
   let events: BusEvent[];
   let ctx: DeckToolContext;
-  let images: [string, string][];
+  let images: [string, string, string][];
   let checks: string[];
 
   beforeAll(async () => {
@@ -59,8 +60,8 @@ describe('deck tools', () => {
       store,
       thumbs,
       bus,
-      imageGen: async (prompt, size) => {
-        images.push([prompt, size]);
+      imageGen: async (prompt, size, style) => {
+        images.push([prompt, size, style]);
         return 'assets/gen-1.png';
       },
       runCheck: async (name) => {
@@ -247,9 +248,36 @@ describe('deck tools', () => {
   it('generate_image and run_check delegate to the context', async () => {
     const h = makeDeckToolHandlers(ctx);
     expect(await h.generate_image({ prompt: 'a log', size: '1024x1024' })).toEqual({ asset: 'assets/gen-1.png' });
-    expect(images).toEqual([['a log', '1024x1024']]);
+    expect(images).toEqual([['a log', '1024x1024', DIAGRAM_STYLE]]);
     expect(await h.run_check({ name: 'arc' })).toEqual({ started: true });
     expect(checks).toEqual(['arc']);
+  });
+
+  it('generate_image applies the image style of the brief, and the built-in style when it is empty', async () => {
+    const dir = join(tmp.dir, `img-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    const script = join(dir, 'gen.py');
+    await writeFile(script, '');
+    const prompts: string[] = [];
+    const exec = (async (_cmd: string, args: readonly string[]) => {
+      if (args[0] === script) {
+        prompts.push(args[1]!);
+        await writeFile(args[2]!, 'png');
+      }
+      return { stdout: '', stderr: '' };
+    }) as unknown as NonNullable<Parameters<typeof makeImageGen>[1]>['exec'];
+    const h = makeDeckToolHandlers({ ...ctx, imageGen: makeImageGen(join(store.dir, 'assets'), { script, postDir: '/post', exec }) });
+
+    await h.generate_image({ prompt: 'three boxes labeled a, b, c', size: 'wide' });
+    await store.setBrief({ ...brief, design: { rules: '', imageStyle: 'Charcoal line art on cream paper.' } });
+    await h.generate_image({ prompt: 'one log', size: 'wide' });
+
+    expect(prompts).toEqual([`${DIAGRAM_STYLE.trimEnd()} three boxes labeled a, b, c`, 'Charcoal line art on cream paper. one log']);
+  });
+
+  it('generate_image tells the model the style is applied for it', () => {
+    expect(GENERATE_IMAGE_DESCRIPTION).toMatch(/image style of the brief is applied automatically/i);
+    expect(GENERATE_IMAGE_DESCRIPTION).toMatch(/describe only the content/i);
   });
 
   it('render_slide writes a 1280x720 png under cache/renders and reports body warnings', async () => {

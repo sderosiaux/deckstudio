@@ -1,6 +1,18 @@
+import { access } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
+import { DIAGRAM_STYLE } from '../../agent/imageGen.js';
 import { BriefSchema } from '../../model/schema.js';
 import type { DeckStore } from '../../store/deckStore.js';
+
+/** What the brief screen shows around the design rules: the built-in image style and the deck's theme.css. */
+export interface DesignInfo {
+  /** Applied to generated images when the brief's imageStyle is empty. */
+  defaultImageStyle: string;
+  themeCssPath: string;
+  /** False: the deck has no theme.css and the built-in theme applies. */
+  themeCssPresent: boolean;
+}
 
 export function briefRoutes(app: FastifyInstance, store: DeckStore): void {
   app.get('/api/brief', async () => store.brief());
@@ -10,5 +22,11 @@ export function briefRoutes(app: FastifyInstance, store: DeckStore): void {
     if (!parsed.success) return reply.code(400).send({ error: `invalid brief: ${parsed.error.message}` });
     await store.setBrief(parsed.data);
     return parsed.data;
+  });
+
+  app.get('/api/brief/design', async (): Promise<DesignInfo> => {
+    const themeCssPath = join(store.dir, 'theme.css');
+    const themeCssPresent = await access(themeCssPath).then(() => true, () => false);
+    return { defaultImageStyle: DIAGRAM_STYLE, themeCssPath, themeCssPresent };
   });
 }

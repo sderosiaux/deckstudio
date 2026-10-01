@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { query, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { FastifyInstance } from 'fastify';
@@ -229,6 +229,24 @@ describe('AgentSession', () => {
     await session(fake.impl).send('slide:s3', 'and its neighbours', { kind: 'range', from: 's2', to: 's4' });
     expect(fake.calls[0]!.prompt).toContain('Selected: range s2..s4');
     expect((await store.thread('slide:s3'))[0]!.context).toEqual({ kind: 'range', from: 's2', to: 's4' });
+  });
+
+  it('design rules and the classes of the deck theme.css reach the header of the global, lane and slide threads', async () => {
+    await store.setBrief({ ...brief, design: { rules: 'One accent colour only.', imageStyle: '' } });
+    await writeFile(join(store.dir, 'theme.css'), '.slide{padding:72px}\n.deck-only-claim{font-size:82px}');
+    const fake = fakeQuery(async function* () {
+      yield assistant('ok');
+      yield success('sess-d');
+    });
+    const s = session(fake.impl);
+    await s.send('global', 'a new slide on offsets', null);
+    await s.send('lane:l1', 'tighter', null);
+    await s.send('slide:s3', 'sharper', null);
+    expect(fake.calls).toHaveLength(3);
+    for (const { prompt } of fake.calls) {
+      expect(prompt).toContain('One accent colour only.');
+      expect(prompt).toContain('(reuse them instead of inline styles): .deck-only-claim\n');
+    }
   });
 
   it('does not stream tool input as text and reports tool calls', async () => {

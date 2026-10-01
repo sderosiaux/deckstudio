@@ -1,8 +1,9 @@
 import type { Anchor, Brief, DeckState, DiffEntry, Lane, Remark, Slide, SlideId, Snapshot, ThreadKey, ThreadMessage, Version } from '../../src/model/types.js';
 import type { BusEvent as ServerBusEvent } from '../../src/server/bus.js';
+import type { DesignInfo } from '../../src/server/routes/brief.js';
 import type { CheckName, ChecksStatus } from '../../src/server/routes/checks.js';
 
-export type { CheckName, ChecksStatus };
+export type { CheckName, ChecksStatus, DesignInfo };
 /**
  * `hello` arrives on every (re)open of the socket. `subscribe` emits it itself with `version: null`
  * (the client cannot know the server's version); the server may also send its own with the deck version.
@@ -151,6 +152,10 @@ export function getBrief(): Promise<Brief> {
   return getJson<Brief>('/api/brief');
 }
 
+export function getDesign(): Promise<DesignInfo> {
+  return getJson<DesignInfo>('/api/brief/design');
+}
+
 export async function putBrief(brief: Brief): Promise<Brief> {
   const res = await send('PUT', '/api/brief', brief);
   return (await res.json()) as Brief;
@@ -266,6 +271,7 @@ export interface BriefChecksApi {
   getLanes(status?: LaneFilter): Promise<Lane[]>;
   openLane(laneId: string): Promise<void>;
   thumbFor(slideId: SlideId): Promise<ThumbStatus>;
+  getDesign(): Promise<DesignInfo>;
 }
 
 /** Everything the history screen reads and writes, injectable for tests. */
@@ -284,7 +290,7 @@ export const threadApi: ThreadApi = { getThread, postMessage };
 export const focusApi: FocusApi = { getDeck, getLane, getLanePreview, thumbFor, acceptChange, refuseChange, getThread, postMessage };
 export const slideApi: SlideApi = { getDeck, getLanes, thumbFor, acceptChange, refuseChange, discardLane, getThread, postMessage };
 export const remarkApi: RemarkApi = { proposeRemark, resolveRemark };
-export const briefChecksApi: BriefChecksApi = { getDeck, getBrief, putBrief, getRemarks, proposeRemark, runChecks, getChecksStatus, getLanes, openLane, thumbFor };
+export const briefChecksApi: BriefChecksApi = { getDeck, getBrief, putBrief, getRemarks, proposeRemark, runChecks, getChecksStatus, getLanes, openLane, thumbFor, getDesign };
 export const historyApi: HistoryApi = { getDeck, getVersions, getVersionSnapshot, getHistoryDiff, restoreEntry, openVersionAsLane, thumbFor };
 
 /** Client-side routes. The server answers index.html for any non-API path, so these also work on reload. */

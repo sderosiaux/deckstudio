@@ -18,6 +18,8 @@ A deck folder holds `deck.json` (order, version, brief), `slides/`, `assets/`, `
 
 Screens: main (filmstrip, lanes, remarks, thread), focus (before/after of one change with a text diff), brief and checks, history (compare two versions, restore one entry, open a version as a lane), present.
 
+Design rules live in the brief (brief screen, Design section). The co-author gets them with every message, in every thread, and must keep each slide it creates or modifies within them; the render check flags a slide that breaks one. The image style there prefixes every generated image. The look itself (fonts, colours, classes) stays in the deck's `theme.css`, edited on disk.
+
 ## Develop
 
 `pnpm dev` (server) and `pnpm dev:web` (vite). `pnpm typecheck && pnpm test` must stay green; `DECKSTUDIO_E2E=1 pnpm e2e` drives the real co-author. Design notes: `docs/superpowers/specs`, decisions and findings under `docs/superpowers/plans`.

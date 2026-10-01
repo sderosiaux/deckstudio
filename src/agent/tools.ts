@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { newId } from '../model/ids.js';
+import { imageStyleFor, type ImageGen } from './imageGen.js';
 import { applyChange, validateBody } from '../model/ops.js';
 import {
   AddRemarkInputSchema,
@@ -23,7 +24,8 @@ export interface DeckToolContext {
   store: DeckStore;
   thumbs: ThumbService;
   bus: Bus;
-  imageGen: (prompt: string, size: string) => Promise<string /* asset path */>;
+  /** Called with the brief's image style (imageStyleFor): the model only describes the content. */
+  imageGen: ImageGen;
   runCheck: (name: string) => Promise<void>;
 }
 
@@ -41,6 +43,11 @@ export interface ToolError {
   error: string;
   invalid?: Invalid[];
 }
+
+export const GENERATE_IMAGE_DESCRIPTION =
+  'Generate an image (e.g. a diagram) from a prompt; size wide, tall, half, or WIDTHxHEIGHT like "1536x1024". ' +
+  'The image style of the brief is applied automatically as a prefix of your prompt: describe only the content (the shapes, their labels spelled exactly, how they connect), never the style, palette or rendering. ' +
+  'Returns the asset path to use in a slide body.';
 
 type Handler = (args: unknown) => Promise<object>;
 export type DeckToolName =
@@ -312,7 +319,9 @@ export function makeDeckToolHandlers(ctx: DeckToolContext): DeckToolHandlers {
     async generate_image(args) {
       const p = parse(GenerateImageInputSchema, args);
       if (!p.ok) return p.err;
-      return { asset: await ctx.imageGen(p.value.prompt, p.value.size) };
+      // Read per call: an image style saved in the brief applies to the next image.
+      const style = imageStyleFor(await store.brief());
+      return { asset: await ctx.imageGen(p.value.prompt, p.value.size, style) };
     },
 
     async run_check(args) {
@@ -367,7 +376,7 @@ export function makeDeckTools(ctx: DeckToolContext): { server: McpSdkServerConfi
       tool('link_remark_lane', 'Record that a lane answers a remark.', LinkRemarkLaneInputSchema.shape, wrap(h.link_remark_lane)),
       tool(
         'generate_image',
-        'Generate an image (e.g. a diagram) from a prompt; size like "1536x1024". Returns the asset path to use in a slide body.',
+        GENERATE_IMAGE_DESCRIPTION,
         GenerateImageInputSchema.shape,
         wrap(h.generate_image),
       ),

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { BriefChecks, autoRows, dotState } from '../../web/src/screens/BriefChecks.js';
 import { RemarkPostIt, anchorLabel, cutAtWord } from '../../web/src/components/Remark.js';
-import { mainPath, selectionFromSearch, type BriefChecksApi, type BusEvent, type ChecksStatus, type DeckPayload } from '../../web/src/api.js';
+import { mainPath, selectionFromSearch, type BriefChecksApi, type DesignInfo, type BusEvent, type ChecksStatus, type DeckPayload } from '../../web/src/api.js';
 import type { Brief, Lane, Remark, Slide, SlideId } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
 
@@ -51,6 +51,9 @@ const lane: Lane = {
 
 const status: ChecksStatus = { running: [], lastRun: { arc: '2026-09-30T10:00:00.000Z', order: '2026-09-30T10:00:00.000Z', gaps: '2026-09-30T10:00:00.000Z', render: null } };
 
+const DEFAULT_STYLE = 'A flat, strictly frontal 2D illustration.';
+const design: DesignInfo = { defaultImageStyle: DEFAULT_STYLE, themeCssPath: '/decks/demo/theme.css', themeCssPresent: true };
+
 const stubApi = () => {
   const api = {
     getDeck: vi.fn(async () => deck),
@@ -63,6 +66,7 @@ const stubApi = () => {
     getLanes: vi.fn(async (_status?: 'draft' | 'open' | 'all') => [lane]),
     openLane: vi.fn(async (_id: string) => undefined),
     thumbFor: vi.fn(async (id: SlideId) => ({ hash: `h${id}`, ready: true })),
+    getDesign: vi.fn(async () => design),
   };
   return api satisfies BriefChecksApi;
 };
@@ -150,6 +154,42 @@ describe('BriefChecks', () => {
     await waitFor(() => screen.getByTestId('brief-save').textContent === 'saved');
     fireEvent.click(screen.getByLabelText('problem by problem, build up'));
     expect(api.putBrief).toHaveBeenLastCalledWith({ ...brief, title: 'New title', pattern: 'problem-driven' });
+  });
+
+  it('design: typing rules grows the textarea and saving sends design.rules with the brief', async () => {
+    const api = stubApi();
+    render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    const rules = (await waitFor(() => screen.queryByLabelText('rules the co-author must respect'))) as HTMLTextAreaElement;
+    const rowsBefore = rules.rows;
+    const text = 'Archivo for all text.\nNo bullet lists.\nOne accent colour.\nNo sentence under a visual.\nTitles in sentence case.';
+    fireEvent.change(rules, { target: { value: text } });
+    expect(rules.rows).toBeGreaterThan(rowsBefore);
+    fireEvent.blur(rules);
+    expect(api.putBrief).toHaveBeenLastCalledWith({ ...brief, design: { rules: text, imageStyle: '' } });
+    await waitFor(() => screen.getByTestId('brief-save').textContent === 'saved');
+    const style = screen.getByLabelText('image style') as HTMLTextAreaElement;
+    fireEvent.change(style, { target: { value: 'Ink sketch.' } });
+    fireEvent.blur(style);
+    expect(api.putBrief).toHaveBeenLastCalledWith({ ...brief, design: { rules: text, imageStyle: 'Ink sketch.' } });
+  });
+
+  it('design: an empty image style shows the built-in style as its placeholder, and the theme.css note names its path', async () => {
+    const api = stubApi();
+    render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    const style = (await waitFor(() => screen.queryByLabelText('image style'))) as HTMLTextAreaElement;
+    expect(style.value).toBe('');
+    await waitFor(() => style.placeholder === DEFAULT_STYLE);
+    expect(screen.getByTestId('theme-note').textContent).toBe('theme.css: /decks/demo/theme.css (edit on disk; renders and thumbnails reload on restart)');
+  });
+
+  it('design: a deck without theme.css says the built-in theme applies', async () => {
+    const api = stubApi();
+    api.getDesign.mockResolvedValue({ ...design, themeCssPresent: false });
+    render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryByTestId('theme-note')?.textContent?.includes('not present') ?? false);
+    expect(screen.getByTestId('theme-note').textContent).toBe(
+      'theme.css: /decks/demo/theme.css (not present: the built-in theme applies; create it to change the look, then restart)',
+    );
   });
 
   it('refreshes remarks when the server announces remarks.changed', async () => {

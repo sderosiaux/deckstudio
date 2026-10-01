@@ -1,6 +1,7 @@
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { newId } from '../model/ids.js';
 import type { Anchor, Lane, Remark, ThreadKey, ThreadMessage } from '../model/types.js';
+import { loadThemeCss } from '../render/defaultTheme.js';
 import type { Bus } from '../server/bus.js';
 import type { DeckStore } from '../store/deckStore.js';
 import { canUseTool } from './permissions.js';
@@ -98,7 +99,8 @@ export class AgentSession {
 
   private async buildPrompt(thread: ThreadKey, text: string, context: Anchor | null): Promise<string> {
     const { store } = this.opts;
-    const [snapshot, brief] = await Promise.all([store.snapshot(), store.brief()]);
+    // theme.css is read per message: an edit on disk reaches the next message without a restart.
+    const [snapshot, brief, themeCss] = await Promise.all([store.snapshot(), store.brief(), loadThemeCss(store.dir)]);
     let lane: Lane | undefined;
     let remark: Remark | undefined;
     if (thread.startsWith('lane:')) lane = (await store.lane(thread.slice('lane:'.length))) ?? undefined;
@@ -106,7 +108,7 @@ export class AgentSession {
       const id = thread.slice('remark:'.length);
       remark = (await store.remarks()).find((r) => r.id === id);
     }
-    const header = contextHeader({ thread, anchor: context, snapshot, brief, ...(lane ? { lane } : {}), ...(remark ? { remark } : {}) });
+    const header = contextHeader({ thread, anchor: context, snapshot, brief, themeCss, ...(lane ? { lane } : {}), ...(remark ? { remark } : {}) });
     return `${header}\n\n${text}`;
   }
 
