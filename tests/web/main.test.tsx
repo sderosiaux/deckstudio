@@ -48,6 +48,7 @@ vi.mock('../../web/src/api.js', async (importOriginal) => {
 });
 
 const { Main } = await import('../../web/src/screens/Main.js');
+const { laneApi } = await import('../../web/src/api.js');
 
 const slide = (id: string, title = `Title ${id}`): Slide => ({ id, title, story: '', notes: '', body: `<p>${title}</p>`, assets: [], kind: 'text' });
 const order: SlideId[] = ['s1', 's2', 's3', 's4', 's5'];
@@ -167,7 +168,7 @@ describe('Main', () => {
       fireEvent.keyDown(document.body, { key: 'e' });
       expect(location.pathname).toBe('/');
       fireEvent.click(mainThumb('s2'));
-      fireEvent.keyDown(screen.getByLabelText('message'), { key: 'e' });
+      fireEvent.keyDown(within(screen.getByTestId('selection-panel')).getByLabelText('message'), { key: 'e' });
       expect(location.pathname).toBe('/');
       fireEvent.keyDown(document.body, { key: 'Enter' });
       expect(location.pathname).toBe('/slide/s2');
@@ -184,7 +185,7 @@ describe('Main', () => {
       const title = await waitFor(() => screen.queryByTestId('thumb-title-link'));
       expect(title.textContent).toBe('Title s3');
       expect(title.getAttribute('href')).toBe('/slide/s3');
-      const edit = within(screen.getByTestId('context-chip')).getByRole('link', { name: 'edit' });
+      const edit = within(within(screen.getByTestId('selection-panel')).getByTestId('context-chip')).getByRole('link', { name: 'edit' });
       expect(edit.getAttribute('href')).toBe('/slide/s3');
       fireEvent.click(title);
       expect(location.pathname).toBe('/slide/s3');
@@ -397,8 +398,9 @@ describe('Main draft lanes', () => {
       emit({ type: 'lane.updated', laneId: 'l3' });
       await waitFor(() => screen.getAllByTestId('lane-row').length === 3);
       expect(laneOrder()).toEqual(['l3', 'l2', 'l1']);
-      await waitFor(() => scrolled.mock.contexts.some((el) => (el as HTMLElement).id === 'lane-row-l3'));
-      expect(laneRow('l3').getAttribute('data-flash')).toBe('true');
+      await waitFor(() => laneRow('l3').getAttribute('data-flash') === 'true');
+      // The panel stays where the creator works; the remark card links to the row ("lane opened").
+      expect(scrolled.mock.contexts.some((el) => (el as HTMLElement).id === 'lane-row-l3')).toBe(false);
       await waitFor(() => screen.queryAllByTestId('draft-ready').length === 0);
     } finally {
       delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
@@ -416,19 +418,21 @@ describe('Main one proposal, one place', () => {
     expect(laneOrder()).toEqual(['l2', 'l1']);
   });
 
-  it('a lane revised by a request from the panel moves first, scrolls into view and flashes; a rebase afterwards does not', async () => {
+  it('a lane revised by a request from the panel moves first and flashes, without scrolling the canvas away from the panel; a rebase afterwards does not', async () => {
     const scrolled = vi.fn();
     Element.prototype.scrollIntoView = scrolled;
     await mounted();
     fireEvent.click(mainThumb('s3'));
-    const input = screen.getByLabelText('message');
+    const p = within(screen.getByTestId('selection-panel'));
+    const input = p.getByLabelText('message');
     fireEvent.change(input, { target: { value: 'shorter title' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    fireEvent.click(p.getByRole('button', { name: 'Send' }));
     expect(m.postMessage).toHaveBeenCalledWith('slide:s3', 'shorter title', { kind: 'slide', slide: 's3' });
     emit({ type: 'lane.updated', laneId: 'l1' });
     await waitFor(() => laneOrder()[0] === 'l1');
-    await waitFor(() => scrolled.mock.contexts.some((el) => (el as HTMLElement).id === 'lane-row-l1'));
-    expect(laneRow('l1').getAttribute('data-flash')).toBe('true');
+    await waitFor(() => laneRow('l1').getAttribute('data-flash') === 'true');
+    // The answer lands in the panel: the lane row below is a mirror and does not steal the scroll.
+    expect(scrolled.mock.contexts.some((el) => (el as HTMLElement).id === 'lane-row-l1')).toBe(false);
     expect(laneRow('l2').getAttribute('data-flash')).toBeNull();
     // The flash ends with its animation.
     fireEvent(laneRow('l1'), new Event('animationend'));
@@ -445,7 +449,7 @@ describe('Main one proposal, one place', () => {
 describe('Main propose feedback', () => {
   const note = () => screen.queryByTestId('propose-note');
 
-  it('propose leaves a line in the thread panel that turns into a link once a lane linked to the remark arrives', async () => {
+  it('propose leaves a line in the selection panel that turns into a link once a lane linked to the remark arrives', async () => {
     m.getRemarks.mockResolvedValue([remark('r_p', { anchor: { kind: 'slide', slide: 's2' } })]);
     sessionStorage.setItem('deckstudio.wholeDeck', 'open');
     await mounted();
@@ -455,7 +459,9 @@ describe('Main propose feedback', () => {
     expect(m.proposeRemark).toHaveBeenCalledWith('r_p');
     await waitFor(() => note());
     expect(note()!.textContent).toBe('asked the co-author for a lane on slide 2…');
-    expect(within(screen.getByTestId('thread-panel')).getByTestId('propose-note')).toBe(note());
+    // Where the creator asked: in the panel, not in the whole-deck bar (open beside it).
+    expect(within(screen.getByTestId('selection-panel')).getByTestId('propose-note')).toBe(note());
+    expect(within(screen.getByTestId('thread-panel')).queryByTestId('propose-note')).toBeNull();
     expect(note()!.querySelector('a')).toBeNull();
 
     // An unrelated lane event: still waiting.
@@ -559,7 +565,7 @@ describe('Main QA1', () => {
   it('Escape clears the selection, but not while a message is being written', async () => {
     await mounted();
     fireEvent.click(mainThumb('s3'));
-    const input = screen.getByLabelText('message');
+    const input = within(screen.getByTestId('selection-panel')).getByLabelText('message');
     fireEvent.change(input, { target: { value: 'half written' } });
     fireEvent.keyDown(input, { key: 'Escape' });
     expect(pressed()).toEqual(['s3']);
@@ -638,5 +644,42 @@ describe('Main QA1', () => {
     await mounted();
     await waitFor(() => screen.queryByTestId('remark-count'));
     expect(screen.getByTestId('remark-count').textContent).toBe('3 open remarks');
+  });
+});
+
+describe('Main variants', () => {
+  const titleTo = (id: string, title: string, variantOf: string[]) => ({ id, kind: 'modify' as const, slide: 's2', patch: { title }, reason: `title ${title}`, status: 'pending' as const, variantOf });
+  const lA = { ...mkLane('lA', 's2', '2026-09-30T21:41:00.000Z'), label: 'Four-word hook title', changes: [titleTo('cA', 'One home already exists', ['lB'])] };
+  const lB = { ...mkLane('lB', 's2', '2026-09-30T21:52:00.000Z'), label: 'Shorter hook title', changes: [titleTo('cB', 'One answer already exists', ['lA'])] };
+  const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  it('lanes competing on one slide field share one row, "slide 2, title: 2 variants", each with its text, time, accept and refuse; after an accept the others go', async () => {
+    let all: Lane[] = [...lanes, lA, lB];
+    m.getLanes.mockImplementation(async (status?: string) => (status === undefined ? all : []));
+    m.getLane.mockImplementation(async (id: string) => all.find((l) => l.id === id));
+    m.getLanePreview.mockImplementation(async (id: string) => previewOf(id, id === 'l1' ? 's3' : id === 'l2' ? 's5' : 's2'));
+    render(<Main />);
+    const row = await waitFor(() => screen.queryByTestId('variant-row'));
+    expect(within(row).getByTestId('variant-label').textContent).toBe('slide 2, title: 2 variants');
+    // The competing lanes have no rows of their own.
+    expect(laneOrder()).toEqual(['l2', 'l1']);
+    const cells = await waitFor(() => (within(row).queryAllByTestId('variant-cell').length === 2 ? within(row).getAllByTestId('variant-cell') : null));
+    expect(cells.map((c) => c.getAttribute('data-lane'))).toEqual(['lA', 'lB']);
+    expect(cells.map((c) => c.getAttribute('data-col'))).toEqual(['1', '1']);
+    expect(within(cells[0]!).getByTestId('variant-text').textContent).toBe('One home already exists');
+    expect(within(cells[1]!).getByTestId('variant-text').textContent).toBe('One answer already exists');
+    expect(within(cells[0]!).getByTestId('variant-time').textContent).toBe(time(lA.createdAt));
+    expect(within(cells[0]!).getByText('Four-word hook title')).toBeTruthy();
+    fireEvent.click(within(cells[0]!).getByRole('button', { name: /^accept: / }));
+    expect(laneApi.acceptChange).toHaveBeenCalledWith('lA', 'cA');
+    within(cells[1]!).getByRole('button', { name: /^refuse: / });
+
+    // The server takes A into main and orphans B: both leave main.
+    all = [...lanes];
+    m.getLane.mockImplementation(async (id: string) => (id === 'lB' ? { ...lB, changes: [{ ...lB.changes[0]!, status: 'orphan', variantOf: [] }] } : all.find((l) => l.id === id)));
+    emit({ type: 'lane.closed', laneId: 'lA' });
+    emit({ type: 'lane.updated', laneId: 'lB' });
+    await waitFor(() => screen.queryByTestId('variant-row') === null);
+    expect(laneOrder()).toEqual(['l2', 'l1']);
   });
 });

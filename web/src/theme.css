@@ -110,11 +110,28 @@ button { font: inherit; }
   font-size: var(--fs-meta); color: var(--ink); white-space: nowrap; transition: border-color .15s ease;
 }
 .edge-chip:hover { border-color: var(--grey-2); }
-/* The selection panel never runs below the canvas's visible bottom: the composer stays in sight, the log scrolls inside. */
-.selection-panel { display: flex; flex-direction: column; max-height: var(--panel-max-h, none); overflow: hidden; }
+/*
+ * The selection panel never runs below the canvas's visible bottom. The log gives way first (it scrolls inside, down to
+ * 96px); past that the panel itself scrolls as a whole, so an expanded remark card is never cut, and a fade at its
+ * bottom says more lies below. The remark list has no scroll box of its own.
+ */
+.selection-panel { display: flex; flex-direction: column; max-height: var(--panel-max-h, none); overflow-y: auto; overflow-x: hidden; }
 .selection-panel > [data-testid='thread'] { flex: 1 1 auto; min-height: 0; }
-.selection-panel [data-testid='thread'] > [role='log'] { flex: 1 1 auto; min-height: 48px; }
-.selection-panel .panel-remarks { max-height: calc(var(--panel-max-h, 100vh) * .4); overflow-y: auto; }
+.selection-panel [data-testid='thread'] > [role='log'] {
+  flex: 1 1 auto; min-height: 96px; padding-top: 12px;
+  /* Scrolled, the log's top line fades out under the remarks instead of being sliced by its edge. */
+  mask-image: linear-gradient(to bottom, transparent 0, #000 12px);
+}
+.panel-fade {
+  position: sticky; bottom: -16px; flex: 0 0 32px; margin: -32px -16px -16px; height: 48px; pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--card) 70%);
+}
+/* The panel folded while the strip shows other columns: one line at the strip's left edge, "show" brings it back. */
+.panel-bar {
+  position: sticky; left: calc(var(--gutter) + 6px); display: inline-flex; align-items: baseline; gap: 8px; margin-left: 6px;
+  padding: 6px 12px; border-radius: var(--radius); background: var(--card); box-shadow: 0 0 0 1px var(--line);
+  font-size: var(--fs-body); color: var(--grey); white-space: nowrap;
+}
 
 /* History: the "+N" slot over the end of the compared strips scrolls them on; it shows the count EdgeFade prints. */
 .diff-more { all: unset; box-sizing: border-box; cursor: pointer; border-radius: var(--radius); transition: box-shadow .15s ease; }

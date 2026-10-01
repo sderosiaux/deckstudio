@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { DeckPayload } from '../../web/src/api.js';
-import type { Remark, Slide, SlideId, ThreadMessage } from '../../src/model/types.js';
+import type { Lane, Remark, Slide, SlideId, ThreadMessage } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
 
 const m = vi.hoisted(() => ({
@@ -12,6 +14,11 @@ const m = vi.hoisted(() => ({
   getRemarks: vi.fn(),
   proposeRemark: vi.fn(),
   resolveRemark: vi.fn(),
+  getLanes: vi.fn(),
+  getLane: vi.fn(),
+  getLanePreview: vi.fn(),
+  acceptChange: vi.fn(),
+  refuseChange: vi.fn(),
 }));
 
 const slide = (id: string): Slide => ({ id, title: `Title ${id}`, story: '', notes: '', body: `<p>${id}</p>`, assets: [], kind: 'text' });
@@ -29,15 +36,23 @@ vi.mock('../../web/src/api.js', async (importOriginal) => {
     ...real,
     getDeck: async () => deck,
     getVersions: async () => [],
-    getLanes: async () => [],
-    getLane: vi.fn(),
-    getLanePreview: vi.fn(),
+    getLanes: m.getLanes,
+    getLane: m.getLane,
+    getLanePreview: m.getLanePreview,
     thumbFor: async (id: SlideId) => ({ hash: `h_${id}`, ready: true }),
     getRemarks: m.getRemarks,
     openLane: vi.fn(),
     openPlayer: vi.fn(),
     remarkApi: { proposeRemark: m.proposeRemark, resolveRemark: m.resolveRemark },
-    threadApi: { getThread: m.getThread, postMessage: m.postMessage },
+    threadApi: {
+      getThread: m.getThread,
+      postMessage: m.postMessage,
+      getLane: m.getLane,
+      getLanePreview: m.getLanePreview,
+      thumbFor: async (id: SlideId) => ({ hash: `h_${id}`, ready: true }),
+      acceptChange: m.acceptChange,
+      refuseChange: m.refuseChange,
+    },
     laneApi: { acceptChange: vi.fn(), refuseChange: vi.fn(), discardLane: vi.fn() },
     subscribe: (h: (e: unknown) => void) => {
       m.handlers.push(h);
@@ -72,6 +87,11 @@ beforeEach(() => {
   m.getRemarks.mockReset().mockResolvedValue([]);
   m.proposeRemark.mockReset().mockResolvedValue(undefined);
   m.resolveRemark.mockReset().mockResolvedValue(undefined);
+  m.getLanes.mockReset().mockResolvedValue([]);
+  m.getLane.mockReset();
+  m.getLanePreview.mockReset();
+  m.acceptChange.mockReset();
+  m.refuseChange.mockReset();
 });
 afterEach(() => {
   cleanup();
@@ -141,7 +161,7 @@ describe('Main selection panel', () => {
     expect(m.proposeRemark).toHaveBeenCalledWith('r_s3');
     fireEvent.click(within(cards[1]!).getByRole('button', { name: 'resolve' }));
     expect(m.resolveRemark).toHaveBeenCalledWith('r_range');
-    // The propose note shows in the panel while the right bar is a rail.
+    // The propose note shows in the panel, where the creator asked.
     await waitFor(() => within(p).queryByTestId('propose-note'));
     expect(pressed()).toEqual(['s3']);
   });
@@ -201,7 +221,8 @@ describe('Main selection panel', () => {
       await mounted();
       fireEvent.click(thumb('s3'));
       const p = await waitFor(() => panel());
-      await waitFor(() => p.style.getPropertyValue('--panel-max-h') === '524px');
+      // 700 less the strip (160), what sits above the panel (28: canvas padding, pin row) and 16 of clearance.
+      await waitFor(() => p.style.getPropertyValue('--panel-max-h') === '496px');
       expect(p.className).toContain('selection-panel');
     } finally {
       Object.defineProperty(HTMLElement.prototype, 'offsetHeight', desc);
@@ -331,25 +352,199 @@ describe('Main selection panel', () => {
     expect(within(p).getByLabelText('message')).not.toBe(document.activeElement);
   });
 
-  it('with a selection the right bar is a rail; "whole deck" reopens it, the choice kept for the session', async () => {
+  it('frozen layout: the whole-deck bar keeps its width whatever the selection, and only its own toggle collapses it', async () => {
     await mounted();
+    const bar = () => screen.queryByTestId('thread-panel');
+    const rail = () => screen.queryByTestId('thread-rail');
+    expect(bar()!.style.width).toBe('360px');
+    expect(bar()!.style.flex).toBe('0 0 360px');
     fireEvent.click(thumb('s3'));
     await waitFor(() => panel());
-    expect(screen.queryByTestId('thread-panel')).toBeNull();
-    const rail = screen.getByTestId('thread-rail');
-    fireEvent.click(within(rail).getByRole('button', { name: 'whole deck' }));
-    const bar = screen.getByTestId('thread-panel');
-    expect(within(bar).getByTestId('thread').getAttribute('data-thread')).toBe('global');
-    expect(within(bar).getByTestId('context-chip').getAttribute('data-kind')).toBe('arc');
-    expect(panel()).not.toBeNull();
+    // Selecting never resizes the strip: the bar stays, at the same width.
+    expect(bar()!.style.width).toBe('360px');
+    expect(rail()).toBeNull();
+    const hide = within(bar()!).getByRole('button', { name: 'hide the whole-deck conversation' });
+    expect(hide.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(hide);
+    expect(bar()).toBeNull();
+    expect(rail()!.style.width).toBe('40px');
+    // Clearing the selection does not reopen it either.
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(panel()).toBeNull();
+    expect(bar()).toBeNull();
+    const show = within(rail()!).getByRole('button', { name: 'whole deck' });
+    expect(show.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(show);
+    expect(bar()!.style.width).toBe('360px');
 
+    // The choice is kept for the session.
+    fireEvent.click(within(bar()!).getByRole('button', { name: 'hide the whole-deck conversation' }));
     cleanup();
     await mounted();
-    fireEvent.click(thumb('s2'));
+    expect(bar()).toBeNull();
+    expect(rail()).not.toBeNull();
+  });
+
+  it('frozen layout: lane and strip columns keep their x when a slide is selected', async () => {
+    // jsdom lays nothing out: what places the columns is the canvas box, its rows and the strip's own styles, and the
+    // bar beside the canvas. None of them may change on a selection.
+    const xs = (): string => {
+      const canvas = screen.getByTestId('canvas');
+      return [canvas, canvas.firstElementChild as HTMLElement, document.querySelector<HTMLElement>('[data-strip="main"]')!, canvas.parentElement!, document.querySelector<HTMLElement>('aside')!]
+        .map((el) => `${el.getAttribute('style')}|${el.className}`)
+        .join(';');
+    };
+    await mounted();
+    const before = { xs: xs(), bar: screen.getByTestId('thread-panel').getAttribute('style') };
+    fireEvent.click(thumb('s4'));
     await waitFor(() => panel());
-    expect(screen.queryByTestId('thread-panel')).not.toBeNull();
-    fireEvent.click(within(screen.getByTestId('thread-panel')).getByRole('button', { name: 'collapse' }));
-    expect(screen.queryByTestId('thread-panel')).toBeNull();
-    expect(screen.getByTestId('thread-rail')).toBeTruthy();
+    expect(screen.getByTestId('thread-panel').getAttribute('style')).toBe(before.bar);
+    expect(xs()).toBe(before.xs);
+  });
+});
+
+describe('Main panel QA3', () => {
+  const themeCss = (): string => readFileSync(join(process.cwd(), 'web/src/theme.css'), 'utf8');
+  const emit = (e: unknown) => act(() => m.handlers.forEach((h) => h(e)));
+
+  it('a reply that opens a lane for the selected slide carries its proposal card in the panel; the lane row mirrors it, flashed, without stealing the scroll', async () => {
+    const lane: Lane = {
+      id: 'l_new', label: 'One home', anchor: { kind: 'slide', slide: 's3' }, origin: 'user', baseVersion: 3, status: 'open', createdAt: '2026-09-30T10:00:02.000Z',
+      changes: [{ id: 'c1', kind: 'modify', slide: 's3', patch: { title: 'One home already exists' }, reason: 'one idea', status: 'pending' }],
+    };
+    const preview = { order, slides: { ...deck.slides, s3: { ...deck.slides.s3!, title: 'One home already exists' } }, skipped: [], thumbs: { s3: { hash: 'lane_s3', ready: true } } };
+    m.getLane.mockResolvedValue(lane);
+    m.getLanePreview.mockResolvedValue(preview);
+    const stored: ThreadMessage[] = [];
+    m.getThread.mockImplementation(async (key: string) => (key === 'slide:s3' ? [...stored] : []));
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      await mounted();
+      fireEvent.click(thumb('s3'));
+      const p = await waitFor(() => panel());
+      fireEvent.change(within(p).getByLabelText('message'), { target: { value: 'one idea' } });
+      fireEvent.click(within(p).getByRole('button', { name: 'Send' }));
+      await waitFor(() => m.postMessage.mock.calls.length === 1);
+      m.getLanes.mockResolvedValue([lane]);
+      emit({ type: 'lane.created', laneId: 'l_new' });
+      stored.push(
+        { id: 'u1', thread: 'slide:s3', role: 'user', text: 'one idea', context: { kind: 'slide', slide: 's3' }, at: '2026-09-30T10:00:00.000Z' },
+        { id: 'a1', thread: 'slide:s3', role: 'assistant', text: 'Opened a lane.', context: null, at: '2026-09-30T10:00:05.000Z' },
+      );
+      emit({ type: 'assistant.done', thread: 'slide:s3', messageId: 'a1' });
+      const card = await waitFor(() => within(p).queryByTestId('thread-proposal'));
+      const reply = within(p).getAllByTestId('thread-message').find((x) => x.getAttribute('data-role') === 'assistant')!;
+      expect(reply.contains(card)).toBe(true);
+      const line = await waitFor(() => within(card).queryByTestId('field-diff'));
+      expect(line.textContent).toBe('title: Title s3 → One home already exists');
+      expect(within(card).getByRole('button', { name: 'accept' })).toBeTruthy();
+      expect(within(card).getByRole('button', { name: 'refuse' })).toBeTruthy();
+      expect(within(card).getByRole('link', { name: 'open in focus' })).toBeTruthy();
+      // The lane row is a mirror: there, flashed, and the canvas did not jump to it.
+      const row = await waitFor(() => document.getElementById('lane-row-l_new'));
+      expect(row.getAttribute('data-flash')).toBe('true');
+      expect(scrolled.mock.contexts.some((el) => (el as HTMLElement).id === 'lane-row-l_new')).toBe(false);
+      // "lane: <label>" brings the mirror into view on demand.
+      fireEvent.click(within(card).getByRole('button', { name: 'lane: One home' }));
+      expect(scrolled.mock.contexts.some((el) => (el as HTMLElement).id === 'lane-row-l_new')).toBe(true);
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
+  it('the panel lists 3 remarks, then "N more remarks" grows the list in place; no inner scroll box clips a card', async () => {
+    m.getRemarks.mockResolvedValue(['a', 'b', 'c', 'd', 'e'].map((x) => remark(`r_${x}`, { kind: 'slide', slide: 's3' })));
+    await mounted();
+    fireEvent.click(thumb('s3'));
+    const p = await waitFor(() => panel());
+    await waitFor(() => within(p).queryAllByTestId('post-it').length === 3);
+    const more = within(p).getByRole('button', { name: '2 more remarks' });
+    expect(more.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(more);
+    expect(within(p).getAllByTestId('post-it')).toHaveLength(5);
+    fireEvent.click(within(p).getByRole('button', { name: 'show fewer' }));
+    expect(within(p).getAllByTestId('post-it')).toHaveLength(3);
+    // The list itself never scrolls (a hidden overflow cut cards); the panel as a whole scrolls past its max height.
+    const css = themeCss();
+    expect(css).not.toMatch(/\.panel-remarks \{[^}]*(max-height|overflow)/);
+    expect(css).toMatch(/\.selection-panel \{[^}]*overflow-y: auto/);
+  });
+
+  it('a panel taller than its max height shows a bottom fade until scrolled to its end', async () => {
+    const sh = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollHeight')!;
+    const ch = Object.getOwnPropertyDescriptor(Element.prototype, 'clientHeight')!;
+    const isPanel = (el: Element) => el.getAttribute('data-testid') === 'selection-panel';
+    Object.defineProperty(Element.prototype, 'scrollHeight', { configurable: true, get(this: Element) { return isPanel(this) ? 900 : 0; } });
+    Object.defineProperty(Element.prototype, 'clientHeight', { configurable: true, get(this: Element) { return isPanel(this) ? 500 : 0; } });
+    try {
+      await mounted();
+      fireEvent.click(thumb('s3'));
+      const p = await waitFor(() => panel());
+      await waitFor(() => within(p).queryByTestId('panel-fade'));
+      p.scrollTop = 400;
+      fireEvent.scroll(p);
+      await waitFor(() => within(p).queryByTestId('panel-fade') === null);
+    } finally {
+      Object.defineProperty(Element.prototype, 'scrollHeight', sh);
+      Object.defineProperty(Element.prototype, 'clientHeight', ch);
+    }
+  });
+
+  it('a panel whose slide pages out of view folds to a one-line bar at the strip\'s left edge; "show" brings the column back', async () => {
+    const rect = (left: number, width: number) => ({ left, right: left + width, top: 0, bottom: 50, width, height: 50, x: left, y: 0, toJSON: () => ({}) });
+    const gbcr = Element.prototype.getBoundingClientRect;
+    const cw = Object.getOwnPropertyDescriptor(Element.prototype, 'clientWidth')!;
+    // Columns 0-2 sit under the gutter (the strip paged on): slides 4-6 are in view.
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      if (this.getAttribute('data-testid') === 'canvas') return rect(0, 1000);
+      if (this.classList.contains('gutter')) return rect(24, 120);
+      if (this.getAttribute('data-testid') === 'thumb' && this.closest('[data-strip="main"]')) {
+        const i = order.indexOf(this.getAttribute('data-slide')!);
+        return rect(150 + (i - 3) * 108, 100);
+      }
+      return rect(0, 0);
+    };
+    Object.defineProperty(Element.prototype, 'clientWidth', { configurable: true, get(this: Element) { return this.getAttribute('data-testid') === 'canvas' ? 1000 : 0; } });
+    try {
+      await mounted();
+      const canvas = screen.getByTestId('canvas');
+      canvas.scrollLeft = 400;
+      fireEvent.click(thumb('s1'));
+      const bar = await waitFor(() => screen.queryByTestId('panel-bar'));
+      // No panel holding its height off-screen.
+      expect(panel()).toBeNull();
+      expect(bar.textContent).toContain('conversation about slide 1');
+      fireEvent.click(within(bar).getByRole('button', { name: 'show' }));
+      // revealColumn(0): slide 1 at -174 comes to the row start (150): 324px back.
+      expect(canvas.scrollLeft).toBe(76);
+      expect(pressed()).toEqual(['s1']);
+    } finally {
+      Element.prototype.getBoundingClientRect = gbcr;
+      Object.defineProperty(Element.prototype, 'clientWidth', cw);
+    }
+  });
+
+  it('severity words are plain muted text with a tooltip, never a control; a click on the text toggles it whole', async () => {
+    m.getRemarks.mockResolvedValue([{ ...remark('r_i', { kind: 'slide', slide: 's3' }), severity: 'info' }, remark('r_w', { kind: 'slide', slide: 's3' })]);
+    await mounted();
+    fireEvent.click(thumb('s3'));
+    const p = await waitFor(() => panel());
+    await waitFor(() => within(p).queryAllByTestId('post-it').length === 2);
+    for (const tag of within(p).getAllByTestId('severity-tag')) {
+      expect(tag.tagName).toBe('SPAN');
+      expect(tag.getAttribute('role')).toBeNull();
+      expect(tag.getAttribute('tabindex')).toBeNull();
+      expect(tag.closest('button')).toBeNull();
+      expect(tag.className).toContain('meta');
+      expect(tag.style.color).toBe('');
+      expect(tag.getAttribute('title')).toMatch(/\w/);
+    }
+    expect(within(p).queryByRole('button', { name: /^(info|warn)$/ })).toBeNull();
+    const text = within(within(p).getAllByTestId('post-it')[0]!).getByTestId('remark-text');
+    fireEvent.click(text);
+    expect(text.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(text);
+    expect(text.getAttribute('aria-expanded')).toBe('false');
   });
 });

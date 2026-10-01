@@ -64,6 +64,13 @@ export interface ThreadProps {
   heading?: 'screen' | 'section';
   /** Messages of another thread shown read-only before this one's, under `label`: where the conversation started. */
   seed?: { label: string; messages: ThreadMessage[] };
+  /**
+   * Lanes the screen already lists: a stored reply gets the card of a lane created during its turn (between the
+   * request and the reply) that answers that turn, so the proposal stays under it after a reload.
+   */
+  knownLanes?: readonly Lane[];
+  /** Makes "lane: <label>" on a proposal card show that lane where the screen lists it, instead of a link to focus. */
+  onShowLane?(laneId: string): void;
 }
 
 export type ProposalActions = 'all' | 'focus-link' | 'none';
@@ -157,7 +164,62 @@ export function turnsOn(messages: readonly ThreadMessage[], anchor: Anchor): Thr
   });
 }
 
-const PAIR_WIDTH = 220;
+/** Each thumb of a proposal card's main/proposed pair: two fit side by side in the panel under the strip. */
+const PAIR_WIDTH = 200;
+
+const FIELDS = ['title', 'story', 'notes', 'body', 'assets', 'kind'] as const;
+/** Body HTML as the words it shows, for a one-line diff. */
+const plain = (html: string): string => html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+const fieldText = (field: (typeof FIELDS)[number], value: unknown): string =>
+  Array.isArray(value) ? value.join(', ') : field === 'body' ? plain(String(value ?? '')) : String(value ?? '');
+
+/** One changed field of a proposal, as the card writes it: "title: Two answers → One home". An empty side is left out. */
+export interface FieldLine {
+  field: string;
+  from: string;
+  to: string;
+}
+
+/**
+ * What a change does, one line per field: a modify lists each patched field whose value differs from main (main's
+ * value, then the proposed one); an insert names the new slide, a remove the slide it drops, a move its two positions.
+ */
+export function fieldLines(c: Change, slides: Record<SlideId, Slide>, order: SlideId[], laneOrder?: SlideId[]): FieldLine[] {
+  if (c.kind === 'insert') return [{ field: 'new slide', from: '', to: c.slide.title }];
+  const before = slides[c.slide];
+  if (c.kind === 'remove') return [{ field: 'removed', from: before?.title ?? 'a slide', to: '' }];
+  if (c.kind === 'move') {
+    const from = order.indexOf(c.slide);
+    const to = laneOrder ? laneOrder.indexOf(c.slide) : -1;
+    return [{ field: 'moved', from: from >= 0 ? `slide ${from + 1}` : '', to: to >= 0 ? `slide ${to + 1}` : '' }];
+  }
+  return FIELDS.flatMap((f) => {
+    const next = c.patch[f];
+    if (next === undefined) return [];
+    const was = before?.[f];
+    if (JSON.stringify(was) === JSON.stringify(next)) return [];
+    return [{ field: f, from: fieldText(f, was), to: fieldText(f, next) }];
+  });
+}
+
+const lineBox: CSSProperties = { margin: 0, fontSize: 'var(--fs-body)', lineHeight: 1.4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' };
+
+function FieldDiff({ line }: { line: FieldLine }) {
+  const full = [line.from, line.to].filter(Boolean).join(' → ');
+  return (
+    <p data-testid="field-diff" data-field={line.field} title={`${line.field}: ${full}`} style={lineBox}>
+      <span className="muted">{line.field}:</span> {line.from ? <span style={{ color: 'var(--grey)' }}>{line.from}</span> : null}
+      {line.from && line.to ? ' ' : null}
+      {line.from && line.to ? (
+        <span data-testid="diff-arrow" className="muted">
+          →
+        </span>
+      ) : null}
+      {line.from && line.to ? ' ' : null}
+      {line.to ? <span style={{ color: 'var(--ink)', fontWeight: 500 }}>{line.to}</span> : null}
+    </p>
+  );
+}
 
 interface ProposalProps {
   laneId: string;
@@ -170,13 +232,14 @@ interface ProposalProps {
   navigate(path: string): void;
   onNote(text: string): void;
   actions: ProposalActions;
+  onShowLane?(laneId: string): void;
 }
 
 /**
  * The lane a reply proposed, under that reply: its title as a link to its first pending change in focus, then per
  * change main's thumb against the lane's, the reason, accept, refuse and open in focus. A decision says itself here.
  */
-function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, navigate, onNote, actions }: ProposalProps) {
+function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, navigate, onNote, actions, onShowLane }: ProposalProps) {
   const [data, setData] = useState<{ lane: Lane; preview: LanePreviewPayload | null } | null>(null);
   const [mainThumbs, setMainThumbs] = useState<Record<SlideId, ThumbStatus>>({});
   const [busy, setBusy] = useState(false);
@@ -287,12 +350,16 @@ function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, n
       data-lane={lane.id}
       style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 6, padding: 12, borderRadius: 'var(--radius)', background: 'var(--card)', boxShadow: '0 0 0 1px var(--line)' }}
     >
-      {first && actions !== 'none' ? (
+      {actions !== 'none' && onShowLane ? (
+        <button type="button" className="link" onClick={() => onShowLane(lane.id)} style={{ color: 'var(--ink)', fontWeight: 700, whiteSpace: 'normal', alignSelf: 'flex-start' }}>
+          lane: {lane.label}
+        </button>
+      ) : first && actions !== 'none' ? (
         <a href={focusPath(lane.id, first.id)} onClick={follow(focusPath(lane.id, first.id))} className="link" style={{ color: 'var(--ink)', fontWeight: 700, whiteSpace: 'normal' }}>
-          {lane.label}
+          lane: {lane.label}
         </a>
       ) : (
-        <span style={{ fontWeight: 700 }}>{lane.label}</span>
+        <span style={{ fontWeight: 700 }}>lane: {lane.label}</span>
       )}
       {changes.map((c) => {
         const [left, right] = pair(c);
@@ -302,6 +369,11 @@ function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, n
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
               <SlidePreview {...left} width={PAIR_WIDTH} />
               <SlidePreview {...right} width={PAIR_WIDTH} />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              {fieldLines(c, slides, order, preview?.order).map((l) => (
+                <FieldDiff key={l.field} line={l} />
+              ))}
             </div>
             <p className="meta" style={{ margin: 0, lineHeight: 1.4 }}>
               {c.kind}: {c.reason}
@@ -351,6 +423,26 @@ interface Turn {
   lanes: Set<string>;
 }
 
+/**
+ * Lanes each stored reply proposed, read from the lanes themselves: a lane created after the turn's request and no
+ * later than the reply, that answers the turn's context, belongs under that reply.
+ */
+export function inferTurns(messages: readonly ThreadMessage[], lanes: readonly Lane[], threadKey: ThreadKey): Record<string, Turn> {
+  const out: Record<string, Turn> = {};
+  let ask: { at: string; context: Anchor } | null = null;
+  for (const m of messages) {
+    if (m.role === 'user') {
+      ask = m.context ? { at: m.at, context: m.context } : null;
+      continue;
+    }
+    if (!ask) continue;
+    const { at, context } = ask;
+    const hits = lanes.filter((l) => l.createdAt > at && l.createdAt <= m.at && laneAnswers(l, context, threadKey));
+    if (hits.length > 0) out[m.id] = { context, lanes: new Set(hits.map((l) => l.id)) };
+  }
+  return out;
+}
+
 export function Thread({
   threadKey,
   context,
@@ -373,6 +465,8 @@ export function Thread({
   proposalActions = 'all',
   seed,
   heading = 'screen',
+  knownLanes,
+  onShowLane,
 }: ThreadProps) {
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -506,6 +600,9 @@ export function Thread({
 
   const proposals = hasProposals(api) ? api : null;
   const shown = only ? turnsOn(messages, only) : messages;
+  const inferred = knownLanes ? inferTurns(shown, knownLanes, threadKey) : {};
+  // A turn seen live knows its lanes (revisions too); a stored one falls back on the lanes created during it.
+  const turns: Record<string, Turn> = { ...inferred, ...attached };
   const items = merge(shown, [...(notes ?? []), ...ownNotes]);
   const inline = layout === 'inline';
   const root: CSSProperties = inline ? { display: 'flex', flexDirection: 'column', gap: 12 } : { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 };
@@ -566,12 +663,12 @@ export function Thread({
                 ) : null}
               </div>
               <div style={textStyle}>{renderInline(item.m.text)}</div>
-              {proposals && attached[item.m.id]
-                ? [...attached[item.m.id]!.lanes].map((laneId) => (
+              {proposals && turns[item.m.id]
+                ? [...turns[item.m.id]!.lanes].map((laneId) => (
                     <Proposal
                       key={laneId}
                       laneId={laneId}
-                      context={attached[item.m.id]!.context}
+                      context={turns[item.m.id]!.context}
                       threadKey={threadKey}
                       order={order}
                       slides={slides}
@@ -580,6 +677,7 @@ export function Thread({
                       navigate={navigate}
                       onNote={addNote}
                       actions={proposalActions}
+                      onShowLane={onShowLane}
                     />
                   ))
                 : null}

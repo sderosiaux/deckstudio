@@ -55,7 +55,7 @@ export function RemarkCard({ remark, order, onShow, onPropose, laneHref, onOpenL
         {isNew ? (
           <span data-testid="remark-new" style={{ color: 'var(--accent)', fontSize: 12, fontWeight: 700 }}>new</span>
         ) : null}
-        {remark.severity === 'info' ? <span className="muted" style={{ fontSize: 12 }}>info</span> : null}
+        {remark.severity === 'info' ? <span className="muted" title={SEVERITY_HINT.info} style={{ fontSize: 12 }}>info</span> : null}
         {draft ? (
           <button
             type="button"
@@ -122,6 +122,11 @@ const only = (fn: () => void) => (e: MouseEvent): void => {
 };
 
 const CLAMP_LINES = 3;
+
+const SEVERITY_HINT: Record<RemarkT['severity'], string> = {
+  info: 'info: worth a look, nothing is broken',
+  warn: 'warn: the check found a problem on these slides',
+};
 const LINE_H = 1.35;
 
 /**
@@ -255,14 +260,8 @@ export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpen
           resolve
         </button>
         {state.kind === 'error' ? <span style={{ fontSize: 12, color: 'var(--warn)' }} title={state.message}>failed</span> : null}
-        {/* The severity is a fact about the remark, not an action: a plain coloured word at the end, and clicking it does nothing. */}
-        <span
-          data-testid="severity-tag"
-          className="severity"
-          data-severity={remark.severity}
-          onClick={(e) => e.stopPropagation()}
-          style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 500, color: remark.severity === 'warn' ? 'var(--warn)' : 'var(--grey)' }}
-        >
+        {/* The severity is a fact about the remark, not an action: a plain muted word at the end, explained on hover. */}
+        <span data-testid="severity-tag" className="meta" data-severity={remark.severity} title={SEVERITY_HINT[remark.severity]} style={{ marginLeft: 'auto', cursor: 'default' }}>
           {remark.severity}
         </span>
       </div>

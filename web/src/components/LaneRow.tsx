@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
-import type { Anchor, Change, Lane, Remark, Slide, SlideId } from '../../../src/model/types.js';
-import { focusPath, navigate, remarkApi as defaultRemarkApi, thumbUrl, type LaneApi, type LanePreviewPayload, type RemarkApi } from '../api.js';
+import type { Anchor, Change, Lane, Remark, Slide, SlideId, SlidePatch } from '../../../src/model/types.js';
+import { focusPath, navigate, remarkApi as defaultRemarkApi, thumbUrl, type LaneApi, type LaneChange, type LanePayload, type LanePreviewPayload, type RemarkApi } from '../api.js';
 import { ChangeButtons } from './ChangeButtons.js';
 import { RemarkPostIt, anchorLabel } from './Remark.js';
 import { Thumb } from './Thumb.js';
@@ -507,6 +507,190 @@ export function LaneRow({
     </div>
   );
 }
+
+type Modify = Extract<Change, { kind: 'modify' }>;
+const VARIANT_FIELDS: readonly (keyof SlidePatch)[] = ['title', 'story', 'notes', 'body', 'assets', 'kind'];
+
+/** Lanes whose pending modify rewrites the same field of the same slide: the creator picks one. */
+export interface VariantGroup {
+  key: string;
+  slide: SlideId;
+  field: keyof SlidePatch;
+  /** Oldest first. */
+  members: { lane: LanePayload; change: Modify }[];
+}
+
+const pendingModifies = (lane: LanePayload): (Modify & { variantOf?: string[] })[] =>
+  lane.changes.filter((c): c is Modify & LaneChange => c.kind === 'modify' && c.status === 'pending');
+const patches = (c: Modify, f: keyof SlidePatch): boolean => c.patch[f] !== undefined;
+
+/**
+ * The variant groups among open lanes, from the server's `variantOf` on each pending modify: two lanes are variants
+ * when one names the other and both have a pending modify writing the same field of the same slide (the first field
+ * in slide order). A lane joins one group at most; groups of one are dropped.
+ */
+export function variantGroups(lanes: readonly LanePayload[]): VariantGroup[] {
+  const byId = new Map(lanes.map((l) => [l.id, l] as const));
+  const groups = new Map<string, VariantGroup>();
+  const taken = new Set<string>();
+  const join = (key: string, slide: SlideId, field: keyof SlidePatch, lane: LanePayload, change: Modify): void => {
+    if (taken.has(lane.id)) return;
+    const g = groups.get(key) ?? { key, slide, field, members: [] };
+    g.members.push({ lane, change });
+    groups.set(key, g);
+    taken.add(lane.id);
+  };
+  for (const lane of [...lanes].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    for (const c of pendingModifies(lane)) {
+      const others = (c.variantOf ?? []).flatMap((id) => {
+        const o = byId.get(id);
+        return o && o.status === 'open' ? pendingModifies(o).filter((x) => x.slide === c.slide).map((x) => ({ lane: o, change: x })) : [];
+      });
+      const field = VARIANT_FIELDS.find((f) => patches(c, f) && others.some((o) => patches(o.change, f)));
+      if (!field) continue;
+      const key = `${c.slide}:${field}`;
+      join(key, c.slide, field, lane, c);
+      for (const o of others) if (patches(o.change, field)) join(key, c.slide, field, o.lane, o.change);
+    }
+  }
+  return [...groups.values()]
+    .filter((g) => g.members.length > 1)
+    .map((g) => ({ ...g, members: [...g.members].sort((a, b) => a.lane.createdAt.localeCompare(b.lane.createdAt)) }));
+}
+
+/** A variant's proposed value of the contested field, in words (body HTML as its text). */
+export function variantText(change: Modify, field: keyof SlidePatch): string {
+  const v = change.patch[field];
+  if (Array.isArray(v)) return v.join(', ');
+  const text = String(v ?? '');
+  return field === 'body' ? text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() : text;
+}
+
+const clock = (iso: string): string => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
+/** Grid columns each variant takes: its thumb and room for the proposed text beside the next one. */
+const VARIANT_COLS = 2;
+
+export interface VariantRowProps {
+  group: VariantGroup;
+  previews: Record<string, LanePreviewPayload | undefined>;
+  mainOrder: SlideId[];
+  mainThumbs: Record<SlideId, string | undefined>;
+  api: LaneApi;
+  failedThumbs?: ReadonlySet<string>;
+  onOpenChange?(laneId: string, changeId: string): void;
+}
+
+/**
+ * Competing lanes on one slide field as one row, "slide 2, title: 2 variants": the variants side by side from the
+ * slide's column, each with its render, its lane name, the value it proposes, when it was proposed, and its own
+ * accept and refuse. Accepting one leaves the others stale on the server, and they leave main.
+ */
+export function VariantRow({ group, previews, mainOrder, mainThumbs, api, failedThumbs = NO_FAILED, onOpenChange = openFocus }: VariantRowProps) {
+  const col = mainOrder.indexOf(group.slide);
+  const n = Math.max(mainOrder.length, 1);
+  const span = group.members.length * VARIANT_COLS;
+  return (
+    <div id={`variant-row-${group.key}`} data-testid="variant-row" data-slide={group.slide} data-field={group.field} className="lane-row" style={{ display: 'flex', alignItems: 'stretch' }}>
+      <div className="gutter" style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 8 }}>
+        <span className="row-label" data-testid="variant-label">
+          slide {col + 1}, {group.field}: {group.members.length} variants
+        </span>
+        <span className="meta">accept one, the others close</span>
+      </div>
+      <div data-testid="lane-grid" style={{ display: 'grid', gridTemplateColumns: `repeat(${n}, var(--thumb-w))`, gridAutoColumns: 'var(--thumb-w)', columnGap: 'var(--col-gap)', padding: '0 6px' }}>
+        <section
+          data-testid="variant-region"
+          aria-label={`variants for slide ${col + 1}, ${group.field}`}
+          style={{ gridColumn: `${col + 1} / span ${span}`, minWidth: 0, paddingTop: 6, display: 'grid', gridTemplateColumns: `repeat(${span}, var(--thumb-w))`, columnGap: 'var(--col-gap)' }}
+        >
+          {group.members.map((m, i) => (
+            <VariantCell
+              key={m.lane.id}
+              lane={m.lane}
+              change={m.change}
+              field={group.field}
+              col={col}
+              gridColumn={`${i * VARIANT_COLS + 1} / span ${VARIANT_COLS}`}
+              preview={previews[m.lane.id]}
+              mainThumb={mainThumbs[group.slide]}
+              api={api}
+              failedThumbs={failedThumbs}
+              onOpenChange={onOpenChange}
+            />
+          ))}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function VariantCell({
+  lane,
+  change,
+  field,
+  col,
+  gridColumn,
+  preview,
+  mainThumb,
+  api,
+  failedThumbs,
+  onOpenChange,
+}: {
+  lane: LanePayload;
+  change: Modify;
+  field: keyof SlidePatch;
+  col: number;
+  gridColumn: string;
+  preview: LanePreviewPayload | undefined;
+  mainThumb: string | undefined;
+  api: LaneApi;
+  failedThumbs: ReadonlySet<string>;
+  onOpenChange(laneId: string, changeId: string): void;
+}) {
+  const { busy, error, accept, refuse } = useLaneActions(lane.id, api);
+  const t = preview?.thumbs[change.slide];
+  const url = t ? (failedThumbs.has(t.hash) ? FAILED_THUMB : t.ready ? thumbUrl(t.hash) : undefined) : mainThumb;
+  const text = variantText(change, field);
+  const title = preview?.slides[change.slide]?.title ?? text;
+  return (
+    <div data-testid="variant-cell" data-lane={lane.id} data-col={col} style={{ gridColumn, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <Thumb slideId={change.slide} n={col + 1} title={title} url={url} selected={false} numbered={false} hoverTitle={false} onClick={() => onOpenChange(lane.id, change.id)} />
+      <span className="meta" style={{ overflowWrap: 'anywhere' }}>
+        {lane.label}
+      </span>
+      <span data-testid="variant-text" title={text} style={variantTextStyle}>
+        {text}
+      </span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <ChangeButtons change={change} describe={`${field} of slide ${col + 1} to ${text}`} disabled={busy} onAccept={accept} onRefuse={refuse} />
+        <span data-testid="variant-time" className="meta">
+          {clock(lane.createdAt)}
+        </span>
+      </div>
+      {error ? (
+        <p role="alert" style={{ margin: 0, fontSize: 12, color: 'var(--warn)' }}>
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+const variantTextStyle: CSSProperties = {
+  fontSize: 'var(--fs-body)',
+  fontWeight: 500,
+  lineHeight: 1.35,
+  color: 'var(--ink)',
+  overflowWrap: 'break-word',
+  display: '-webkit-box',
+  WebkitBoxOrient: 'vertical',
+  WebkitLineClamp: 3,
+  overflow: 'hidden',
+};
 
 /** Where the moved hairline runs, from the left edge of its column: the same x on main's thumb and in the lane slot, clear of the card's rounded corner. */
 const MOVE_X = 8;

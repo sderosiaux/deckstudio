@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { LaneRow } from '../../web/src/components/LaneRow.js';
+import { LaneRow, VariantRow, variantGroups } from '../../web/src/components/LaneRow.js';
 import { placeCards } from '../../web/src/components/RemarkRow.js';
 import { ContextChip } from '../../web/src/components/ContextChip.js';
 import { Thread } from '../../web/src/components/Thread.js';
@@ -451,5 +451,47 @@ describe('placeCards', () => {
     expect(placeCards([{ id: 'c', col: 2, span: 1 }], 12, Infinity, undefined, new Set([1, 4]))).toEqual([{ id: 'c', start: 1, width: 3, row: 0, inset: true }]);
     // Never under two columns: a card squeezed into one column runs over the line into its neighbours instead.
     expect(placeCards([{ id: 'd', col: 2, span: 1 }], 12, Infinity, undefined, new Set([2, 3]))).toEqual([{ id: 'd', start: 2, width: 4, row: 0, inset: true }]);
+  });
+});
+
+describe('variants', () => {
+  const mod = (id: string, s: SlideId, patch: Record<string, string>, variantOf: string[] = []) => ({ id, kind: 'modify' as const, slide: s, patch, reason: 'r', status: 'pending' as const, variantOf });
+  const at = (n: number) => `2026-09-30T10:0${n}:00.000Z`;
+
+  it('groups lanes whose pending modify shares a slide and a field, oldest first; a lane joins one group at most', () => {
+    const a = lane({ id: 'a', createdAt: at(1), changes: [mod('ca', 's2', { title: 'A' }, ['b', 'c'])] });
+    const b = lane({ id: 'b', createdAt: at(2), changes: [mod('cb', 's2', { title: 'B', body: '<p>x</p>' }, ['a', 'c'])] });
+    const c = lane({ id: 'c', createdAt: at(0), changes: [mod('cc', 's2', { title: 'C' }, ['a', 'b'])] });
+    const d = lane({ id: 'd', createdAt: at(3), changes: [mod('cd', 's3', { notes: 'n' })] });
+    // variantOf names a lane that no longer has that field pending: no group.
+    const e = lane({ id: 'e', createdAt: at(4), changes: [mod('ce', 's4', { story: 's' }, ['d'])] });
+    const groups = variantGroups([a, b, c, d, e]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ slide: 's2', field: 'title' });
+    expect(groups[0]!.members.map((x) => [x.lane.id, x.change.id])).toEqual([['c', 'cc'], ['a', 'ca'], ['b', 'cb']]);
+  });
+
+  it('a variant row names the slide and field, and gives each variant its thumb, text, time and its own accept and refuse', async () => {
+    const a = lane({ id: 'a', label: 'Four-word hook title', createdAt: at(1), changes: [mod('ca', 's2', { title: 'One home' }, ['b'])] });
+    const b = lane({ id: 'b', label: 'Shorter hook title', createdAt: at(2), changes: [mod('cb', 's2', { title: 'One answer' }, ['a'])] });
+    const [group] = variantGroups([a, b]);
+    const pv = (t: string): LanePreviewPayload => ({ order, slides: { ...mainSlides, s2: slide('s2', t) }, skipped: [], thumbs: { s2: { hash: `h_${t}`, ready: true } } });
+    const api = stubApi();
+    const open = vi.fn();
+    render(<VariantRow group={group!} previews={{ a: pv('One home'), b: pv('One answer') }} mainOrder={order} mainThumbs={{}} api={api} onOpenChange={open} />);
+    expect(screen.getByTestId('variant-label').textContent).toBe('slide 2, title: 2 variants');
+    const cells = screen.getAllByTestId('variant-cell');
+    expect(cells.map((c) => c.style.gridColumn)).toEqual(['1 / span 2', '3 / span 2']);
+    expect(screen.getByTestId('variant-region').style.gridColumn).toBe('2 / span 4');
+    expect(within(cells[1]!).getByTestId('variant-text').textContent).toBe('One answer');
+    expect(within(cells[0]!).getByTestId('thumb-image').getAttribute('src')).toBe('/api/thumbs/h_One home.png');
+    fireEvent.click(within(cells[1]!).getByRole('button', { name: /^refuse: / }));
+    await waitFor(() => api.refuseChange.mock.calls.length === 1);
+    expect(api.refuseChange).toHaveBeenCalledWith('b', 'cb');
+    fireEvent.click(within(cells[0]!).getByRole('button', { name: /^accept: / }));
+    await waitFor(() => api.acceptChange.mock.calls.length === 1);
+    expect(api.acceptChange).toHaveBeenCalledWith('a', 'ca');
+    fireEvent.click(within(cells[0]!).getByTestId('thumb'));
+    expect(open).toHaveBeenCalledWith('a', 'ca');
   });
 });
