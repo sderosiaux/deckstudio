@@ -173,12 +173,17 @@ describe('BriefChecks', () => {
     expect(api.putBrief).toHaveBeenLastCalledWith({ ...brief, design: { rules: text, imageStyle: 'Ink sketch.' } });
   });
 
-  it('design: an empty image style shows the built-in style as its placeholder, and the theme.css note names its path', async () => {
+  it('design: an empty image style has a short placeholder, the built-in style behind a disclosure, and the theme.css note names its path', async () => {
     const api = stubApi();
     render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
     const style = (await waitFor(() => screen.queryByLabelText('image style'))) as HTMLTextAreaElement;
     expect(style.value).toBe('');
-    await waitFor(() => style.placeholder === DEFAULT_STYLE);
+    expect(style.placeholder).toBe('built-in flat keynote style; type here to override');
+    const disclose = await screen.findByRole('button', { name: 'show built-in style' });
+    expect(screen.queryByTestId('builtin-style')).toBeNull();
+    fireEvent.click(disclose);
+    expect(screen.getByTestId('builtin-style').textContent).toBe(DEFAULT_STYLE);
+    expect(screen.getByRole('button', { name: 'hide built-in style' }).getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByTestId('theme-note').textContent).toBe('theme.css: /decks/demo/theme.css (edit on disk; renders and thumbnails reload on restart)');
   });
 
@@ -388,5 +393,107 @@ describe('remark helpers', () => {
     await waitFor(() => within(p).queryByRole('button', { name: 'asked' }));
     fireEvent.click(within(p).getByRole('button', { name: 'resolve' }));
     expect(onResolve).toHaveBeenCalledWith('r_long');
+  });
+});
+
+describe('BriefChecks QA1', () => {
+  it('slide captions sit inside their grid cell, under the thumb: no hover title floats over the next row', async () => {
+    render(<BriefChecks api={stubApi()} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('brief-thumb').length === 6);
+    const grid = screen.getAllByTestId('brief-thumb')[0]!.parentElement!;
+    expect(grid.style.gridAutoRows).toBe('auto');
+    for (const cell of screen.getAllByTestId('brief-thumb')) {
+      expect(cell.querySelector('.thumb-title')).toBeNull();
+      const caption = within(cell).getByTestId('brief-thumb-caption');
+      expect(caption.textContent).toBe(`Title ${cell.getAttribute('data-slide')}`);
+      expect(caption.style.position).toBe('');
+      expect(caption.style.textOverflow).toBe('ellipsis');
+    }
+  });
+
+  it('the run button says "Run checks" when idle and "Checks running…" (disabled) only while a run is in flight', async () => {
+    const api = stubApi();
+    api.getChecksStatus.mockResolvedValue({ ...status, running: ['render'] });
+    let finish: () => void = () => undefined;
+    api.runChecks.mockImplementation(() => new Promise((r) => (finish = () => r({ started: ['arc', 'order', 'gaps', 'render'] }))));
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => row('render').textContent?.includes('running…'));
+    const btn = () => screen.getByRole('button', { name: /checks/i }) as HTMLButtonElement;
+    // One check still running is a run in flight: no second run on top of it.
+    expect(btn().textContent).toBe('Checks running…');
+    expect(btn().disabled).toBe(true);
+    act(() => push({ type: 'checks.status', running: [] }));
+    expect(btn().textContent).toBe('Run checks');
+    expect(btn().disabled).toBe(false);
+    fireEvent.click(btn());
+    expect(btn().textContent).toBe('Checks running…');
+    expect(btn().disabled).toBe(true);
+    await act(async () => finish());
+    act(() => push({ type: 'checks.status', running: ['arc'] }));
+    act(() => push({ type: 'checks.status', running: [] }));
+    expect(btn().textContent).toBe('Run checks');
+  });
+
+  it('resolved and lane-closed remarks hide behind "show resolved (N)"', async () => {
+    const api = stubApi();
+    const closed: Lane = { ...lane, id: 'lc', status: 'closed' };
+    api.getRemarks.mockResolvedValue([...remarks, remark('r_closed', { origin: 'check:gaps', anchor: { kind: 'slide', slide: 's2' }, laneId: 'lc', severity: 'info' })]);
+    api.getLanes.mockResolvedValue([lane, closed]);
+    render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => api.getLanes.mock.calls.length === 1);
+    fireEvent.click(header('gaps'));
+    const ids = () => within(row('gaps')).getAllByTestId('remark').map((c) => c.getAttribute('data-remark'));
+    await waitFor(() => ids().join() === 'r_gaps');
+    expect(row('gaps').textContent).toContain('1 remark');
+    const toggle = within(row('gaps')).getByRole('button', { name: 'show resolved (2)' });
+    fireEvent.click(toggle);
+    expect(ids()).toEqual(['r_gaps', 'r_old', 'r_closed']);
+    fireEvent.click(within(row('gaps')).getByRole('button', { name: 'hide resolved (2)' }));
+    expect(ids()).toEqual(['r_gaps']);
+    // A check with nothing resolved offers no toggle.
+    fireEvent.click(header('arc'));
+    expect(within(row('arc')).queryByRole('button', { name: /resolved/ })).toBeNull();
+  });
+
+  it('"new" never shows on a first run seen without an earlier lastRun for remarks older than that run', async () => {
+    const api = stubApi();
+    const old = remark('r_before', { anchor: { kind: 'slide', slide: 's2' }, createdAt: new Date(Date.now() - 3_600_000).toISOString() });
+    api.getRemarks.mockResolvedValue([old]);
+    api.getChecksStatus.mockResolvedValue({ running: [], lastRun: { arc: null, order: null, gaps: null, render: null } });
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => within(row('arc')).queryAllByTestId('remark').length === 1);
+    await waitFor(() => api.getChecksStatus.mock.calls.length === 1);
+    act(() => push({ type: 'checks.status', running: ['arc'] }));
+    const fresh = remark('r_fresh', { anchor: { kind: 'slide', slide: 's4' }, createdAt: new Date(Date.now() + 60_000).toISOString() });
+    api.getRemarks.mockResolvedValue([old, fresh]);
+    act(() => push({ type: 'remarks.changed' }));
+    act(() => push({ type: 'checks.status', running: [] }));
+    await waitFor(() => within(row('arc')).queryAllByTestId('remark').length === 2);
+    const card = (id: string) => within(row('arc')).getAllByTestId('remark').find((c) => c.getAttribute('data-remark') === id)!;
+    await waitFor(() => within(card('r_fresh')).queryByTestId('remark-new'));
+    expect(within(card('r_before')).queryByTestId('remark-new')).toBeNull();
+  });
+
+  it('typing shows "unsaved changes" and a save button; save persists; "saved" stays after a blur', async () => {
+    const api = stubApi();
+    render(<BriefChecks api={api} subscribe={noEvents} navigate={vi.fn()} />);
+    const title = (await waitFor(() => screen.queryByLabelText('title'))) as HTMLInputElement;
+    const save = () => screen.getByRole('button', { name: 'save' }) as HTMLButtonElement;
+    expect(save().disabled).toBe(true);
+    fireEvent.change(title, { target: { value: 'Typed title' } });
+    expect(screen.getByTestId('brief-save').textContent).toBe('unsaved changes');
+    expect(save().disabled).toBe(false);
+    fireEvent.click(save());
+    expect(api.putBrief).toHaveBeenLastCalledWith({ ...brief, title: 'Typed title' });
+    await waitFor(() => screen.getByTestId('brief-save').textContent === 'saved');
+    expect(save().disabled).toBe(true);
+    fireEvent.blur(title);
+    expect(api.putBrief).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('brief-save').textContent).toBe('saved');
   });
 });

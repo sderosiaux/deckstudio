@@ -85,3 +85,7 @@ button { font: inherit; }
 
 /* A range on main: every slide of it is ringed; their titles stay hidden (they would overlap), the range caption names it. */
 [data-range] .thumb[aria-pressed='true']:not(:hover) .thumb-title { visibility: hidden; }
+
+/* History: the "+N" slot over the end of the compared strips scrolls them on; it shows the count EdgeFade prints. */
+.diff-more { all: unset; box-sizing: border-box; cursor: pointer; border-radius: var(--radius); transition: box-shadow .15s ease; }
+.diff-more:hover, .diff-more:focus-visible { box-shadow: inset 0 0 0 1px var(--grey-2); }

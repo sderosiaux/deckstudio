@@ -50,8 +50,14 @@ const sameBrief = (a: Brief, b: Brief): boolean =>
   a.design.rules === b.design.rules &&
   a.design.imageStyle === b.design.imageStyle;
 // Remarks from a lane-scoped run describe that lane's preview, not main: they are shown on the lane row, not here.
-const openOf = (rs: Remark[], name: CheckName): Remark[] => rs.filter((r) => r.status === 'open' && r.origin === `check:${name}` && !r.sourceLaneId);
-const hasWarn = (rs: Remark[], name: CheckName): boolean => openOf(rs, name).some((r) => r.severity === 'warn');
+const ofCheck = (rs: Remark[], name: CheckName): Remark[] => rs.filter((r) => r.origin === `check:${name}` && !r.sourceLaneId);
+/** A remark whose lane was closed (accepted, refused or discarded) was acted on: it is history, like a resolved one. */
+const laneClosed = (r: Remark, lanes: Lane[]): boolean => r.laneId !== null && !lanes.some((l) => l.id === r.laneId && l.status !== 'closed');
+/** What a check still says about main: open, and not settled through a closed lane. */
+const liveOf = (rs: Remark[], lanes: Lane[], name: CheckName): Remark[] => ofCheck(rs, name).filter((r) => r.status === 'open' && !laneClosed(r, lanes));
+/** Resolved or lane-closed: kept behind "show resolved (N)". */
+const settledOf = (rs: Remark[], lanes: Lane[], name: CheckName): Remark[] => ofCheck(rs, name).filter((r) => r.status !== 'open' || laneClosed(r, lanes));
+const hasWarn = (rs: Remark[], lanes: Lane[], name: CheckName): boolean => liveOf(rs, lanes, name).some((r) => r.severity === 'warn');
 
 /** The draft lane a remark points at, if any: a check proposed it and the creator has not opened it yet. */
 function draftLaneOf(lanes: Lane[], laneId: string | null): string | undefined {
@@ -107,7 +113,8 @@ const h2: CSSProperties = { margin: '0 0 14px', fontSize: 20, fontWeight: 700 };
 const fieldLabel: CSSProperties = { display: 'block', fontSize: 13, fontWeight: 500, margin: 0, padding: '10px 0 0' };
 const input: CSSProperties = { display: 'block', width: '100%', margin: 0, padding: '8px 12px', borderRadius: 'var(--radius)', border: '1px solid var(--line)', background: 'var(--card)', font: 'inherit', fontSize: 13, lineHeight: 1.45, color: 'var(--ink)' };
 
-const PLACEHOLDER_MAX_ROWS = 8;
+/** The image-style field reads as empty when it is: the built-in style itself sits behind a disclosure. */
+export const IMAGE_STYLE_PLACEHOLDER = 'built-in flat keynote style; type here to override';
 const h3: CSSProperties = { margin: '28px 0 0', fontSize: 15, fontWeight: 700 };
 
 type DesignLoad = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; info: DesignInfo };
@@ -127,6 +134,8 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
   const saved = useRef<Brief>(initial);
   const [save, setSave] = useState<Save>({ kind: 'idle' });
   const [design, setDesign] = useState<DesignLoad>({ status: 'loading' });
+  const [showBuiltIn, setShowBuiltIn] = useState(false);
+  const dirty = !sameBrief(draft, saved.current);
 
   useEffect(() => {
     let live = true;
@@ -146,8 +155,7 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
         id={`brief-design-${key}`}
         className="brief-design-field"
         value={draft.design[key]}
-        // An empty field grows with its placeholder too, up to PLACEHOLDER_MAX_ROWS: the built-in style is long.
-        rows={draft.design[key] ? autoRows(draft.design[key], minRows) : Math.min(PLACEHOLDER_MAX_ROWS, autoRows(placeholder ?? '', minRows))}
+        rows={autoRows(draft.design[key], minRows)}
         {...(placeholder !== undefined ? { placeholder } : {})}
         style={{ ...input, resize: 'vertical' }}
         onChange={(e) => setDraft({ ...draft, design: { ...draft.design, [key]: e.target.value } })}
@@ -199,8 +207,14 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
     <section style={{ ...card, borderLeft: 'none', paddingLeft: 0 }} aria-label="brief">
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
         <h2 style={h2}>Brief</h2>
-        <span data-testid="brief-save" style={{ fontSize: 12, color: save.kind === 'error' ? 'var(--warn)' : 'var(--grey)' }}>
-          {save.kind === 'saving' ? 'saving…' : save.kind === 'saved' ? 'saved' : save.kind === 'error' ? `not saved: ${save.message}` : ''}
+        {/* Autosave on blur stays; the state is always visible, and "save" commits without leaving the field. */}
+        <span style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+          <span data-testid="brief-save" style={{ fontSize: 12, color: save.kind === 'error' ? 'var(--warn)' : dirty ? 'var(--ink)' : 'var(--grey)' }}>
+            {save.kind === 'saving' ? 'saving…' : save.kind === 'error' ? `not saved: ${save.message}` : dirty ? 'unsaved changes' : save.kind === 'saved' ? 'saved' : ''}
+          </span>
+          <button type="button" className="btn" disabled={!dirty || save.kind === 'saving'} onMouseDown={(e) => e.preventDefault()} onClick={() => persist(draft)} style={{ padding: '4px 10px', fontSize: 12 }}>
+            save
+          </button>
         </span>
       </div>
       <div data-testid="brief-fields" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gridAutoRows: 'auto', rowGap: 8, alignItems: 'start' }}>
@@ -233,7 +247,17 @@ function BriefCard({ initial, api }: { initial: Brief; api: BriefChecksApi }) {
       <h3 style={h3}>Design</h3>
       <div data-testid="brief-design" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gridAutoRows: 'auto', rowGap: 8, alignItems: 'start' }}>
         {designText('rules', 'rules the co-author must respect', 4)}
-        {designText('imageStyle', 'image style', 3, design.status === 'ready' ? design.info.defaultImageStyle : '')}
+        {designText('imageStyle', 'image style', 3, IMAGE_STYLE_PLACEHOLDER)}
+        {design.status === 'ready' ? (
+          <div>
+            <button type="button" className="link" aria-expanded={showBuiltIn} onClick={() => setShowBuiltIn((v) => !v)} style={{ fontSize: 12 }}>
+              {showBuiltIn ? 'hide built-in style' : 'show built-in style'}
+            </button>
+            {showBuiltIn ? (
+              <p data-testid="builtin-style" className="muted" style={{ margin: '6px 0 0', fontSize: 12, lineHeight: 1.45, whiteSpace: 'pre-wrap' }}>{design.info.defaultImageStyle}</p>
+            ) : null}
+          </div>
+        ) : null}
         <p data-testid="theme-note" className="muted" style={{ margin: '4px 0 0', fontSize: 12, lineHeight: 1.45, overflowWrap: 'anywhere' }}>
           {themeNote(design)}
         </p>
@@ -252,6 +276,11 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
   const [thumbs, setThumbs] = useState<Record<SlideId, string | undefined>>({});
   const [expanded, setExpanded] = useState<ReadonlySet<CheckName>>(new Set());
   const [runError, setRunError] = useState<string | null>(null);
+  /** The run request itself, before the server's checks.status says which checks started. */
+  const [starting, setStarting] = useState(false);
+  const [showSettled, setShowSettled] = useState<ReadonlySet<CheckName>>(new Set());
+  /** Per check, when this screen saw its current run start: the fallback reference when the check had never run before. */
+  const runStart = useRef<Partial<Record<CheckName, string>>>({});
   const [liveError, setLiveError] = useState<string | null>(null);
   // Rows with warnings open by default, decided once on the first remarks load so a user's collapse sticks.
   const autoExpanded = useRef(false);
@@ -294,7 +323,7 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
     setLiveError(null);
     if (!autoExpanded.current) {
       autoExpanded.current = true;
-      setExpanded(new Set(CHECK_ROWS.filter((c) => hasWarn(rs, c.name)).map((c) => c.name)));
+      setExpanded(new Set(CHECK_ROWS.filter((c) => hasWarn(rs, ls, c.name)).map((c) => c.name)));
     }
   }, [api]);
 
@@ -328,25 +357,41 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
   useEffect(() => {
     if (!status) return;
     const changed: Partial<Record<CheckName, string | null>> = {};
+    const now = new Date().toISOString();
     for (const { name } of CHECK_ROWS) {
+      if (status.running.includes(name)) runStart.current[name] ??= now;
       const at = status.lastRun[name];
-      if (name in lastSeen.current && lastSeen.current[name] !== at) changed[name] = lastSeen.current[name] ?? null;
+      // The reference is the previous lastRun; a check that never ran falls back to when this screen saw the run start.
+      if (name in lastSeen.current && lastSeen.current[name] !== at) changed[name] = lastSeen.current[name] ?? runStart.current[name] ?? null;
+      if (!status.running.includes(name)) delete runStart.current[name];
       lastSeen.current[name] = at;
     }
     if (Object.keys(changed).length > 0) setSince((prev) => ({ ...prev, ...changed }));
   }, [status]);
 
+  // Never on the first look, and never without a reference: "new" means "since the run before this one".
   const isNew = (r: Remark, name: CheckName): boolean => {
-    if (!(name in since)) return false;
     const before = since[name];
-    return before === null || before === undefined || Date.parse(r.createdAt) > Date.parse(before);
+    return typeof before === 'string' && Date.parse(r.createdAt) > Date.parse(before);
   };
 
   const run = (): void => {
     setRunError(null);
+    setStarting(true);
     // Progress arrives as checks.status events; merging `started` here could re-mark a check that already finished.
-    api.runChecks().catch((err: unknown) => setRunError(message(err)));
+    api
+      .runChecks()
+      .catch((err: unknown) => setRunError(message(err)))
+      .finally(() => setStarting(false));
   };
+
+  const toggleSettled = (name: CheckName): void =>
+    setShowSettled((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
 
   const toggle = (name: CheckName): void =>
     setExpanded((prev) => {
@@ -369,12 +414,13 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
 
   const { deck } = load;
   const running = new Set(status?.running ?? []);
+  const inFlight = starting || running.size > 0;
   const show = (anchor: Anchor): void => navigate(mainPath(anchor));
   // Slides pointed at by an open remark of an expanded check, or by any open check remark when none is expanded.
   const lit = new Set<SlideId>();
   const litFrom = expanded.size > 0 ? CHECK_ROWS.filter((c) => expanded.has(c.name)) : CHECK_ROWS;
   for (const c of litFrom) {
-    for (const r of openOf(remarks, c.name)) {
+    for (const r of liveOf(remarks, lanes, c.name)) {
       if (r.anchor.kind === 'arc') continue;
       const cols = anchorColumns(r.anchor, deck.order);
       if (cols) for (const id of deck.order.slice(cols.start, cols.start + cols.span)) lit.add(id);
@@ -394,8 +440,9 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
         <span className="meta">v{deck.state.version}</span>
         {runError ? <span style={{ color: 'var(--warn)', fontSize: 13 }}>{runError}</span> : null}
         <BackToMain navigate={navigate} />
-        <button type="button" className="btn-primary" onClick={run} disabled={running.size === CHECK_ROWS.length} style={{ marginLeft: 8, alignSelf: 'center' }}>
-          {running.size > 0 ? 'Checks running…' : 'Run checks'}
+        {/* One check still running is a run in flight: a second run would restart all four on top of it. */}
+        <button type="button" className="btn-primary" onClick={run} disabled={inFlight} style={{ marginLeft: 8, alignSelf: 'center' }}>
+          {inFlight ? 'Checks running…' : 'Run checks'}
         </button>
       </ScreenHeader>
       <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(300px, 1fr) minmax(380px, 1.2fr) minmax(300px, 1fr)', gap: 0, padding: '8px 24px 20px' }}>
@@ -407,8 +454,10 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
           {liveError ? <p style={{ color: 'var(--warn)', fontSize: 12 }}>Remarks: {liveError}</p> : null}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {CHECK_ROWS.map(({ name, label }) => {
-              const open = openOf(remarks, name);
-              const warn = hasWarn(remarks, name);
+              const open = liveOf(remarks, lanes, name);
+              const settled = settledOf(remarks, lanes, name);
+              const settledShown = showSettled.has(name);
+              const warn = hasWarn(remarks, lanes, name);
               const dot = dotState({ running: running.has(name), warn, ran: Boolean(status?.lastRun[name]) });
               const isOpen = expanded.has(name);
               return (
@@ -437,8 +486,8 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
                         <p className="muted" style={{ margin: 0, fontSize: 13 }}>
                           {status?.lastRun[name] ? 'Nothing to flag.' : 'Not run yet. Use "Run checks" to get remarks here.'}
                         </p>
-                      ) : (
-                        open.map((r) => (
+                      ) : null}
+                      {[...open, ...(settledShown ? settled : [])].map((r) => (
                           <RemarkCard
                             key={r.id}
                             remark={r}
@@ -449,10 +498,14 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
                             onOpenLane={navigate}
                             draftLaneId={draftLaneOf(lanes, r.laneId)}
                             onOpenDraft={(id) => api.openLane(id)}
-                            isNew={isNew(r, name)}
+                            isNew={r.status === 'open' && !laneClosed(r, lanes) && isNew(r, name)}
                           />
-                        ))
-                      )}
+                        ))}
+                      {settled.length > 0 ? (
+                        <button type="button" className="link" aria-expanded={settledShown} onClick={() => toggleSettled(name)} style={{ fontSize: 12, alignSelf: 'flex-start' }}>
+                          {`${settledShown ? 'hide' : 'show'} resolved (${settled.length})`}
+                        </button>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -466,12 +519,19 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
           {deck.order.length === 0 ? (
             <p className="muted">No slides yet. Import a deck.html into the folder, then run checks.</p>
           ) : (
-            <div style={{ '--thumb-w': '96px', '--thumb-h': '54px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, var(--thumb-w))', gap: 10, justifyContent: 'start' } as CSSProperties}>
-              {deck.order.map((id, i) => (
-                <div key={id} data-testid="brief-thumb" data-slide={id} data-lit={lit.has(id)} style={{ opacity: lit.has(id) ? 1 : 0.45, transition: 'opacity .15s ease' }}>
-                  <Thumb slideId={id} n={i + 1} title={deck.slides[id]?.title ?? id} url={thumbs[id]} selected={lit.has(id)} onClick={() => show({ kind: 'slide', slide: id })} />
-                </div>
-              ))}
+            // Rows size to their cells: the caption is part of the cell, so it can never reach the next row.
+            <div style={{ '--thumb-w': '96px', '--thumb-h': '54px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, var(--thumb-w))', gridAutoRows: 'auto', alignItems: 'start', gap: 10, justifyContent: 'start' } as CSSProperties}>
+              {deck.order.map((id, i) => {
+                const title = deck.slides[id]?.title ?? id;
+                return (
+                  <div key={id} data-testid="brief-thumb" data-slide={id} data-lit={lit.has(id)} style={{ minWidth: 0, opacity: lit.has(id) ? 1 : 0.45, transition: 'opacity .15s ease' }}>
+                    <Thumb slideId={id} n={i + 1} title={title} url={thumbs[id]} selected={lit.has(id)} hoverTitle={false} onClick={() => show({ kind: 'slide', slide: id })} />
+                    <div data-testid="brief-thumb-caption" title={title} style={{ width: 'var(--thumb-w)', fontSize: 'var(--fs-meta)', lineHeight: '16px', color: 'var(--ink)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {title}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </section>

@@ -53,6 +53,9 @@ const node = (marked: boolean, current: boolean): CSSProperties => ({
   transition: 'border-color .15s ease, background .15s ease',
 });
 
+/** What the rail says of a version without slides (v0, before the import). */
+export const EMPTY_VERSION = 'empty (before import)';
+
 /** The rail keeps a label's first clause ('added "X"' of 'added "X" · Hook: …'); the tooltip has the whole of it. */
 export const railCause = (cause: string): string => cause.split(' · ')[0]!.trim();
 
@@ -104,7 +107,8 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
         <ol ref={rail} style={{ position: 'relative', listStyle: 'none', margin: 0, padding: '0 6px', display: 'flex', overflowX: 'auto', scrollPaddingInline: 6, minWidth: 0, flex: 1 }}>
           {sorted.map((v, i) => {
             const isCurrent = v.n === current;
-            const cause = (v as Version & { label?: string }).label ?? describeCause(v.cause);
+            // v0 is the empty deck an import starts from: "imported" read as if it held the slides.
+            const cause = v.order.length === 0 ? EMPTY_VERSION : ((v as Version & { label?: string }).label ?? describeCause(v.cause));
             const picked: keyof VersionPair | undefined = selection?.a === v.n ? 'a' : selection?.b === v.n ? 'b' : undefined;
             const marked = picked !== undefined || (!selectable && isCurrent);
             const hash = versionHash(v);
@@ -118,6 +122,7 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
                 <span style={{ display: 'flex', gap: 6, alignItems: 'baseline', marginTop: 6, fontSize: 13, whiteSpace: 'nowrap' }}>
                   <span style={{ fontWeight: 700, color: marked ? 'var(--accent)' : 'var(--ink)' }}>v{v.n}</span>
                   {isCurrent ? <span className="meta">now</span> : null}
+                  {picked ? <span data-testid="version-pick" style={{ fontSize: 12, fontWeight: 500, color: 'var(--accent)' }}>{picked === 'a' ? 'from' : 'to'}</span> : null}
                 </span>
                 <span className="meta" data-testid="version-cause" style={causeStyle}>{railCause(cause)}</span>
                 <span className="mono meta" style={{ display: 'block' }}>{hash}</span>
