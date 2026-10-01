@@ -1,7 +1,12 @@
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { newId } from '../../model/ids.js';
+import { z } from 'zod';
+import { hashSlide, newId } from '../../model/ids.js';
 import { slidesInRange } from '../../model/ops.js';
 import type { Anchor, Brief, Lane, Origin, Remark, SlideId, Snapshot } from '../../model/types.js';
+import { loadThemeCss } from '../../render/defaultTheme.js';
 import type { ThumbService } from '../../render/thumbs.js';
 import type { Bus } from '../../server/bus.js';
 import { LaneService, resolveLaneRemarks } from '../../server/laneService.js';
@@ -9,11 +14,11 @@ import type { DeckStore } from '../../store/deckStore.js';
 import { createLane } from '../tools.js';
 import { arc } from './arc.js';
 import { gaps } from './gaps.js';
-import { CHECK_NAMES, CheckResultSchema, isCheckName, type CheckDef, type CheckName, type CheckResult, type ChecksStatus } from './index.js';
+import { CHECK_NAMES, CheckResultSchema, isCheckName, nameSlides, type CheckDef, type CheckName, type CheckResult, type ChecksStatus } from './index.js';
 import { order } from './order.js';
 import { render } from './render.js';
 
-export { CheckResultSchema, type CheckDef, type CheckName, type ChecksStatus } from './index.js';
+export { CheckResultSchema, nameSlides, type CheckDef, type CheckName, type ChecksStatus } from './index.js';
 
 export const CHECKS: Readonly<Record<CheckName, CheckDef>> = { arc, order, gaps, render };
 
@@ -24,16 +29,19 @@ const THUMB_CHECK_MAX_TURNS = 6;
 /** Lanes one check keeps attached to its remarks after a run; the other remarks get no lane. */
 export const MAX_LANES_PER_RUN = 3;
 
-/** A slide id as newId('s') makes it, not glued to a longer token. */
-const SLIDE_ID = /(?<![A-Za-z0-9_-])s_[A-Za-z0-9_-]{10}(?![A-Za-z0-9_-])/g;
+/**
+ * What the runner remembers across restarts, in the deck's cache dir: when each check last ended, and for the
+ * render check the slide hashes its last good run looked at, under a key of what else shapes a render judgement
+ * (theme.css and the design rules). A changed key means every slide is looked at again.
+ */
+const MemoSchema = z.object({
+  lastRun: z.record(z.string(), z.string().nullable()).default({}),
+  render: z.object({ key: z.string(), slides: z.record(z.string(), z.string()) }).nullable().default(null),
+});
+type Memo = z.infer<typeof MemoSchema>;
+const MEMO_FILE = 'checks.json';
 
-/** Replaces slide ids in prose by "slide N" (1-based position in `order`): the creator never sees ids. */
-export function nameSlides(text: string, order: readonly SlideId[]): string {
-  return text.replace(SLIDE_ID, (id) => {
-    const i = order.indexOf(id);
-    return i >= 0 ? `slide ${i + 1}` : 'an unknown slide';
-  });
-}
+const renderKey = (themeCss: string, brief: Brief): string => createHash('sha256').update(themeCss).update('\u0000').update(brief.design.rules).digest('hex');
 
 const anchorKey = (a: Anchor): string => (a.kind === 'slide' ? `slide:${a.slide}` : a.kind === 'range' ? `range:${a.from}:${a.to}` : 'arc');
 /** Case, punctuation, spacing and slide numbers (which shift when slides move) do not make a remark new. */
@@ -80,6 +88,8 @@ interface Target {
   laneId: string | null;
   /** Null: the run covers the whole deck and replaces all of its check's remarks. */
   scopeIds: ReadonlySet<SlideId> | null;
+  /** Called once the run's remarks are persisted from a usable answer (not on a failure). */
+  afterSuccess?: () => Promise<void>;
 }
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -131,11 +141,13 @@ export class CheckRunner {
   private readonly opts: CheckRunnerOptions;
   private readonly queryImpl: typeof query;
   private tail: Promise<unknown> = Promise.resolve();
-  /** Queued or running runs per check name (deck-wide, scoped and lane runs alike). */
-  private readonly active = new Map<CheckName, number>();
+  /** Runs per check name whose query work has started: what status() reports as running (queued ones are not). */
+  private readonly started = new Map<CheckName, number>();
   /** The queued or running deck-wide run of each check, which a new unscoped run of that name joins. */
   private readonly pending = new Map<CheckName, Promise<CheckRunResult>>();
   private readonly lastRun: Record<CheckName, string | null> = { arc: null, order: null, gaps: null, render: null };
+  /** Memo reads and writes, in call order. */
+  private memoChain: Promise<unknown>;
   /** The after-accept batch queued or running; an accept meanwhile only marks it dirty. */
   private batch: Promise<void> | null = null;
   private dirty = false;
@@ -146,6 +158,10 @@ export class CheckRunner {
   constructor(opts: CheckRunnerOptions) {
     this.opts = opts;
     this.queryImpl = opts.queryImpl ?? query;
+    // lastRun from before a restart; a run that ends meanwhile keeps its newer stamp.
+    this.memoChain = this.readMemo().then((m) => {
+      for (const name of CHECK_NAMES) this.lastRun[name] ??= m.lastRun[name] ?? null;
+    });
   }
 
   /**
@@ -182,8 +198,9 @@ export class CheckRunner {
     this.start([name]);
   }
 
+  /** `running` lists the checks whose run has started; a run queued behind another is not reported. */
   status(): ChecksStatus {
-    return { running: CHECK_NAMES.filter((n) => this.active.has(n)), lastRun: { ...this.lastRun } };
+    return { running: CHECK_NAMES.filter((n) => this.started.has(n)), lastRun: { ...this.lastRun } };
   }
 
   scheduleAfterAccept(): void {
@@ -234,22 +251,73 @@ export class CheckRunner {
     return p;
   }
 
-  /** Enqueues `fn`, counting `name` as running from now until it settles. */
+  /** Enqueues `fn`, counting `name` as running once `fn` starts, until it settles. */
   private tracked<T>(name: CheckName, fn: () => Promise<T>): Promise<T> {
-    this.setActive(name, 1);
-    const p = this.enqueue(fn);
-    const done = () => this.setActive(name, -1);
+    let began = false;
+    const p = this.enqueue(() => {
+      began = true;
+      this.setStarted(name, 1);
+      return fn();
+    });
+    const done = () => {
+      if (began) this.setStarted(name, -1);
+    };
     p.then(done, done);
     return p;
   }
 
-  private setActive(name: CheckName, delta: 1 | -1): void {
+  private setStarted(name: CheckName, delta: 1 | -1): void {
     const before = this.status().running;
-    const n = (this.active.get(name) ?? 0) + delta;
-    if (n > 0) this.active.set(name, n);
-    else this.active.delete(name);
+    bump(this.started, name, delta);
     const running = this.status().running;
     if (running.join() !== before.join()) this.opts.bus.emit({ type: 'checks.status', running });
+  }
+
+  private memoPath(): string {
+    return join(this.opts.store.dir, 'cache', MEMO_FILE);
+  }
+
+  private async readMemo(): Promise<Memo> {
+    try {
+      const parsed = MemoSchema.safeParse(JSON.parse(await readFile(this.memoPath(), 'utf8')));
+      if (parsed.success) return parsed.data;
+    } catch {
+      // Missing or unreadable: the checks have not run on this deck, as far as the runner can tell.
+    }
+    return MemoSchema.parse({});
+  }
+
+  /** Read-modify-write of the memo, chained so two updates never interleave. */
+  private updateMemo(fn: (m: Memo) => Memo): Promise<void> {
+    const w = this.memoChain.then(async () => {
+      const next = fn(await this.readMemo());
+      const path = this.memoPath();
+      await mkdir(join(this.opts.store.dir, 'cache'), { recursive: true });
+      const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+      await writeFile(tmp, JSON.stringify(next, null, 2));
+      await rename(tmp, path);
+    });
+    this.memoChain = w.catch((e) => this.report('could not save the checks memo', e));
+    return this.memoChain.then(() => undefined);
+  }
+
+  /**
+   * Housekeeping before a run: remarks found on the preview of a lane that is now closed are resolved, and a remark
+   * anchored on a slide that left main (and not on a lane preview) is dropped: it would read "slide ?".
+   */
+  private async tidyRemarks(): Promise<void> {
+    const { store, bus } = this.opts;
+    const changed = await store.withLock(async () => {
+      const [remarks, main, lanes] = await Promise.all([store.remarks(), store.snapshot(), store.lanes()]);
+      const closed = lanes.filter((l) => l.status === 'closed').map((l) => l.id);
+      const resolved = resolveLaneRemarks(remarks, closed) ?? remarks;
+      const onMain = new Set(main.order);
+      const next = resolved.filter((r) => r.sourceLaneId || anchorIds(r.anchor).every((id) => onMain.has(id)));
+      if (resolved === remarks && next.length === remarks.length) return false;
+      await store.putRemarks(next);
+      return true;
+    });
+    if (changed) bus.emit({ type: 'remarks.changed' });
   }
 
   private report(what: string, e: unknown): void {
@@ -259,8 +327,32 @@ export class CheckRunner {
 
   private async runDeck(name: CheckName, scope?: Anchor): Promise<CheckRunResult> {
     const { store } = this.opts;
+    await this.tidyRemarks();
     const [brief, main] = await Promise.all([store.brief(), store.snapshot()]);
-    const ids = scope ? slidesInRange(main.order, scope) : main.order;
+    let ids = scope ? slidesInRange(main.order, scope) : main.order;
+    let scopeIds: ReadonlySet<SlideId> | null = scope && scope.kind !== 'arc' ? new Set(ids) : null;
+    let afterSuccess: (() => Promise<void>) | undefined;
+    if (name === 'render') {
+      // Rendering and reading every slide is the costly part: only slides changed since the last good run are looked at.
+      const key = renderKey(await loadThemeCss(store.dir), brief);
+      const memo = await this.readMemo();
+      const seen = memo.render?.key === key ? memo.render.slides : null;
+      if (seen) {
+        ids = ids.filter((id) => seen[id] !== hashSlide(main.slides[id]!));
+        scopeIds = new Set(ids);
+        if (ids.length === 0) {
+          await this.stamp(name);
+          return { remarks: [], lanes: [] };
+        }
+      }
+      const checked = Object.fromEntries(ids.map((id) => [id, hashSlide(main.slides[id]!)]));
+      afterSuccess = () =>
+        this.updateMemo((m) => {
+          const kept = m.render?.key === key ? m.render.slides : {};
+          const slides = Object.fromEntries(Object.entries({ ...kept, ...checked }).filter(([id]) => main.slides[id] !== undefined));
+          return { ...m, render: { key, slides } };
+        });
+    }
     return this.execute({
       def: CHECKS[name],
       brief,
@@ -269,13 +361,22 @@ export class CheckRunner {
       order: main.order,
       allowLanes: true,
       laneId: null,
-      scopeIds: scope && scope.kind !== 'arc' ? new Set(ids) : null,
+      scopeIds,
+      ...(afterSuccess ? { afterSuccess } : {}),
     });
+  }
+
+  /** Records that `name` just ended a run, in memory and in the memo. Never rejects. */
+  private stamp(name: CheckName): Promise<void> {
+    const at = new Date().toISOString();
+    this.lastRun[name] = at;
+    return this.updateMemo((m) => ({ ...m, lastRun: { ...m.lastRun, [name]: at } }));
   }
 
   /** Render check on the slides a lane changes, as they look with the lane's pending changes applied. */
   private async runLane(laneId: string): Promise<CheckRunResult> {
     const { store, bus } = this.opts;
+    await this.tidyRemarks();
     const lane = await store.lane(laneId);
     // Lanes proposed by the render check itself are not re-checked: their remarks would share an owner.
     if (!lane || lane.status !== 'open' || lane.origin === 'check:render') return { remarks: [], lanes: [] };
@@ -298,9 +399,12 @@ export class CheckRunner {
     try {
       const outcome = await this.evaluate(t);
       if (this.disposed) throw new Error(STOPPED);
-      return outcome.ok ? await this.persist(t, outcome.items) : await this.persistFailure(t, `${failurePrefix(name)}${outcome.reason}`);
+      if (!outcome.ok) return await this.persistFailure(t, `${failurePrefix(name)}${outcome.reason}`);
+      const out = await this.persist(t, outcome.items);
+      await t.afterSuccess?.();
+      return out;
     } finally {
-      this.lastRun[name] = new Date().toISOString();
+      await this.stamp(name);
     }
   }
 
@@ -428,10 +532,11 @@ export class CheckRunner {
     const keyOf = (r: { anchor: Anchor; text: string }): string => remarkKey(origin, source, r.anchor, r.text);
     const sameOwner = (r: Remark): boolean => r.origin === origin && (r.sourceLaneId ?? null) === source;
 
-    // Slide ids never reach the creator; a problem reported twice in one answer is kept once.
+    // Remark text keeps its slide ids: they are named at read time in the order of that moment, so numbers never
+    // go stale. A lane label is stored as is, so it is named now. A problem reported twice in one answer is kept once.
     const seen = new Set<string>();
     const fresh = items
-      .map((it) => ({ ...it, text: nameSlides(it.text, t.order), lane: it.lane ? { ...it.lane, label: nameSlides(it.lane.label, t.order) } : null }))
+      .map((it) => ({ ...it, lane: it.lane ? { ...it.lane, label: nameSlides(it.lane.label, { order: t.order, slides: t.snap.slides }, { titles: false }) } : null }))
       .filter((it) => {
         const k = keyOf(it);
         if (seen.has(k)) return false;
@@ -536,7 +641,7 @@ export class CheckRunner {
     const remark: Remark = {
       id: newId('r'),
       anchor: { kind: 'arc' },
-      text: nameSlides(text, t.order),
+      text,
       origin,
       severity: 'info',
       status: 'open',
@@ -552,4 +657,10 @@ export class CheckRunner {
     bus.emit({ type: 'remarks.changed' });
     return { remarks: [remark], lanes: [] };
   }
+}
+
+function bump(counts: Map<CheckName, number>, name: CheckName, delta: 1 | -1): void {
+  const n = (counts.get(name) ?? 0) + delta;
+  if (n > 0) counts.set(name, n);
+  else counts.delete(name);
 }

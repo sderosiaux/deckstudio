@@ -110,6 +110,56 @@ describe('remarks and checks API', () => {
     expect((await app.inject({ method: 'POST', url: '/api/remarks/r_missing/resolve' })).statusCode).toBe(404);
   });
 
+  const stored = (over: Partial<Remark>): Remark => ({
+    id: 'r_x',
+    anchor: { kind: 'arc' },
+    text: 'x',
+    origin: 'check:order',
+    severity: 'warn',
+    status: 'open',
+    laneId: null,
+    createdAt: '2026-09-30T00:00:00.000Z',
+    ...over,
+  });
+
+  it('GET names slide ids in remark text as "slide N (title)" in the current order, and leaves the store untouched', async () => {
+    await build();
+    const raw = stored({ id: 'r_1', anchor: { kind: 'slide', slide: 's3' }, text: 'Defined only on s3, after s_AAAAAAAAAA.' });
+    await store.putRemarks([raw]);
+    expect((await list())[0]!.text).toBe('Defined only on slide 3 (Title s3), after a removed slide.');
+    // A slide inserted before it: the number follows.
+    const main = await store.snapshot();
+    await store.commit({ order: ['s0', ...main.order], slides: { ...main.slides, s0: slide('s0') } }, { kind: 'import' });
+    expect((await list())[0]!.text).toBe('Defined only on slide 4 (Title s3), after a removed slide.');
+    expect(await store.remarks()).toEqual([raw]);
+  });
+
+  it('GET drops a remark whose slide left main, unless it describes a lane preview, which is named on that preview', async () => {
+    await build();
+    const n1 = slide('n1');
+    await store.putLane({
+      id: 'l_p',
+      label: 'Bridge',
+      anchor: { kind: 'arc' },
+      origin: 'user',
+      baseVersion: 1,
+      changes: [{ id: 'c_i', kind: 'insert', after: 's1', slide: n1, reason: 'r', status: 'pending' }],
+      status: 'open',
+      createdAt: '2026-09-30T00:00:00.000Z',
+    });
+    await store.putRemarks([
+      stored({ id: 'r_gone', anchor: { kind: 'slide', slide: 's9' }, text: 'on a slide that left' }),
+      stored({ id: 'r_range', anchor: { kind: 'range', from: 's2', to: 's9' }, text: 'half gone' }),
+      stored({ id: 'r_lane', anchor: { kind: 'slide', slide: 'n1' }, text: 'n1 is dense', origin: 'check:render', sourceLaneId: 'l_p' }),
+      stored({ id: 'r_ok', anchor: { kind: 'slide', slide: 's2' }, text: 'fine' }),
+    ]);
+    const out = await list();
+    expect(out.map((r) => [r.id, r.text])).toEqual([
+      ['r_lane', 'slide 2 (Title n1) is dense'],
+      ['r_ok', 'fine'],
+    ]);
+  });
+
   it('propose sends the remark to the agent on thread remark:<id> with the anchor as context', async () => {
     await build();
     const r = (await create({ anchor: { kind: 'range', from: 's2', to: 's3' }, text: 'Concept used before defined.', severity: 'warn' })).json() as Remark;
@@ -214,7 +264,9 @@ describe('remarks and checks API', () => {
     const res = await app.inject({ method: 'POST', url: '/api/checks/run', payload: { names: ['order', 'gaps'] } });
     expect(res.statusCode).toBe(202);
     expect(res.json()).toEqual({ started: ['order', 'gaps'] });
-    expect((await status()).running).toEqual(['order', 'gaps']);
+    // gaps waits behind order: only order is reported running.
+    await waitFor(() => queried.length === 1);
+    expect((await status()).running).toEqual(['order']);
     expect((await app.inject({ method: 'POST', url: '/api/checks/run', payload: { names: ['order'] } })).json()).toEqual({ started: [] });
     const done = await waitFor(async () => {
       release();
@@ -233,7 +285,8 @@ describe('remarks and checks API', () => {
     await build(runner);
     app.bus.emit({ type: 'deck.changed', version: 2 });
     await waitFor(() => queried.length === 1);
-    expect((await status()).running).toEqual(['arc', 'order', 'gaps', 'render']);
+    // The four are queued; only the one whose query is in flight is reported running.
+    expect((await status()).running).toEqual(['arc']);
     const post = await app.inject({ method: 'POST', url: '/api/checks/run', payload: {} });
     expect(post.json()).toEqual({ started: [] });
     await waitFor(async () => {

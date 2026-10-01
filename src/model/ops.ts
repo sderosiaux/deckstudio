@@ -61,21 +61,34 @@ function referencedSlides(change: Change): SlideId[] {
   }
 }
 
+/** True when `change` is a move that would leave `snap` as it is: its slide already sits right after `after`. */
+function isNoOpMove(snap: Snapshot, change: Change): boolean {
+  if (change.kind !== 'move') return false;
+  const i = snap.order.indexOf(change.slide);
+  if (i < 0) return false;
+  return change.after === null ? i === 0 : i > 0 && snap.order[i - 1] === change.after;
+}
+
 /**
- * Marks pending changes whose referenced slides no longer exist in `snap` as 'orphan'.
- * A slide inserted by an earlier live (pending/accepted) change of the same lane counts as existing,
- * so "insert n1, then insert after n1" survives. Non-pending changes are left untouched.
+ * Marks as 'orphan' the pending changes that no longer mean anything on `snap`: those whose referenced slides no
+ * longer exist, and moves whose slide already sits at its target. A slide inserted by an earlier live
+ * (pending/accepted) change of the same lane counts as existing, so "insert n1, then insert after n1" survives,
+ * and a move is judged on main as the lane's earlier pending changes leave it. Non-pending changes are left untouched.
  */
 export function rebaseLane(lane: Lane, snap: Snapshot): Lane {
   const known = new Set<SlideId>(snap.order.filter((id) => Object.hasOwn(snap.slides, id)));
+  // Main with the lane's surviving pending changes applied so far: where a move would start from.
+  let sim = snap;
   const changes = lane.changes.map((c): Change => {
     if (c.status !== 'pending') {
       if (c.kind === 'insert' && c.status === 'accepted') known.add(c.slide.id);
       return c;
     }
-    const orphan = referencedSlides(c).some((id) => !known.has(id));
+    const orphan = referencedSlides(c).some((id) => !known.has(id)) || isNoOpMove(sim, c);
     if (orphan) return { ...c, status: 'orphan' };
     if (c.kind === 'insert') known.add(c.slide.id);
+    const r = applyChange(sim, c);
+    if (r.ok) sim = r.next;
     return c;
   });
   return { ...lane, changes };

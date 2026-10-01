@@ -20,12 +20,13 @@ A request comes anchored on a slide, a range of slides, or the arc (the whole de
 
 # Lanes
 A lane is a coherent proposal on a range: a short label and a list of changes (insert, modify, remove, move), each with a one-line reason. The creator accepts or refuses change by change.
-- When asked to modify an existing lane, call revise_lane on it.
+- When asked to modify an existing lane, call revise_lane on it with only the changes to revise (by id) or add: the other changes stay as they are.
 - When asked for an alternative, call propose_lane with a new label; the first lane stays.
 - If a tool rejects your input, read the listed indexes and reasons, fix them, and call it again.
 
 # Replies
-Reply in the language the creator writes in (English message, English reply); this rule wins over any other language instruction you were given. Plain sentences, no markdown headings, no bullet lists, no bold. Never mention pixel sizes, coordinates or layout rules in a reply: describe the narrative intent of the change in one or two sentences. Keep replies short: the lane is the deliverable, not the chat.
+Reply in the language the creator writes in: the language of the creator's last message, even if the deck or earlier messages are in another language (an English message gets an English reply); this rule wins over any other language instruction you were given.
+Never write a lane id, a change id, a slide id or a tool name in a reply: the creator sees none of them. Name a lane by its label ("lane: Shorter hook title"), a change by what it does, and a slide as "slide N (title)" with its current position in the deck. Plain sentences, no markdown headings, no bullet lists, no bold. Never mention pixel sizes, coordinates or layout rules in a reply: describe the narrative intent of the change in one or two sentences. Keep replies short: the lane is the deliverable, not the chat.
 `.trim();
 
 function anchorLabel(a: Anchor): string {
@@ -139,8 +140,9 @@ export function contextHeader(input: {
       for (const c of lane.changes) out.push(`- ${c.id} · ${c.kind} · ${changeTarget(c, snapshot)} · ${c.reason} · ${c.status}`);
       out.push(
         '',
-        `Instruction: if the creator asks to modify this lane, call revise_lane on it (laneId "${lane.id}"). ` +
-          'If they ask for an alternative, call propose_lane with a new label and mention both lanes in your reply. ' +
+        `Instruction: if the creator asks to modify this lane, call revise_lane on it (laneId "${lane.id}") with only the changes to revise (by id) or add; ` +
+          'the others stay as they are unless the creator asks to start over (replace: true). ' +
+          'If they ask for an alternative, call propose_lane with a new label and mention both lanes in your reply, by their labels. ' +
           'Never edit main directly.',
       );
     } else {
@@ -159,7 +161,7 @@ export function contextHeader(input: {
       out.push(
         '',
         `Instruction: if asked to propose, call propose_lane with anchor ${JSON.stringify(remark.anchor)}, then call ` +
-          `link_remark_lane(${JSON.stringify({ remarkId: remark.id }).slice(0, -1)},"laneId":<the new lane id>}) and mention the lane id in your reply.`,
+          `link_remark_lane(${JSON.stringify({ remarkId: remark.id }).slice(0, -1)},"laneId":<the new lane id>}); in your reply, name the lane by its label.`,
       );
     } else {
       out.push('', `Remark ${thread.slice('remark:'.length)} no longer exists. Instruction: proposals go through propose_lane.`);
