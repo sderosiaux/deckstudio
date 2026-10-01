@@ -1,35 +1,23 @@
-import { join } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
-import Fastify, { type FastifyInstance } from 'fastify';
-import { CHECK_NAMES, isCheckName } from '../agent/checks/index.js';
-import { CheckRunner } from '../agent/checks/runner.js';
-import { makeImageGen } from '../agent/imageGen.js';
-import { AgentSession } from '../agent/session.js';
-import { makeDeckTools } from '../agent/tools.js';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import type { AgentSession } from '../agent/session.js';
 import { FONTS_DIR } from '../render/theme.js';
-import type { ThumbService } from '../render/thumbs.js';
+import type { BrowserPool, ThumbService } from '../render/thumbs.js';
 import { DeckStore } from '../store/deckStore.js';
-import { Bus } from './bus.js';
-import { HistoryService } from './historyService.js';
-import { LaneService } from './laneService.js';
-import { briefRoutes } from './routes/brief.js';
-import { checkRoutes, type ChecksRunner } from './routes/checks.js';
-import { deckRoutes } from './routes/deck.js';
-import { historyRoutes } from './routes/history.js';
-import { laneRoutes } from './routes/lanes.js';
-import { presentRoutes } from './routes/present.js';
-import { remarkRoutes } from './routes/remarks.js';
-import { slideRoutes } from './routes/slides.js';
-import { threadRoutes } from './routes/threads.js';
-import { thumbRoutes } from './routes/thumbs.js';
-import { versionRoutes } from './routes/versions.js';
-import { attachBus } from './ws.js';
+import type { Bus } from './bus.js';
+import { deckPlugin } from './deckPlugin.js';
+import { createDeckServices, type DeckServicesOptions } from './deckServices.js';
+import { CreateDeckSchema, DeckRegistry, ImportDeckSchema, RegistryError } from './registry.js';
+import type { ChecksRunner } from './routes/checks.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
+    /** Single-deck apps (buildApp) only. */
     bus: Bus;
     store: DeckStore;
+    /** Studio apps (buildStudio) only. */
+    registry: DeckRegistry;
   }
 }
 
@@ -70,63 +58,103 @@ export function isLocalRequest(host: string | undefined, origin: string | undefi
   }
 }
 
-function defaultAgent(store: DeckStore, thumbs: ThumbService, bus: Bus, model: string, checks: ChecksRunner | null): AgentSession {
-  const tools = makeDeckTools({
-    store,
-    thumbs,
-    bus,
-    imageGen: makeImageGen(join(store.dir, 'assets')),
-    runCheck: async (name) => {
-      if (!checks) throw new Error('checks are not available in this build');
-      if (!isCheckName(name)) throw new Error(`unknown check "${name}"; available: ${CHECK_NAMES.join(', ')}`);
-      checks.start([name]);
-    },
-  });
-  return new AgentSession({ store, tools, bus, model, deckDir: store.dir });
-}
-
-export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> {
-  const store = await DeckStore.open(opts.deckDir);
-  const bus = new Bus();
+/** Root wiring shared by both apps: the local-request guard, websockets, fonts and reply.sendFile. */
+async function baseApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: { level: 'warn' } });
-  app.decorate('bus', bus);
-  app.decorate('store', store);
-  // First hook on the root instance: it runs for every route, the /ws upgrade and the 404 handler.
+  // First hook on the root instance: it runs for every route, the /ws upgrades and the 404 handler.
   app.addHook('onRequest', async (req, reply) => {
     if (!isLocalRequest(req.headers.host, req.headers.origin)) return reply.code(403).send({ error: 'forbidden: not a local request' });
   });
-
   await app.register(websocket);
-  attachBus(app, bus, async () => (await store.state()).version);
-  await app.register(fastifyStatic, { root: join(store.dir, 'assets'), prefix: '/assets/' });
-  // Same font files the thumbnail renderer serves, so /api/present matches the thumbs offline.
-  await app.register(fastifyStatic, { root: FONTS_DIR, prefix: '/fonts/', decorateReply: false });
+  // Same font files the thumbnail renderer serves, so present mode matches the thumbs offline. This registration
+  // also decorates reply.sendFile, which deck assets and the SPA fallback use.
+  await app.register(fastifyStatic, { root: FONTS_DIR, prefix: '/fonts/' });
+  return app;
+}
 
-  deckRoutes(app, store);
-  slideRoutes(app, store, bus);
-  versionRoutes(app, store);
-  briefRoutes(app, store);
-  thumbRoutes(app, store, opts.thumbs, bus);
-  presentRoutes(app, store);
-  laneRoutes(app, store, new LaneService(store, bus), opts.thumbs, bus);
-  historyRoutes(app, new HistoryService(store, bus));
-  const model = (await store.state()).model;
-  const checks = opts.checks === undefined ? new CheckRunner({ store, thumbs: opts.thumbs, bus, model }) : opts.checks;
-  if (checks) app.decorate('checks', checks);
-  if (checks instanceof CheckRunner) {
-    bus.on('deck.changed', () => checks.scheduleAfterAccept());
-    bus.on('lane.created', (e) => {
-      if (e.type === 'lane.created') checks.scheduleAfterLane(e.laneId);
-    });
-    // A draft opened by the creator gets the same render check as a lane the co-author just proposed.
-    bus.on('lane.opened', (e) => {
-      if (e.type === 'lane.opened') checks.scheduleAfterLane(e.laneId);
-    });
-    app.addHook('onClose', async () => checks.dispose());
-  }
-  const agent = opts.agent ?? defaultAgent(store, opts.thumbs, bus, model, checks);
-  threadRoutes(app, store, agent);
-  remarkRoutes(app, store, agent, bus);
-  checkRoutes(app);
+/** One deck served at the root (/api/..., /ws, /assets/...): the tests' app, and the shape of every /d/<id>/ mount. */
+export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> {
+  const store = await DeckStore.open(opts.deckDir);
+  const deck = await createDeckServices({
+    store,
+    thumbs: opts.thumbs,
+    ownsThumbs: false,
+    ...(opts.agent ? { agent: opts.agent } : {}),
+    ...(opts.checks !== undefined ? { checks: opts.checks } : {}),
+  });
+  const app = await baseApp();
+  app.decorate('bus', deck.bus);
+  app.decorate('store', store);
+  app.addHook('onClose', async () => deck.dispose());
+  await app.register(deckPlugin, { resolve: async () => deck, base: () => '' });
+  return app;
+}
+
+export interface BuildStudioOptions {
+  /** Folder holding one sub-folder per deck (created when missing). */
+  home: string;
+  /** Shared browser for thumbnails; the studio launches its own when absent. */
+  pool?: BrowserPool;
+  /** Tests: an agent factory per deck. Default: the real SDK session. */
+  agent?: DeckServicesOptions['agent'];
+  /** Tests: null turns checks off for every deck. */
+  checks?: null;
+}
+
+const sendRegistryError = (err: unknown, reply: FastifyReply) => {
+  if (err instanceof RegistryError) return reply.code(err.status).send({ error: err.message });
+  throw err;
+};
+
+/**
+ * Every deck of a home folder in one server: /api/decks lists and creates decks, each deck lives under
+ * /d/<id>/ (same routes as buildApp). A deck added to the folder while the server runs is served on first request.
+ */
+export async function buildStudio(opts: BuildStudioOptions): Promise<FastifyInstance> {
+  const registry = await DeckRegistry.open(opts.home, {
+    ...(opts.pool ? { pool: opts.pool } : {}),
+    ...(opts.agent ? { agent: opts.agent } : {}),
+    ...(opts.checks === null ? { checks: null } : {}),
+  });
+  const app = await baseApp();
+  app.decorate('registry', registry);
+  app.addHook('onClose', async () => registry.close());
+
+  app.get('/api/decks', async () => registry.list());
+
+  app.get<{ Params: { id: string } }>('/api/decks/:id', async (req, reply) => {
+    try {
+      return await registry.summary(req.params.id);
+    } catch (err) {
+      return sendRegistryError(err, reply);
+    }
+  });
+
+  app.post('/api/decks', async (req, reply) => {
+    const body = CreateDeckSchema.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: `invalid deck: ${body.error.message}` });
+    try {
+      return reply.code(201).send(await registry.create(body.data));
+    } catch (err) {
+      return sendRegistryError(err, reply);
+    }
+  });
+
+  app.post('/api/decks/import', async (req, reply) => {
+    const body = ImportDeckSchema.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: `invalid import: ${body.error.message}` });
+    try {
+      return reply.code(201).send(await registry.importHtml(body.data));
+    } catch (err) {
+      return sendRegistryError(err, reply);
+    }
+  });
+
+  const deckId = (req: FastifyRequest): string => (req.params as { deckId?: string }).deckId ?? '';
+  await app.register(deckPlugin, {
+    prefix: '/d/:deckId',
+    resolve: async (req) => ((await registry.has(deckId(req))) ? registry.services(deckId(req)) : null),
+    base: (req) => `/d/${encodeURIComponent(deckId(req))}`,
+  });
   return app;
 }

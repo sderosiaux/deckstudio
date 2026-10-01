@@ -4,10 +4,9 @@ import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type { Slide } from '../../model/types.js';
 import { assembleSlideHtml, fontsStyle } from '../../render/theme.js';
-import type { DeckStore } from '../../store/deckStore.js';
+import { deckOf } from '../deckRequest.js';
 
-const ASSETS_BASE_URL = '/assets';
-// Served by app.ts from src/render/fonts.
+// Served by app.ts from src/render/fonts, at the root whatever deck is shown.
 const FONTS_BASE_URL = '/fonts';
 const SECTION_OPEN = '<section class="slide active"';
 
@@ -21,8 +20,8 @@ function inlineJson(v: unknown): string {
 }
 
 /** The <section> of one slide, taken from the stage document so present mode and thumbs share one assembly. */
-function slideSection(slide: Slide): string {
-  const doc = assembleSlideHtml(slide, { themeCss: '', assetsBaseUrl: ASSETS_BASE_URL });
+function slideSection(slide: Slide, assetsBaseUrl: string): string {
+  const doc = assembleSlideHtml(slide, { themeCss: '', assetsBaseUrl });
   const start = doc.indexOf(SECTION_OPEN);
   const end = doc.lastIndexOf('</section>');
   if (start < 0 || end < start) throw new Error(`assembleSlideHtml produced no slide section for ${slide.id}`);
@@ -37,6 +36,7 @@ const PLAYER = `
 (function(){
   const slides=[...document.querySelectorAll('#viewport>.slide')];
   const meta=JSON.parse(document.getElementById('deck-meta').textContent);
+  const base=JSON.parse(document.getElementById('deck-base').textContent);
   const hud=document.getElementById('hud');
   const story=document.getElementById('story'),btn=document.getElementById('story-btn');
   if(!slides.length){hud.textContent='empty deck';return;}
@@ -47,7 +47,7 @@ const PLAYER = `
   btn.addEventListener('click',e=>{e.stopPropagation();document.body.classList.toggle('story');});
   story.addEventListener('click',e=>e.stopPropagation());
   addEventListener('resize',fit);fit();show(i);
-  addEventListener('keydown',e=>{if(['ArrowRight',' ','PageDown'].includes(e.key)){e.preventDefault();show(i+1);}else if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();show(i-1);}else if(e.key==='Home'){show(0);}else if(e.key==='End'){show(slides.length-1);}else if(e.key==='n'){console.log(meta[i].notes);}else if(e.key==='h'){document.body.classList.toggle('hud');}else if(e.key==='s'){document.body.classList.toggle('story');}else if(e.key==='Escape'){e.preventDefault();location.href='/?select='+encodeURIComponent(meta[i].id);}else if(e.key==='e'||e.key==='Enter'){e.preventDefault();location.href='/slide/'+encodeURIComponent(meta[i].id);}});
+  addEventListener('keydown',e=>{if(['ArrowRight',' ','PageDown'].includes(e.key)){e.preventDefault();show(i+1);}else if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();show(i-1);}else if(e.key==='Home'){show(0);}else if(e.key==='End'){show(slides.length-1);}else if(e.key==='n'){console.log(meta[i].notes);}else if(e.key==='h'){document.body.classList.toggle('hud');}else if(e.key==='s'){document.body.classList.toggle('story');}else if(e.key==='Escape'){e.preventDefault();location.href=base+'/?select='+encodeURIComponent(meta[i].id);}else if(e.key==='e'||e.key==='Enter'){e.preventDefault();location.href=base+'/slide/'+encodeURIComponent(meta[i].id);}});
   addEventListener('hashchange',()=>show((parseInt(location.hash.slice(1))||1)-1));
   addEventListener('click',e=>{if(e.clientX>innerWidth/2)show(i+1);else show(i-1);});
 })();
@@ -69,8 +69,11 @@ function contentSecurityPolicy(nonce: string): string {
   ].join('; ');
 }
 
-export function presentRoutes(app: FastifyInstance, store: DeckStore): void {
-  app.get('/api/present', async (_req, reply) => {
+export function presentRoutes(app: FastifyInstance): void {
+  app.get('/api/present', async (req, reply) => {
+    const { store } = deckOf(req);
+    // The workbench and the deck's assets live under the deck's mount ('' or /d/<id>).
+    const base = req.deckBase;
     const [themeCss, state, { order, slides }] = await Promise.all([
       loadThemeCss(store.dir),
       store.state(),
@@ -90,10 +93,11 @@ export function presentRoutes(app: FastifyInstance, store: DeckStore): void {
       '<div id="viewport">',
       '<button id="story-btn" title="story (s)">?</button>',
       '<div id="story"></div>',
-      ...main.map(slideSection),
+      ...main.map((s) => slideSection(s, `${base}/assets`)),
       '</div>',
       '<div id="hud"></div>',
       `<script type="application/json" id="deck-meta">${inlineJson(meta)}</script>`,
+      `<script type="application/json" id="deck-base">${inlineJson(base)}</script>`,
       `<script nonce="${nonce}">${PLAYER}</script>`,
       '</body></html>',
     ].join('\n');

@@ -1,9 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { AgentSession } from '../../agent/session.js';
 import { AnchorSchema, ThreadKeySchema } from '../../model/schema.js';
 import type { Anchor, ThreadKey, ThreadMessage } from '../../model/types.js';
-import type { DeckStore } from '../../store/deckStore.js';
+import { deckOf } from '../deckRequest.js';
 
 const SendBody = z.object({ text: z.string().trim().min(1), context: AnchorSchema.nullable().optional() });
 
@@ -34,24 +33,22 @@ const mergeByTime = (a: readonly ThreadMessage[], b: readonly ThreadMessage[]): 
   return out;
 };
 
-export function threadRoutes(app: FastifyInstance, store: DeckStore, session: AgentSession): void {
+export function threadRoutes(app: FastifyInstance): void {
   const parseKey = (raw: string): ThreadKey | null => {
     const k = ThreadKeySchema.safeParse(raw);
     return k.success ? (k.data as ThreadKey) : null;
   };
 
-  // A turn still running when the server stops is aborted, not left writing into a closed deck.
-  app.addHook('onClose', async () => session.interrupt());
-
   // Registered before /:key so "interrupt" is never read as a thread key.
-  app.post('/api/threads/interrupt', async () => {
-    await session.interrupt();
+  app.post('/api/threads/interrupt', async (req) => {
+    await deckOf(req).agent.interrupt();
     return { interrupted: true };
   });
 
   app.get<{ Params: KeyParams }>('/api/threads/:key', async (req, reply) => {
     const key = parseKey(req.params.key);
     if (!key) return reply.code(400).send({ error: `invalid thread key "${req.params.key}"` });
+    const { store } = deckOf(req);
     if (!key.startsWith('slide:')) return store.thread(key);
     const [own, global] = await Promise.all([store.thread(key), store.thread('global')]);
     return mergeByTime(globalTurnsOn(global, key.slice('slide:'.length)), own);
@@ -62,6 +59,7 @@ export function threadRoutes(app: FastifyInstance, store: DeckStore, session: Ag
     if (!key) return reply.code(400).send({ error: `invalid thread key "${req.params.key}"` });
     const body = SendBody.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: body.error.message });
+    const { store, agent: session } = deckOf(req);
     // A slide thread talks about one slide of main: a slide that is not there has nothing to talk about.
     if (key.startsWith('slide:')) {
       const slide = key.slice('slide:'.length);

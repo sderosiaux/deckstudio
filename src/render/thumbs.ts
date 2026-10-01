@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { access, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
-import { chromium, type Browser, type Page, type Route } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page, type Route } from 'playwright';
 import type { Slide } from '../model/types.js';
 import { assembleSlideHtml, FONTS_DIR, STAGE_HEIGHT, STAGE_WIDTH } from './theme.js';
 
@@ -28,10 +28,43 @@ const MIME: Record<string, string> = {
   '.otf': 'font/otf',
 };
 
+/**
+ * One Chromium shared by every ThumbService that is given the pool: each service renders in its own browser
+ * context (its own asset routing), so N decks cost one browser process, not N. Relaunched lazily after a crash.
+ */
+export class BrowserPool {
+  private browser: Browser | null = null;
+  private launching: Promise<Browser> | null = null;
+
+  async acquire(): Promise<Browser> {
+    if (this.browser?.isConnected()) return this.browser;
+    this.launching ??= (async () => {
+      const browser = await chromium.launch();
+      browser.on('disconnected', () => {
+        if (this.browser === browser) this.browser = null;
+      });
+      this.browser = browser;
+      return browser;
+    })().finally(() => {
+      this.launching = null;
+    });
+    return this.launching;
+  }
+
+  async close(): Promise<void> {
+    await this.launching?.catch(() => undefined);
+    const browser = this.browser;
+    this.browser = null;
+    await browser?.close();
+  }
+}
+
 export interface ThumbServiceOptions {
   cacheDir: string;
   themeCss: string;
   assetsDir: string;
+  /** Shared browser; without one the service launches (and closes) its own. */
+  pool?: BrowserPool;
   width?: 1280;
   height?: 720;
 }
@@ -57,7 +90,10 @@ export class ThumbService {
   private readonly themeCss: string;
   private readonly width: number;
   private readonly height: number;
+  private readonly pool: BrowserPool;
+  private readonly ownsPool: boolean;
   private browser: Browser | null = null;
+  private context: BrowserContext | null = null;
   private page: Page | null = null;
   private starting: Promise<void> | null = null;
   /** True between start() and stop(): a crashed browser is relaunched only while running. */
@@ -71,6 +107,8 @@ export class ThumbService {
     this.themeCss = opts.themeCss;
     this.width = opts.width ?? STAGE_WIDTH;
     this.height = opts.height ?? STAGE_HEIGHT;
+    this.pool = opts.pool ?? new BrowserPool();
+    this.ownsPool = opts.pool === undefined;
   }
 
   async start(): Promise<void> {
@@ -85,38 +123,45 @@ export class ThumbService {
   async stop(): Promise<void> {
     this.running = false;
     await this.starting?.catch(() => undefined);
-    const browser = this.browser;
-    if (!browser) return;
-    await this.tail.catch(() => undefined);
-    this.browser = null;
-    this.page = null;
-    await browser.close();
+    const context = this.context;
+    if (context) {
+      await this.tail.catch(() => undefined);
+      this.browser = null;
+      this.context = null;
+      this.page = null;
+      await context.close().catch(() => undefined);
+    }
+    if (this.ownsPool) await this.pool.close();
   }
 
   private async launch(): Promise<void> {
     await mkdir(this.thumbsDir, { recursive: true });
     const fonts = await this.loadFonts();
-    // A browser whose page was closed is still alive: drop it before launching a fresh one.
-    const stale = this.browser;
+    // A context whose page was closed is still alive: drop it before opening a fresh one.
+    const stale = this.context;
     this.browser = null;
+    this.context = null;
     this.page = null;
     await stale?.close().catch(() => undefined);
-    const browser = await chromium.launch();
+    const browser = await this.pool.acquire();
+    // Scripts never run in a rendered slide: the body is sanitized, and JS is off as a second wall.
+    const context = await browser.newContext({ javaScriptEnabled: false, viewport: { width: this.width, height: this.height } });
     try {
-      browser.on('disconnected', () => {
-        if (this.browser !== browser) return;
+      // Fires on context.close() and when the browser goes away: the next render relaunches.
+      context.on('close', () => {
+        if (this.context !== context) return;
         this.browser = null;
+        this.context = null;
         this.page = null;
       });
-      // Scripts never run in a rendered slide: the body is sanitized, and JS is off as a second wall.
-      const context = await browser.newContext({ javaScriptEnabled: false, viewport: { width: this.width, height: this.height } });
       await context.route('**/*', (route) => this.serve(route, fonts));
       const page = await context.newPage();
       await page.setViewportSize({ width: this.width, height: this.height });
       this.browser = browser;
+      this.context = context;
       this.page = page;
     } catch (err) {
-      await browser.close();
+      await context.close().catch(() => undefined);
       throw err;
     }
   }

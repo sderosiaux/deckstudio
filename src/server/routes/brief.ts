@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { DIAGRAM_STYLE } from '../../agent/imageGen.js';
 import { BriefSchema } from '../../model/schema.js';
-import type { DeckStore } from '../../store/deckStore.js';
+import { deckOf } from '../deckRequest.js';
 
 /** What the brief screen shows around the design rules: the built-in image style and the deck's theme.css. */
 export interface DesignInfo {
@@ -14,18 +14,18 @@ export interface DesignInfo {
   themeCssPresent: boolean;
 }
 
-export function briefRoutes(app: FastifyInstance, store: DeckStore): void {
-  app.get('/api/brief', async () => store.brief());
+export function briefRoutes(app: FastifyInstance): void {
+  app.get('/api/brief', async (req) => deckOf(req).store.brief());
 
   app.put('/api/brief', async (req, reply) => {
     const parsed = BriefSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: `invalid brief: ${parsed.error.message}` });
-    await store.setBrief(parsed.data);
+    await deckOf(req).store.setBrief(parsed.data);
     return parsed.data;
   });
 
-  app.get('/api/brief/design', async (): Promise<DesignInfo> => {
-    const themeCssPath = join(store.dir, 'theme.css');
+  app.get('/api/brief/design', async (req): Promise<DesignInfo> => {
+    const themeCssPath = join(deckOf(req).store.dir, 'theme.css');
     const themeCssPresent = await access(themeCssPath).then(() => true, () => false);
     return { defaultImageStyle: DIAGRAM_STYLE, themeCssPath, themeCssPresent };
   });

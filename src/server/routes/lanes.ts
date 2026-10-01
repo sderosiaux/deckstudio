@@ -1,10 +1,9 @@
 import { access } from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Change, Lane } from '../../model/types.js';
-import type { ThumbService } from '../../render/thumbs.js';
-import type { DeckStore } from '../../store/deckStore.js';
-import type { Bus } from '../bus.js';
-import { LaneError, type LaneService } from '../laneService.js';
+import { deckOf } from '../deckRequest.js';
+import type { DeckServices } from '../deckServices.js';
+import { LaneError } from '../laneService.js';
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const exists = (p: string): Promise<boolean> => access(p).then(() => true, () => false);
@@ -37,8 +36,14 @@ export function withVariants(lanes: readonly Lane[], open: readonly Lane[]): Lan
   }));
 }
 
-export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneService, thumbs: ThumbService, bus: Bus): void {
-  const inflight = new Set<string>();
+export function laneRoutes(app: FastifyInstance): void {
+  // Preview renders in flight, by hash, per deck.
+  const inflightOf = new WeakMap<DeckServices, Set<string>>();
+  const inflightFor = (deck: DeckServices): Set<string> => {
+    let set = inflightOf.get(deck);
+    if (!set) inflightOf.set(deck, (set = new Set()));
+    return set;
+  };
 
   const fail = (reply: FastifyReply, err: unknown) => {
     if (err instanceof LaneError) return reply.code(err.status).send({ error: err.message });
@@ -51,20 +56,21 @@ export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneSe
     if (!(LIST_STATUSES as readonly string[]).includes(status)) {
       return reply.code(400).send({ error: `invalid status "${status}": expected ${LIST_STATUSES.join(', ')}` });
     }
-    const all = await store.lanes();
+    const all = await deckOf(req).store.lanes();
     const open = all.filter((l) => l.status === 'open');
     return withVariants(status === 'all' ? all : all.filter((l) => l.status === status), open);
   });
 
   app.post<{ Params: Params }>('/api/lanes/:id/open', async (req, reply) => {
     try {
-      return await lanes.open(req.params.id);
+      return await deckOf(req).lanes.open(req.params.id);
     } catch (err) {
       return fail(reply, err);
     }
   });
 
   app.get<{ Params: Params }>('/api/lanes/:id', async (req, reply) => {
+    const { store } = deckOf(req);
     const lane = await store.lane(req.params.id);
     if (!lane) return reply.code(404).send({ error: `unknown lane ${req.params.id}` });
     const open = (await store.lanes()).filter((l) => l.status === 'open');
@@ -73,7 +79,7 @@ export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneSe
 
   app.post<{ Params: ChangeParams }>('/api/lanes/:id/changes/:cid/accept', async (req, reply) => {
     try {
-      return await lanes.accept(req.params.id, req.params.cid);
+      return await deckOf(req).lanes.accept(req.params.id, req.params.cid);
     } catch (err) {
       return fail(reply, err);
     }
@@ -81,7 +87,7 @@ export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneSe
 
   app.post<{ Params: ChangeParams }>('/api/lanes/:id/changes/:cid/refuse', async (req, reply) => {
     try {
-      return await lanes.refuse(req.params.id, req.params.cid);
+      return await deckOf(req).lanes.refuse(req.params.id, req.params.cid);
     } catch (err) {
       return fail(reply, err);
     }
@@ -89,7 +95,7 @@ export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneSe
 
   app.delete<{ Params: Params }>('/api/lanes/:id', async (req, reply) => {
     try {
-      await lanes.closeLane(req.params.id);
+      await deckOf(req).lanes.closeLane(req.params.id);
       return reply.code(204).send();
     } catch (err) {
       return fail(reply, err);
@@ -99,6 +105,9 @@ export function laneRoutes(app: FastifyInstance, store: DeckStore, lanes: LaneSe
   // Preview slides are not on main, so /api/thumbs/for/:slideId cannot serve them: the response
   // carries the render hash of every changed slide, and renders are enqueued here.
   app.get<{ Params: Params }>('/api/lanes/:id/preview', async (req, reply) => {
+    const deck = deckOf(req);
+    const { lanes, thumbs, bus } = deck;
+    const inflight = inflightFor(deck);
     let preview;
     try {
       preview = await lanes.preview(req.params.id);

@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { DiffEntry } from '../../model/types.js';
-import { DiffEntrySchema, HistoryError, type HistoryService } from '../historyService.js';
+import { deckOf } from '../deckRequest.js';
+import { DiffEntrySchema, HistoryError } from '../historyService.js';
 
 const VersionN = z.number().int().nonnegative();
 
@@ -10,7 +11,7 @@ const OpenAsLaneBody = z.object({ n: VersionN });
 
 const versionParam = (raw: string | undefined): number | null => (raw !== undefined && /^\d+$/.test(raw) ? Number(raw) : null);
 
-export function historyRoutes(app: FastifyInstance, history: HistoryService): void {
+export function historyRoutes(app: FastifyInstance): void {
   const fail = (reply: FastifyReply, err: unknown) => {
     if (err instanceof HistoryError) return reply.code(err.status).send({ error: err.message });
     throw err;
@@ -21,7 +22,7 @@ export function historyRoutes(app: FastifyInstance, history: HistoryService): vo
     const b = versionParam(req.query.b);
     if (a === null || b === null) return reply.code(400).send({ error: 'query parameters a and b must be version numbers' });
     try {
-      return { a, b, entries: await history.diff(a, b) };
+      return { a, b, entries: await deckOf(req).history.diff(a, b) };
     } catch (err) {
       return fail(reply, err);
     }
@@ -31,7 +32,7 @@ export function historyRoutes(app: FastifyInstance, history: HistoryService): vo
     const body = RestoreBody.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: `invalid restore request: ${body.error.message}` });
     try {
-      return { version: await history.restore(body.data.from, body.data.entry as DiffEntry) };
+      return { version: await deckOf(req).history.restore(body.data.from, body.data.entry as DiffEntry) };
     } catch (err) {
       return fail(reply, err);
     }
@@ -41,7 +42,7 @@ export function historyRoutes(app: FastifyInstance, history: HistoryService): vo
     const body = OpenAsLaneBody.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: `invalid open-as-lane request: ${body.error.message}` });
     try {
-      return { laneId: await history.openAsLane(body.data.n) };
+      return { laneId: await deckOf(req).history.openAsLane(body.data.n) };
     } catch (err) {
       return fail(reply, err);
     }

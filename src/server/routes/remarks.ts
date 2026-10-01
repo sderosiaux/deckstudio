@@ -5,8 +5,8 @@ import { newId } from '../../model/ids.js';
 import { AddRemarkInputSchema } from '../../model/schema.js';
 import type { Anchor, Remark } from '../../model/types.js';
 import type { DeckStore } from '../../store/deckStore.js';
-import type { Bus } from '../bus.js';
-import { LaneError, LaneService } from '../laneService.js';
+import { deckOf } from '../deckRequest.js';
+import { LaneError, type LaneService } from '../laneService.js';
 
 export const PROPOSE_REMARK_TEXT = 'Propose a lane for this remark.';
 
@@ -49,14 +49,13 @@ export async function presentRemarks(remarks: readonly Remark[], store: DeckStor
 /** Open remarks first; creation order inside each group. */
 const openFirst = (rs: Remark[]): Remark[] => [...rs.filter((r) => r.status === 'open'), ...rs.filter((r) => r.status !== 'open')];
 
-export function remarkRoutes(app: FastifyInstance, store: DeckStore, session: AgentSession, bus: Bus): void {
-  const lanes = new LaneService(store, bus);
-
+export function remarkRoutes(app: FastifyInstance): void {
   app.get<{ Querystring: ListQuery }>('/api/remarks', async (req, reply) => {
     const status = req.query.status;
     if (status !== undefined && status !== 'open' && status !== 'resolved') {
       return reply.code(400).send({ error: `invalid status "${status}": expected open or resolved` });
     }
+    const { store, lanes } = deckOf(req);
     const all = openFirst(await presentRemarks(await store.remarks(), store, lanes));
     return status ? all.filter((r) => r.status === status) : all;
   });
@@ -64,6 +63,7 @@ export function remarkRoutes(app: FastifyInstance, store: DeckStore, session: Ag
   app.post('/api/remarks', async (req, reply) => {
     const parsed = AddRemarkInputSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: `invalid remark: ${parsed.error.message}` });
+    const { store, bus } = deckOf(req);
     const { anchor, text, severity } = parsed.data;
     // Same lock as lanes and the agent's add_remark: remarks.json is read-modify-written by all of them.
     const out = await store.withLock(async () => {
@@ -88,6 +88,7 @@ export function remarkRoutes(app: FastifyInstance, store: DeckStore, session: Ag
   });
 
   app.post<{ Params: IdParams }>('/api/remarks/:id/resolve', async (req, reply) => {
+    const { store, bus, lanes } = deckOf(req);
     const { id } = req.params;
     const resolved = await store.withLock(async () => {
       const remarks = await store.remarks();
@@ -103,6 +104,7 @@ export function remarkRoutes(app: FastifyInstance, store: DeckStore, session: Ag
   });
 
   app.post<{ Params: IdParams }>('/api/remarks/:id/propose', async (req, reply) => {
+    const { store, lanes, agent: session } = deckOf(req);
     const { id } = req.params;
     const remark = (await store.remarks()).find((r) => r.id === id);
     if (!remark) return reply.code(404).send({ error: `remark "${id}" not found` });

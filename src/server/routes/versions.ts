@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { Change, Lane, Snapshot, Version, VersionCause } from '../../model/types.js';
-import type { DeckStore } from '../../store/deckStore.js';
+import { deckOf } from '../deckRequest.js';
 import { describeRestore, storedEntry } from '../historyService.js';
 
 function changeSummary(c: Change, slideTitle: (id: string) => string): string {
@@ -36,8 +36,9 @@ export function versionLabel(cause: VersionCause, lanes: Map<string, Lane>, slid
   }
 }
 
-export function versionRoutes(app: FastifyInstance, store: DeckStore): void {
-  app.get('/api/versions', async (): Promise<Array<Version & { label: string }>> => {
+export function versionRoutes(app: FastifyInstance): void {
+  app.get('/api/versions', async (req): Promise<Array<Version & { label: string }>> => {
+    const { store } = deckOf(req);
     const [versions, lanes, snap] = await Promise.all([store.versions(), store.lanes(), store.snapshot()]);
     const byId = new Map(lanes.map((l) => [l.id, l]));
     const title = (id: string): string => snap.slides[id]?.title ?? id;
@@ -56,6 +57,7 @@ export function versionRoutes(app: FastifyInstance, store: DeckStore): void {
   app.get<{ Params: { n: string } }>('/api/versions/:n', async (req, reply) => {
     if (!/^\d+$/.test(req.params.n)) return reply.code(400).send({ error: `invalid version "${req.params.n}"` });
     const n = Number(req.params.n);
+    const { store } = deckOf(req);
     const known = (await store.versions()).some((v) => v.n === n);
     if (!known) return reply.code(404).send({ error: `version ${n} does not exist` });
     return store.snapshotAt(n);

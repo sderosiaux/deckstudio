@@ -1,8 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { applyChange, validateBody } from '../../model/ops.js';
 import { SlidePatchSchema } from '../../model/schema.js';
-import type { DeckStore } from '../../store/deckStore.js';
-import type { Bus } from '../bus.js';
+import { deckOf } from '../deckRequest.js';
 
 const MANUAL = 'manual';
 // A slide asset is a single file of the deck's assets folder: a bare name or `assets/<name>`, never a path.
@@ -16,9 +15,9 @@ function badAssetNames(assets: readonly string[]): string[] {
   });
 }
 
-export function slideRoutes(app: FastifyInstance, store: DeckStore, bus: Bus): void {
+export function slideRoutes(app: FastifyInstance): void {
   app.get<{ Params: { id: string } }>('/api/slides/:id', async (req, reply) => {
-    const slide = await store.slide(req.params.id);
+    const slide = await deckOf(req).store.slide(req.params.id);
     if (!slide) return reply.code(404).send({ error: `unknown slide ${req.params.id}` });
     return slide;
   });
@@ -42,6 +41,7 @@ export function slideRoutes(app: FastifyInstance, store: DeckStore, bus: Bus): v
       }
     }
 
+    const { store, bus } = deckOf(req);
     const id = req.params.id;
     const outcome = await store.withLock(async () => {
       const snap = await store.snapshot();

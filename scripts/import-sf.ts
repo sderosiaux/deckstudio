@@ -1,13 +1,16 @@
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { defaultHome } from '../src/cli/home.js';
 import { importDeckHtmlFile } from '../src/import/fromDeckHtml.js';
 import { DeckStore } from '../src/store/deckStore.js';
 import { access, rename } from 'node:fs/promises';
 import type { Brief } from '../src/model/types.js';
 
 const source = join(homedir(), 'code/personal/data-streaming-summit-san-francisco-2026/deck.html');
-const outDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'decks', 'dss-sf-2026');
+// Into the home folder the CLI serves (DECKSTUDIO_HOME, else the repo's decks/ when present, else ~/deckstudio/decks).
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const outDir = join(await defaultHome(process.env, repo), 'dss-sf-2026');
 
 // Abstract copied verbatim from the talk project's notes.txt (the submitted CFP abstract).
 const brief: Brief = {
