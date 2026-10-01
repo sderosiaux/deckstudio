@@ -2,6 +2,10 @@
 
 A local workbench for slide decks and their AI co-author. The deck on disk is the source of truth; the co-author never edits it directly. It proposes lanes (sets of changes under main) that you accept or refuse one change at a time, leaves remarks pinned to slides, and runs background checks (arc, order, gaps, render) against your brief.
 
+![main screen of a deck created from scratch](docs/screenshots/main.png)
+
+![a slide selected: the stage, its story and notes, the conversation about it](docs/screenshots/main-selected.png)
+
 ## Run
 
 ```
