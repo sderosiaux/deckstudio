@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, type CSSProperties } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import type { DiffEntry, SlideId, Snapshot } from '../../../src/model/types.js';
 import { END_W, EdgeFade, useVisibleColumns } from './EdgeFade.js';
 import { Thumb } from './Thumb.js';
@@ -7,16 +7,25 @@ import { Thumb } from './Thumb.js';
  * Pixel geometry of one column; set as CSS variables on the root so the Thumbs and the connectors agree.
  * 16:9 like the slides, large enough that a whole slide shows what differs; the columns past the edge scroll on behind a fade.
  */
-const THUMB_W = 176;
-const THUMB_H = 99;
+const MIN_THUMB_W = 176;
+/** The strips grow with the screen up to this width: past it, more columns show rather than bigger ones. */
+const MAX_THUMB_W = 240;
+/** Whole columns the strips aim to show between the gutter and the "+N" slot before the thumbs stop growing. */
+const FIT_COLS = 4;
 /** The one gap between thumbs on every strip (--col-gap). */
 const GAP = 8;
-const COL = THUMB_W + GAP;
-/** Height of the link band: with the numbers under v<a>, about 140px between the two rows. */
-const CONNECTOR_H = 112;
+/** Height of the link band between the rows: enough for a moved slide's curve to read, no more. */
+const CONNECTOR_H = 64;
 const PAD = 6;
 /** The row-name gutter, as on main. */
 const GUTTER = 120;
+
+/** The thumb width for a scroller this wide: FIT_COLS columns fill it, never under 176px nor over 240px. */
+export function thumbWidthFor(scrollerWidth: number): number {
+  const fit = Math.floor((scrollerWidth - GUTTER - 2 * PAD - END_W) / FIT_COLS) - GAP;
+  return Math.min(MAX_THUMB_W, Math.max(MIN_THUMB_W, fit));
+}
+const heightOf = (w: number): number => Math.round((w * 9) / 16);
 
 export interface DiffSide {
   n: number;
@@ -52,22 +61,20 @@ export function aRowCells(aOrder: SlideId[], entries: DiffEntry[]): ACell[] {
   return cells;
 }
 
-const centerX = (col: number): number => GUTTER + PAD + col * COL + THUMB_W / 2;
-
 const row: CSSProperties = { display: 'flex', gap: GAP, padding: `0 ${PAD}px` };
-const cellStyle: CSSProperties = { position: 'relative', flex: `0 0 ${THUMB_W}px` };
+const cellStyle: CSSProperties = { position: 'relative', flex: '0 0 var(--thumb-w)' };
 /** Accent means "changed" here; the selected thumbnail uses the ink ring (Thumb ring="ink"), never the accent. */
-const outline: CSSProperties = { position: 'absolute', left: 0, top: 0, width: THUMB_W, height: THUMB_H, borderRadius: 4, boxShadow: '0 0 0 1.5px var(--accent)', pointerEvents: 'none' };
+const outline: CSSProperties = { position: 'absolute', left: 0, top: 0, width: 'var(--thumb-w)', height: 'var(--thumb-h)', borderRadius: 4, boxShadow: '0 0 0 1.5px var(--accent)', pointerEvents: 'none' };
 const dot: CSSProperties = { position: 'absolute', top: 5, right: 5, width: 7, height: 7, borderRadius: 999, background: 'var(--accent)', pointerEvents: 'none' };
 /** The text mark under a changed thumb, on its number's line, right-aligned so the centred number stays readable. */
-const tag: CSSProperties = { position: 'absolute', right: 0, top: THUMB_H + 6, fontSize: 12, lineHeight: '15px', fontWeight: 500, color: 'var(--accent)', whiteSpace: 'nowrap', pointerEvents: 'none' };
+const tag: CSSProperties = { position: 'absolute', right: 0, top: 'calc(var(--thumb-h) + 6px)', fontSize: 12, lineHeight: '15px', fontWeight: 500, color: 'var(--accent)', whiteSpace: 'nowrap', pointerEvents: 'none' };
 /** What a thumb without a render shows: the slide's title, so a past version never reads as a blank card. */
 const titleCard: CSSProperties = {
   position: 'absolute',
   left: 0,
   top: 0,
-  width: THUMB_W,
-  height: THUMB_H,
+  width: 'var(--thumb-w)',
+  height: 'var(--thumb-h)',
   padding: '8px 10px',
   fontSize: 12,
   lineHeight: '16px',
@@ -93,8 +100,8 @@ export function wheelSideways(el: HTMLElement, e: WheelEvent): void {
 }
 
 const slot: CSSProperties = {
-  width: THUMB_W,
-  height: THUMB_H,
+  width: 'var(--thumb-w)',
+  height: 'var(--thumb-h)',
   borderRadius: 6,
   border: '1px dashed var(--grey-2)',
   display: 'flex',
@@ -114,7 +121,21 @@ const slot: CSSProperties = {
  */
 export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstripsProps) {
   const scroller = useRef<HTMLDivElement>(null);
-  const visible = useVisibleColumns(scroller, '[data-testid="row-b"] > [role="listitem"]', [a.n, b.n, entries.length]);
+  // The thumbs follow the scroller's width: a wide screen shows the slides larger, not more paper.
+  const [thumbW, setThumbW] = useState(MIN_THUMB_W);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const measure = (): void => setThumbW(thumbWidthFor(el.clientWidth));
+    measure();
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, []);
+  const thumbH = heightOf(thumbW);
+  const pitch = thumbW + GAP;
+  const centerX = (i: number): number => GUTTER + PAD + i * pitch + thumbW / 2;
+  const visible = useVisibleColumns(scroller, '[data-testid="row-b"] > [role="listitem"]', [a.n, b.n, entries.length, thumbW]);
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
@@ -137,9 +158,11 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
     if (!el || opened.current === key) return;
     opened.current = key;
     if (!Number.isFinite(firstChange)) return;
-    const x = PAD + firstChange * COL;
-    const fits = x >= el.scrollLeft && x + THUMB_W <= el.scrollLeft + el.clientWidth - GUTTER - END_W;
-    if (!fits) el.scrollLeft = firstChange * COL;
+    // From the width itself: this runs before the measured thumb width reaches the state.
+    const w = thumbWidthFor(el.clientWidth);
+    const x = PAD + firstChange * (w + GAP);
+    const fits = x >= el.scrollLeft && x + w <= el.scrollLeft + el.clientWidth - GUTTER - END_W;
+    if (!fits) el.scrollLeft = firstChange * (w + GAP);
   }, [a.n, b.n, firstChange]);
   /**
    * The "+N" slots page the strips by the whole columns that fit, as on main: on, so the next card starts where the
@@ -148,7 +171,7 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
   const page = (dir: -1 | 1): void => {
     const el = scroller.current;
     if (!el) return;
-    const by = Math.max(1, Math.floor((el.clientWidth - GUTTER - END_W) / COL)) * COL;
+    const by = Math.max(1, Math.floor((el.clientWidth - GUTTER - END_W) / pitch)) * pitch;
     el.scrollLeft = Math.max(0, el.scrollLeft + dir * by);
   };
   const cells = bRowCells(b.snapshot.order, entries);
@@ -164,7 +187,7 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
     return words.length ? words.join(', ') : undefined;
   };
   const cardFor = (side: DiffSide, id: SlideId) => (side.thumbs[id] ? null : <div data-testid="thumb-title-card" style={titleCard}>{title(side, id)}</div>);
-  const width = GUTTER + PAD * 2 + Math.max(aCells.length, cells.length) * COL;
+  const width = GUTTER + PAD * 2 + Math.max(aCells.length, cells.length) * pitch;
   const changedIds = new Set(entries.map((e) => e.slide));
   // Every slide in both versions, joined across the two rows; the moved ones are the diff markers, drawn on top.
   const matched = [...colInA].flatMap(([id, from]) => {
@@ -188,7 +211,7 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
 
   return (
     <div style={{ position: 'relative', flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <div ref={scroller} data-testid="diff-filmstrips" style={{ '--thumb-w': `${THUMB_W}px`, '--thumb-h': `${THUMB_H}px`, flex: '0 1 auto', minHeight: 0, overflow: 'auto', padding: `4px 0 ${BOTTOM_ROOM}px 0`, display: 'flex', flexDirection: 'column' } as CSSProperties}>
+      <div ref={scroller} data-testid="diff-filmstrips" style={{ '--thumb-w': `${thumbW}px`, '--thumb-h': `${thumbH}px`, flex: '0 1 auto', minHeight: 0, overflow: 'auto', padding: `4px 0 ${BOTTOM_ROOM}px 0`, display: 'flex', flexDirection: 'column' } as CSSProperties}>
         {/* The pair sits at the top of the band, a fixed link band between the rows. */}
         <div style={{ width, minWidth: '100%', flex: '0 0 auto', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'stretch' }}>
@@ -289,7 +312,7 @@ export function DiffFilmstrips({ a, b, entries, focused, onFocus }: DiffFilmstri
             aria-label={`show the next slides (${r.hidden} more)`}
             title="Page on"
             onClick={() => page(1)}
-            style={{ position: 'absolute', left: visible.cut, top: r.top - THUMB_H / 2, width: END_W, height: THUMB_H }}
+            style={{ position: 'absolute', left: visible.cut, top: r.top - thumbH / 2, width: END_W, height: thumbH }}
           />
         ) : null,
       )}

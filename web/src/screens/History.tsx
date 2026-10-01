@@ -15,6 +15,7 @@ import {
   type ThumbStatus,
 } from '../api.js';
 import { DiffFilmstrips } from '../components/DiffFilmstrips.js';
+import { SlidePreview } from '../components/SlidePreview.js';
 import { BackToMain, ScreenHeader } from '../components/ScreenHeader.js';
 import { EMPTY_VERSION, VersionLine, type VersionPair } from '../components/VersionLine.js';
 
@@ -117,6 +118,84 @@ interface RailChip {
   n: number;
   role: 'from' | 'to';
   side: 'left' | 'right';
+}
+
+/** The words that say what happened to a slide between the two sides; empty when it kept its place and content. */
+export function changeWords(id: SlideId, entries: DiffEntry[]): string[] {
+  return entries.flatMap((e) =>
+    e.slide !== id ? [] : e.kind === 'added' ? ['added'] : e.kind === 'removed' ? ['removed'] : e.kind === 'modified' ? ['modified'] : [`moved from ${e.from + 1}`],
+  );
+}
+
+/** Space between the two large renders, and SlidePreview's own chrome: 12px padding around a 16px label line, 8px gap, 1px frame. */
+const PAIR_GAP = 24;
+const CARD_CHROME_W = 26;
+const CARD_CHROME_H = 50;
+/** The pane's padding: the rows' 6px inset on the sides, room for the 2px change ring above and below. */
+const PANE_PAD_X = 6;
+const PANE_PAD_Y = 4;
+
+/** The width of each of the two cards: half the pane, unless the pane's height holds less of a 16:9 slide. */
+export function pairCardWidth(pane: { width: number; height: number }): number {
+  const byWidth = (pane.width - PAIR_GAP) / 2;
+  const byHeight = ((pane.height - CARD_CHROME_H) * 16) / 9 + CARD_CHROME_W;
+  return Math.max(160, Math.floor(Math.min(byWidth, byHeight)));
+}
+
+interface ComparePairProps {
+  compared: Compared;
+  slide: SlideId;
+  thumbsA: Record<SlideId, string | undefined>;
+  thumbsB: Record<SlideId, string | undefined>;
+}
+
+/**
+ * One slide at reading size, as it was in v<a> and as it is in v<b>, side by side under the strips: the strips say
+ * where things changed, this pair shows what. The cards take the pane's height, so the screen holds slides, not paper.
+ */
+function ComparePair({ compared, slide, thumbsA, thumbsB }: ComparePairProps) {
+  const pane = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = pane.current;
+    if (!el) return;
+    const measure = (): void => {
+      // The inner box: clientWidth/Height include the pane's padding, which keeps the cards' rings in view.
+      const next = { width: el.clientWidth - 2 * PANE_PAD_X, height: el.clientHeight - 2 * PANE_PAD_Y };
+      setSize((prev) => (prev && prev.width === next.width && prev.height === next.height ? prev : next));
+    };
+    measure();
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, []);
+  const { pair, a, b, entries } = compared;
+  const words = changeWords(slide, entries);
+  const changed = words.length > 0;
+  const atA = a.order.indexOf(slide);
+  const atB = b.order.indexOf(slide);
+  const width = size && size.width > 0 && size.height > 0 ? pairCardWidth(size) : undefined;
+  const title = (s: Snapshot): string => s.slides[slide]?.title ?? slide;
+  const entry = entries.find((e) => e.slide === slide);
+  return (
+    <div style={{ display: 'flex', flex: '1 1 0', minHeight: 0 }}>
+      <div className="gutter row-label" data-testid="compare-what" style={{ position: 'static', paddingTop: 12, color: changed ? 'var(--accent)' : 'var(--grey)' }}>
+        {entry ? describeEntry(entry, compared).what : 'unchanged'}
+      </div>
+      <div ref={pane} data-testid="compare-pair" style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', gap: PAIR_GAP, alignItems: 'flex-start', padding: `${PANE_PAD_Y}px ${PANE_PAD_X}px`, overflow: 'hidden' }}>
+        {atA >= 0 ? (
+          <SlidePreview label={`v${pair.a}, slide ${atA + 1}`} variant="main" title={title(a)} url={thumbsA[slide]} width={width} />
+        ) : (
+          <SlidePreview label={`v${pair.a}, not in v${pair.a}`} variant="missing" missingText={`not in v${pair.a}`} width={width} />
+        )}
+        {atB >= 0 ? (
+          <SlidePreview label={`v${pair.b}, slide ${atB + 1}${changed ? `, ${words.join(', ')}` : ''}`} variant={changed ? 'lane' : 'main'} title={title(b)} url={thumbsB[slide]} width={width} />
+        ) : (
+          <SlidePreview label={`v${pair.b}, removed`} variant="missing" missingText={`removed in v${pair.b}`} width={width} />
+        )}
+      </div>
+    </div>
+  );
 }
 
 const rowButton: CSSProperties = { padding: '4px 10px', fontSize: 12, whiteSpace: 'nowrap' };
@@ -457,6 +536,9 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
       (pair.b === deck.state.version ? shown !== null && shown.entries.length === 0 : mainHas[`${deck.state.version}:${pair.a}`] === true));
   const aEmpty = pair !== null && versions.some((v) => v.n === pair.a && v.order.length === 0);
   const openDisabled = busy !== null || aIsMain || aEmpty;
+  // The slide shown large: the one picked in the strips or hovered in the list, else the first change, else the first slide.
+  const inShown = (id: SlideId | undefined): id is SlideId => id !== undefined && shown !== null && (id in shown.a.slides || id in shown.b.slides);
+  const pairSlide = !shown ? undefined : inShown(focused) ? focused : (shown.entries[0]?.slide ?? shown.b.order[0] ?? shown.a.order[0]);
 
   return (
     <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
@@ -480,8 +562,8 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
             </button>
           ) : null}
         </ScreenHeader>
-        {/* The pair sizes to its rows; the rail follows 64px under the lower one (24px strip padding, room for a hover title, + 8 + 32). */}
-        <section aria-label="compared versions" style={{ flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '8px 24px 8px' }}>
+        {/* The strips size to their rows; the large pair takes the height left between them and the rail. */}
+        <section aria-label="compared versions" style={{ flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '8px 24px 0' }}>
           {diffError ? (
             <p style={{ color: 'var(--warn)' }}>Could not compare: {diffError}</p>
           ) : !pair ? (
@@ -498,8 +580,15 @@ export function History({ api = historyApi, subscribe = defaultSubscribe, naviga
             />
           )}
         </section>
-        {/* The version line is a thin rail under the compared rows, as on main under the lanes. */}
-        <div style={{ padding: '32px 24px 16px' }}>
+        {shown && pairSlide !== undefined ? (
+          <section aria-label="compared slide" style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '0 24px' }}>
+            <ComparePair compared={shown} slide={pairSlide} thumbsA={thumbsOf(shown.pair.a, shown.a)} thumbsB={thumbsOf(shown.pair.b, shown.b)} />
+          </section>
+        ) : (
+          <div style={{ flex: '1 1 0' }} />
+        )}
+        {/* The version line is a thin rail at the foot of the column, as on main under the lanes. */}
+        <div style={{ padding: '16px 24px 16px', borderTop: '1px solid var(--line)' }}>
           <p className="meta" style={{ margin: '0 0 10px calc(var(--gutter) + 6px)', display: 'flex', gap: 12, alignItems: 'baseline' }}>
             <span>click a version to compare from it, shift-click to compare to it</span>
             {pair && pair.a !== pair.b ? (

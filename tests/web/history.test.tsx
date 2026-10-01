@@ -755,3 +755,45 @@ describe('History QA3 compare state', () => {
     expect(location.pathname).toBe('/history');
   });
 });
+
+describe('History space: the compare fills the viewport', () => {
+  it('the strips scale their thumbs with the width, from 176px up to 240px', () => {
+    const at = (width: number): string => {
+      const spyWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(width);
+      try {
+        render(<DiffFilmstrips a={{ n: 1, snapshot: snaps[1]!, thumbs: {} }} b={{ n: 3, snapshot: snaps[3]!, thumbs: {} }} entries={diffVersions(snaps[1]!, snaps[3]!)} onFocus={vi.fn()} />);
+        return screen.getByTestId('diff-filmstrips').style.getPropertyValue('--thumb-w');
+      } finally {
+        spyWidth.mockRestore();
+        cleanup();
+      }
+    };
+    expect(at(900)).toBe('176px');
+    // 1032px of strips (a 1440px window): four whole columns between the gutter and the "+N" slot.
+    expect(at(1032)).toBe('205px');
+    expect(at(1512)).toBe('240px');
+  });
+
+  it('shows the first changed slide large, as it was and as it is, then the slide picked in the strips', async () => {
+    render(<History api={stubApi()} subscribe={noEvents} navigate={vi.fn()} initialPair={{ a: 1, b: 3 }} />);
+    await waitFor(() => screen.queryByTestId('compare-pair') !== null);
+    const labels = () => within(screen.getByTestId('compare-pair')).getAllByTestId('slide-preview').map((f) => `${f.getAttribute('data-variant')}:${f.getAttribute('aria-label')}`);
+    const first = diffVersions(snaps[1]!, snaps[3]!)[0]!.slide;
+    const at = (s: Snapshot) => s.order.indexOf(first) + 1;
+    expect(labels()[0]).toContain(at(snaps[1]!) > 0 ? `v1, slide ${at(snaps[1]!)}` : 'not in v1');
+    // The added slide: nothing on the v1 side, the v3 side ringed as a change.
+    fireEvent.click(within(screen.getByTestId('row-b')).getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's6')!);
+    expect(labels()).toEqual(['missing:v1, not in v1', 'lane:v3, slide 4, added']);
+    // An unchanged slide reads the same on both sides.
+    fireEvent.click(within(screen.getByTestId('row-b')).getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's1')!);
+    expect(labels()).toEqual(['main:v1, slide 1', 'main:v3, slide 1']);
+  });
+
+  it('a removed slide shows as it was on the earlier side and a dashed frame on the later one', async () => {
+    render(<History api={stubApi()} subscribe={noEvents} navigate={vi.fn()} initialPair={{ a: 1, b: 3 }} />);
+    await waitFor(() => screen.queryAllByTestId('diff-entry').length > 0);
+    fireEvent.mouseEnter(screen.getAllByTestId('diff-entry').find((e) => e.getAttribute('data-kind') === 'removed')!);
+    const figs = within(screen.getByTestId('compare-pair')).getAllByTestId('slide-preview');
+    expect(figs.map((f) => `${f.getAttribute('data-variant')}:${f.getAttribute('aria-label')}`)).toEqual(['main:v1, slide 4', 'missing:v3, removed']);
+  });
+});
