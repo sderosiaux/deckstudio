@@ -183,6 +183,60 @@ describe('lanes API', () => {
     expect((await getLane('l_c')).status).toBe('closed');
   });
 
+  it('QA5 refusing the first of chained moves leaves the next ones pending; accepting the second leaves the third pending', async () => {
+    const move = (id: string, target: string, after: string | null): Change => ({ id, kind: 'move', slide: target, after, reason: 'r', status: 'pending' });
+    // Pull the block s3 s4 s5 right after s1: on main s4 already follows s3 and s5 follows s4.
+    await store.putLane(lane('l_m', [move('c_a', 's3', 's1'), move('c_b', 's4', 's3'), move('c_c', 's5', 's4')]));
+    const r1 = await refuse('l_m', 'c_a');
+    expect(r1.statusCode).toBe(200);
+    const statuses = (l: Lane) => l.changes.map((c) => [c.id, c.status]);
+    expect(statuses(r1.json())).toEqual([
+      ['c_a', 'refused'],
+      ['c_b', 'pending'],
+      ['c_c', 'pending'],
+    ]);
+    expect(statuses(await getLane('l_m'))).toEqual(statuses(r1.json()));
+    expect(await store.thread('lane:l_m')).toEqual([]);
+    expect((await accept('l_m', 'c_b')).statusCode).toBe(200);
+    const after = await getLane('l_m');
+    expect(statuses(after)).toEqual([
+      ['c_a', 'refused'],
+      ['c_b', 'accepted'],
+      ['c_c', 'pending'],
+    ]);
+    expect(after.status).toBe('open');
+    expect((await deck()).order).toEqual(['s1', 's2', 's3', 's4', 's5']);
+  });
+
+  it('QA5 lane labels and change reasons are served with slides named in the current order, never ids; the store keeps the ids', async () => {
+    const move = (id: string, target: string, after: string | null, reason: string): Change => ({ id, kind: 'move', slide: target, after, reason, status: 'pending' });
+    const n1 = slide('s_newSlide01', { title: 'Hook' });
+    await store.putLane({
+      ...lane('l_n', [
+        move('c_1', 's4', 's1', 'keeps s4 attached to the read-pattern of s1'),
+        { ...insert('c_2', 's4', n1), reason: 'opens the answer before slide s_newSlide01 lands; Slide s5 follows' },
+        move('c_3', 's2', 's5', 'pushes s_gone000000 out'),
+      ]),
+      label: 'Move s4 next to s1',
+    });
+    const one = await getLane('l_n');
+    expect(one.label).toBe('Move slide 4 next to slide 1');
+    expect(one.changes.map((c) => c.reason)).toEqual([
+      'keeps slide 4 (Title s4) attached to the read-pattern of slide 1 (Title s1)',
+      'opens the answer before the new slide "Hook" lands; Slide 5 (Title s5) follows',
+      'pushes a removed slide out',
+    ]);
+    const listed: Lane[] = (await app.inject({ method: 'GET', url: '/api/lanes' })).json();
+    expect(listed.find((l) => l.id === 'l_n')).toEqual(one);
+    // Numbers follow main: after an accept moves s4 to second place, the reason says slide 2.
+    await store.putLane(lane('l_mv', [move('c_x', 's4', 's1', 'r')]));
+    expect((await accept('l_mv', 'c_x')).statusCode).toBe(200);
+    expect((await getLane('l_n')).changes[0]!.reason).toBe('keeps slide 2 (Title s4) attached to the read-pattern of slide 1 (Title s1)');
+    const stored = (await store.lane('l_n'))!;
+    expect(stored.label).toBe('Move s4 next to s1');
+    expect(stored.changes[0]!.reason).toBe('keeps s4 attached to the read-pattern of s1');
+  });
+
   it('refuse marks the change refused without committing, and closes the lane once nothing is pending', async () => {
     await store.putLane(lane('l_a', [modify('c_1', 's1', 'x'), modify('c_2', 's2', 'y')]));
 

@@ -30,6 +30,25 @@ const THUMB_CHECK_MAX_TURNS = 6;
 export const MAX_LANES_PER_RUN = 3;
 /** The status note of a run on a deck without slides: nothing to judge, so no model call. */
 export const NO_SLIDES_NOTE = 'no slides yet';
+/** The status note of a deck-wide arc, order or gaps run held while the deck is young or its outline is being drafted. */
+export const WAITING_NOTE = 'waiting for the outline';
+/** Below this many slides on main, a deck has no arc yet to judge: arc, order and gaps wait. */
+export const MIN_SLIDES_FOR_ARC = 4;
+/** Checks that judge the deck as a whole: what a young or drafting deck holds back. */
+const ARC_CHECKS: ReadonlySet<CheckName> = new Set(['arc', 'order', 'gaps']);
+
+/**
+ * True while the narrative checks would only judge a deck that is not there yet: main has fewer than
+ * MIN_SLIDES_FOR_ARC slides, or a lane of the creator's (open, or a draft) anchored on the arc still has pending
+ * inserts (an outline being accepted slide by slide). A lane a check proposed does not count: it is closed only by a
+ * later run of its check, which this would hold forever.
+ */
+export function waitingForOutline(main: Snapshot, lanes: readonly Lane[]): boolean {
+  if (main.order.length < MIN_SLIDES_FOR_ARC) return true;
+  return lanes.some(
+    (l) => l.status !== 'closed' && l.origin === 'user' && l.anchor.kind === 'arc' && l.changes.some((c) => c.kind === 'insert' && c.status === 'pending'),
+  );
+}
 
 /**
  * What the runner remembers across restarts, in the deck's cache dir: when each check last ended, and for the
@@ -84,6 +103,23 @@ function bestMatch<T extends { anchor: Anchor; text: string }>(it: { anchor: Anc
     if (!sameFinding(it, r)) continue;
     const s = similarity(it.text, r.text);
     if (s > score) {
+      best = r;
+      score = s;
+    }
+  }
+  return best;
+}
+/**
+ * The most similar range remark of `pool` reporting the same problem as `it` whatever their anchors: a re-run of a
+ * deck-wide check often re-reports a range finding on other bounds (slides moved, the model framed it anew).
+ */
+function bestRangeMatch<T extends { anchor: Anchor; text: string }>(it: { text: string }, pool: readonly T[]): T | undefined {
+  let best: T | undefined;
+  let score = SAME_REMARK_SIMILARITY;
+  for (const r of pool) {
+    if (r.anchor.kind !== 'range') continue;
+    const s = similarity(it.text, r.text);
+    if (s >= score) {
       best = r;
       score = s;
     }
@@ -390,6 +426,11 @@ export class CheckRunner {
         await this.stamp(name, NO_SLIDES_NOTE);
       }
     }
+    if (ARC_CHECKS.has(name) && (!scope || scope.kind === 'arc') && waitingForOutline(main, await store.lanes())) {
+      // No model call, and the check's remarks stay as they are: the run resumes once the outline is in.
+      await this.stamp(name, WAITING_NOTE);
+      return { remarks: [], lanes: [] };
+    }
     let ids = scope ? slidesInRange(main.order, scope) : main.order;
     let scopeIds: ReadonlySet<SlideId> | null = scope && scope.kind !== 'arc' ? new Set(ids) : null;
     let afterSuccess: (() => Promise<void>) | undefined;
@@ -555,6 +596,15 @@ export class CheckRunner {
     return lane.status === 'open' || lane.changes.some((c) => c.status === 'accepted' || c.status === 'refused');
   }
 
+  /**
+   * An open range remark of the check about main, in a deck-wide run: the run re-judges it whatever the creator did
+   * with it (a range finding goes stale as slides move, and its wording with it). Found again, by similarity, it keeps
+   * its id and lane; not found again, it is resolved (see persist).
+   */
+  private sweptRange(t: Target, r: Remark, origin: Origin): boolean {
+    return t.laneId === null && t.scopeIds === null && r.origin === origin && !r.sourceLaneId && r.status === 'open' && r.anchor.kind === 'range';
+  }
+
   /** Is `r` one of the remarks this run supersedes? */
   private async owned(t: Target, r: Remark, origin: Origin): Promise<boolean> {
     if (r.origin !== origin) return false;
@@ -572,17 +622,27 @@ export class CheckRunner {
     // A remark main no longer matches (resolved as stale when main moved, see resolveStaleRemarks) is superseded by
     // the check's next deck-wide run: the run reports on the deck as it is now.
     if (t.laneId === null && t.scopeIds === null && anchorIsStale(t.order, r.anchor)) return true;
+    if (this.sweptRange(t, r, origin)) return true;
     if (await this.actedOn(r, origin)) return false;
     if (t.laneId !== null || t.scopeIds === null) return true;
     const ids = r.anchor.kind === 'range' ? slidesInRange([...t.order], r.anchor) : anchorIds(r.anchor);
     return ids.some((id) => t.scopeIds!.has(id));
   }
 
-  private async split(t: Target, remarks: readonly Remark[], origin: Origin): Promise<{ kept: Remark[]; replaced: Remark[] }> {
+  /** `acted`: the swept range remarks the creator acted on (they would have been kept before a sweep). */
+  private async split(t: Target, remarks: readonly Remark[], origin: Origin): Promise<{ kept: Remark[]; replaced: Remark[]; acted: Set<string> }> {
     const kept: Remark[] = [];
     const replaced: Remark[] = [];
-    for (const r of remarks) ((await this.owned(t, r, origin)) ? replaced : kept).push(r);
-    return { kept, replaced };
+    const acted = new Set<string>();
+    for (const r of remarks) {
+      if (!(await this.owned(t, r, origin))) {
+        kept.push(r);
+        continue;
+      }
+      replaced.push(r);
+      if (this.sweptRange(t, r, origin) && (await this.actedOn(r, origin))) acted.add(r.id);
+    }
+    return { kept, replaced, acted };
   }
 
   /**
@@ -616,6 +676,8 @@ export class CheckRunner {
     // below re-reads them under the lock and closes any draft that ends up unreferenced.
     const before = await this.split(t, await store.remarks(), origin);
     const keptBefore = before.kept.filter(sameOwner);
+    // Swept range remarks whose lane the creator opened: a finding they report again keeps that lane, no new draft.
+    const actedBefore = before.replaced.filter((r) => before.acted.has(r.id));
     const reusable: { anchor: Anchor; text: string; laneId: string }[] = [];
     for (const r of before.replaced) {
       if (!r.laneId) continue;
@@ -629,7 +691,7 @@ export class CheckRunner {
     let overCap = 0;
     for (const it of fresh) {
       laneIds.push(null);
-      if (!t.allowLanes || bestMatch(it, keptBefore)) continue;
+      if (!t.allowLanes || bestMatch(it, keptBefore) || bestMatch(it, actedBefore) || bestRangeMatch(it, actedBefore)) continue;
       const reuse = bestMatch(
         it,
         reusable.filter((x) => !reused.has(x.laneId)),
@@ -658,14 +720,15 @@ export class CheckRunner {
 
     const now = new Date().toISOString();
     const out = await store.withLock(async () => {
-      const { kept, replaced } = await this.split(t, await store.remarks(), origin);
+      const { kept, replaced, acted } = await this.split(t, await store.remarks(), origin);
       const keptNow = kept.filter(sameOwner);
-      // Each superseded remark is claimed by at most one new remark: the most similar report of the same finding.
+      // Each superseded remark is claimed by at most one new remark: the most similar report of the same finding, on
+      // the same anchor, or for a range remark on any anchor.
       const unclaimed = [...replaced];
       const remarks: Remark[] = [];
       fresh.forEach((it, k) => {
         if (bestMatch(it, keptNow)) return;
-        const was = bestMatch(it, unclaimed);
+        const was = bestMatch(it, unclaimed) ?? bestRangeMatch(it, unclaimed.filter((r) => this.sweptRange(t, r, origin) && !anchorIsStale(t.order, r.anchor)));
         if (was) unclaimed.splice(unclaimed.indexOf(was), 1);
         remarks.push({
           id: was?.id ?? newId('r'),
@@ -674,7 +737,8 @@ export class CheckRunner {
           origin,
           severity: it.severity,
           status: 'open',
-          laneId: laneIds[k] ?? null,
+          // A lane the creator opened from the remark stays attached to the finding it answers.
+          laneId: (was && acted.has(was.id) ? was.laneId : null) ?? laneIds[k] ?? null,
           ...(source !== null ? { sourceLaneId: source } : {}),
           // A problem found again (even reworded) is as old as its first report: the UI reads createdAt to mark what is new.
           createdAt: was?.createdAt ?? now,
@@ -691,7 +755,10 @@ export class CheckRunner {
         await store.putLane({ ...lane, status: 'closed' });
         closedIds.push(id);
       }
-      const next = [...kept, ...remarks];
+      // A range remark the creator acted on and the run did not find again is resolved, not dropped: its lane stays
+      // theirs, and the remark no longer claims a problem the deck may not have any more.
+      const resolved = unclaimed.flatMap((r) => (acted.has(r.id) ? [{ ...r, status: 'resolved' as const }] : []));
+      const next = [...kept, ...resolved, ...remarks];
       await store.putRemarks(resolveLaneRemarks(next, closedIds) ?? next);
       return { remarks, closedIds };
     });

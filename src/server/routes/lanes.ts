@@ -1,6 +1,7 @@
 import { access } from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import type { Change, Lane } from '../../model/types.js';
+import { nameSlides } from '../../agent/checks/index.js';
+import type { Change, Lane, Snapshot } from '../../model/types.js';
 import { deckOf } from '../deckRequest.js';
 import type { DeckServices } from '../deckServices.js';
 import { LaneError } from '../laneService.js';
@@ -36,6 +37,28 @@ export function withVariants(lanes: readonly Lane[], open: readonly Lane[]): Lan
   }));
 }
 
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * A lane as the creator reads it, computed at read time like remarks (the store keeps what was written): slide ids in
+ * its label and change reasons become "slide N" / "slide N (title)" in main's current order, and a slide only this
+ * lane inserts reads as the new slide "title" (main does not number it yet).
+ */
+export function presentLane<L extends Lane>(lane: L, main: Snapshot): L {
+  const inserted = lane.changes.flatMap((c) => (c.kind === 'insert' && !main.order.includes(c.slide.id) ? [c.slide] : []));
+  const name = (text: string, titles: boolean): string => {
+    const own = inserted.reduce(
+      (t, s) =>
+        t.replace(new RegExp(`(\\b[Ss]lides?\\s+)?(?<![A-Za-z0-9_-])${escapeRe(s.id)}(?![A-Za-z0-9_-])`, 'g'), (_m, word: string | undefined) =>
+          `${word?.startsWith('S') ? 'The' : 'the'} new slide "${s.title}"`,
+        ),
+      text,
+    );
+    return nameSlides(own, main, { titles });
+  };
+  return { ...lane, label: name(lane.label, false), changes: lane.changes.map((c) => ({ ...c, reason: name(c.reason, true) })) };
+}
+
 export function laneRoutes(app: FastifyInstance): void {
   // Preview renders in flight, by hash, per deck.
   const inflightOf = new WeakMap<DeckServices, Set<string>>();
@@ -59,14 +82,16 @@ export function laneRoutes(app: FastifyInstance): void {
     const deck = deckOf(req);
     // Main may have moved without this process rebasing yet (debounce pending, another writer): judge on it first.
     await deck.lanes.syncWithMain();
-    const all = await deck.store.lanes();
+    const [all, main] = await Promise.all([deck.store.lanes(), deck.store.snapshot()]);
     const open = all.filter((l) => l.status === 'open');
-    return withVariants(status === 'all' ? all : all.filter((l) => l.status === status), open);
+    return withVariants(status === 'all' ? all : all.filter((l) => l.status === status), open).map((l) => presentLane(l, main));
   });
 
   app.post<{ Params: Params }>('/api/lanes/:id/open', async (req, reply) => {
     try {
-      return await deckOf(req).lanes.open(req.params.id);
+      const { lanes, store } = deckOf(req);
+      const lane = await lanes.open(req.params.id);
+      return presentLane(lane, await store.snapshot());
     } catch (err) {
       return fail(reply, err);
     }
@@ -77,13 +102,16 @@ export function laneRoutes(app: FastifyInstance): void {
     await lanes.syncWithMain();
     const lane = await store.lane(req.params.id);
     if (!lane) return reply.code(404).send({ error: `unknown lane ${req.params.id}` });
-    const open = (await store.lanes()).filter((l) => l.status === 'open');
-    return withVariants([lane], open)[0];
+    const [all, main] = await Promise.all([store.lanes(), store.snapshot()]);
+    const open = all.filter((l) => l.status === 'open');
+    return presentLane(withVariants([lane], open)[0]!, main);
   });
 
   app.post<{ Params: ChangeParams }>('/api/lanes/:id/changes/:cid/accept', async (req, reply) => {
     try {
-      return await deckOf(req).lanes.accept(req.params.id, req.params.cid);
+      const { lanes, store } = deckOf(req);
+      const out = await lanes.accept(req.params.id, req.params.cid);
+      return { ...out, lane: presentLane(out.lane, await store.snapshot()) };
     } catch (err) {
       return fail(reply, err);
     }
@@ -91,7 +119,9 @@ export function laneRoutes(app: FastifyInstance): void {
 
   app.post<{ Params: ChangeParams }>('/api/lanes/:id/changes/:cid/refuse', async (req, reply) => {
     try {
-      return await deckOf(req).lanes.refuse(req.params.id, req.params.cid);
+      const { lanes, store } = deckOf(req);
+      const lane = await lanes.refuse(req.params.id, req.params.cid);
+      return presentLane(lane, await store.snapshot());
     } catch (err) {
       return fail(reply, err);
     }
