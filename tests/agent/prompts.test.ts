@@ -267,9 +267,23 @@ describe('an empty deck', () => {
     expect(rule).toMatch(/default theme: a \.content block holding a \.big claim and a \.cap line/);
     expect(rule).toMatch(/\.code card when the creator asks for code/);
     expect(rule).toMatch(/never a bullet list and never markdown/i);
-    expect(rule).toMatch(/images only when the creator asks for them \(generate_image\), or when a slide is a diagram by nature and the brief has an image style/i);
+    expect(rule).toMatch(/no images while drafting/i);
     expect(rule).toMatch(/names the outline in one line, then gives the slide titles in deck order, one per line, and nothing else/);
     expect(rule).toMatch(/audience, its message, its pattern and its abstract/);
+  });
+});
+
+describe('QA5 drafting speed', () => {
+  it('the drafting rule writes the outline lane first, without rendering or images, with short bodies', () => {
+    const at = SYSTEM_APPEND.indexOf('# Drafting');
+    const rule = SYSTEM_APPEND.slice(at, SYSTEM_APPEND.indexOf('\n# ', at + 1));
+    expect(rule).toMatch(/write the outline lane first: one propose_lane call where every slide has a title, a story line, speaker notes and a short body/i);
+    expect(rule).toMatch(/never call render_slide while drafting: render_slide is for revisions/i);
+    expect(rule).toMatch(/no images while drafting \(no generate_image\)/i);
+    expect(rule).toMatch(/under 600 characters/);
+    expect(rule).not.toMatch(/Render one slide of each layout/);
+    // The composition rule that asks for a render before proposing leaves drafting out.
+    expect(SYSTEM_APPEND).toMatch(/Use render_slide to look at a slide before proposing it \(except while drafting\)/);
   });
 });
 

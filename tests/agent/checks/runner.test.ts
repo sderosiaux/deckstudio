@@ -355,7 +355,8 @@ describe('CheckRunner', () => {
     expect((await store.remarks()).map((x) => [x.text, x.laneId, x.status])).toEqual([['title overflows', 'l1', 'open']]);
   });
 
-  const move = (slideId: string, label: string) => ({ label, anchor: { kind: 'slide', slide: slideId }, changes: [{ kind: 'move', slide: slideId, after: null, reason: 'r' }] });
+  // A real move for every slide (s1 already sits first: it moves after s2), never a no-op a lane would drop.
+  const move = (slideId: string, label: string) => ({ label, anchor: { kind: 'slide', slide: slideId }, changes: [{ kind: 'move', slide: slideId, after: slideId === 's1' ? 's2' : null, reason: 'r' }] });
   const item = (slideId: string, text: string, lane: object | null = null) => ({ anchor: { kind: 'slide', slide: slideId }, severity: 'warn', text, lane });
 
   it('creates at most 3 lanes per run: the other remarks keep lane null', async () => {
@@ -640,6 +641,110 @@ describe('CheckRunner', () => {
     expect(fake.calls).toHaveLength(1);
     expect(again.status().note?.arc).toBeNull();
     expect(again.status().note?.gaps).toBe('no slides yet');
+  });
+
+  describe('QA5 a young or drafting deck', () => {
+    const outlineLane = (over: Partial<Lane> = {}): Lane => ({
+      id: 'l_outline',
+      label: 'Outline',
+      anchor: { kind: 'arc' },
+      origin: 'user',
+      baseVersion: 1,
+      changes: [{ id: 'c_n6', kind: 'insert', after: 's5', slide: slide('n6'), reason: 'r', status: 'pending' }],
+      status: 'open',
+      createdAt: new Date().toISOString(),
+      ...over,
+    });
+
+    it('fewer than 4 slides: arc, order and gaps wait for the outline without a model call; render still runs on the slides there', async () => {
+      await store.commit(snap(five.slice(0, 3)), { kind: 'import' });
+      const { r, calls } = runner([JSON.stringify({ remarks: [] })]);
+      for (const name of ['arc', 'order', 'gaps'] as const) {
+        expect(await r.run(name)).toEqual({ remarks: [], lanes: [] });
+        expect(r.status().note?.[name]).toBe('waiting for the outline');
+        expect(r.status().lastRun[name]).toMatch(/^\d{4}-/);
+      }
+      expect(calls).toEqual([]);
+      await thumbs.start();
+      await r.run('render');
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.prompt).toContain('id=s3');
+      expect(r.status().note?.render).toBeNull();
+      // The fourth slide lands: the narrative checks run again.
+      await store.commit(snap(five.slice(0, 4)), { kind: 'import' });
+      await r.run('arc');
+      expect(calls).toHaveLength(2);
+      expect(r.status().note?.arc).toBeNull();
+    });
+
+    it('an open or draft user lane on the arc with pending inserts holds arc, order and gaps until it is decided', async () => {
+      await store.putLane(outlineLane());
+      const { r, calls } = runner([JSON.stringify({ remarks: [] })]);
+      await r.run('gaps');
+      expect(calls).toEqual([]);
+      expect(r.status().note?.gaps).toBe('waiting for the outline');
+      await store.putLane(outlineLane({ status: 'draft' }));
+      await r.run('order');
+      expect(calls).toEqual([]);
+      // A lane on a range, or one with no pending insert left, does not hold the checks.
+      await store.putLane(outlineLane({ anchor: { kind: 'range', from: 's1', to: 's5' } }));
+      await r.run('order');
+      expect(calls).toHaveLength(1);
+      await store.putLane(outlineLane({ changes: [{ ...outlineLane().changes[0]!, status: 'refused' }, { id: 'c_m', kind: 'modify', slide: 's1', patch: { title: 'x' }, reason: 'r', status: 'pending' }] }));
+      await r.run('arc');
+      expect(calls).toHaveLength(2);
+      expect(r.status().note?.arc).toBeNull();
+    });
+
+    it('a draft a check proposed on the arc with an insert does not hold the checks (it would never be superseded)', async () => {
+      await store.putLane(outlineLane({ origin: 'check:gaps', status: 'draft' }));
+      const { r, calls } = runner([JSON.stringify({ remarks: [] })]);
+      await r.run('arc');
+      expect(calls).toHaveLength(1);
+    });
+  });
+
+  describe('QA5 stale range remarks across re-runs', () => {
+    const range = (from: string, to: string) => ({ kind: 'range', from, to });
+    const rangeItem = (from: string, to: string, text: string, lane: object | null = null) => ({ anchor: range(from, to), severity: 'warn', text, lane });
+
+    it('a deck-wide run resolves an old range remark it does not find again, even one whose lane the creator opened', async () => {
+      const fix = { label: 'Pull s4 forward', anchor: range('s2', 's4'), changes: [{ kind: 'move', slide: 's4', after: 's1', reason: 'r' }] };
+      const first = await runner([JSON.stringify({ remarks: [rangeItem('s2', 's4', 'The deck spends twelve slides before the memory answer.', fix), rangeItem('s3', 's5', 'Tension without resolution in the middle.')] })]).r.run('arc');
+      const [opened, plain] = first.remarks;
+      // The creator opens the draft: the remark now reads "lane ready".
+      await new LaneService(store, bus).open(opened!.laneId!);
+      await runner([JSON.stringify({ remarks: [rangeItem('s1', 's2', 'The hook makes no claim.')] })]).r.run('arc');
+      const after = await store.remarks();
+      expect(after.find((x) => x.id === opened!.id)?.status).toBe('resolved');
+      expect(after.filter((x) => x.id === plain!.id && x.status === 'open')).toEqual([]);
+      expect(after.filter((x) => x.status === 'open').map((x) => x.text)).toEqual(['The hook makes no claim.']);
+      // The lane the creator opened is theirs: it stays open.
+      expect((await store.lane(opened!.laneId!))!.status).toBe('open');
+    });
+
+    it('a re-found range finding with a new range keeps the old remark (id, createdAt, opened lane) instead of a twin', async () => {
+      const fix = { label: 'Pull s4 forward', anchor: range('s2', 's4'), changes: [{ kind: 'move', slide: 's4', after: 's1', reason: 'r' }] };
+      const first = await runner([JSON.stringify({ remarks: [rangeItem('s2', 's4', 'The memory answer comes too late: the coordination thread cuts the decomposition.', fix)] })]).r.run('arc');
+      const old = first.remarks[0]!;
+      await new LaneService(store, bus).open(old.laneId!);
+      const again = { ...fix, label: 'Pull s5 forward', anchor: range('s3', 's5'), changes: [{ kind: 'move', slide: 's5', after: 's1', reason: 'r' }] };
+      await runner([JSON.stringify({ remarks: [rangeItem('s3', 's5', 'The memory answer comes too late: the coordination thread cuts the decomposition again.', again)] })]).r.run('arc');
+      const open = (await store.remarks()).filter((x) => x.status === 'open');
+      expect(open).toHaveLength(1);
+      expect(open[0]).toMatchObject({ id: old.id, createdAt: old.createdAt, laneId: old.laneId, anchor: range('s3', 's5') });
+      // The creator's lane answers the finding: no second draft for it.
+      expect((await store.lanes()).map((l) => [l.id, l.status])).toEqual([[old.laneId, 'open']]);
+    });
+
+    it('a slide-scoped run, and remarks on a slide, keep the old rules', async () => {
+      await runner([JSON.stringify({ remarks: [rangeItem('s2', 's4', 'Range finding.'), item('s5', 'Slide finding.')] })]).r.run('order');
+      const resolvedByCreator = (await store.remarks())[0]!;
+      await store.putRemarks((await store.remarks()).map((x) => (x.id === resolvedByCreator.id ? { ...x, status: 'resolved' as const } : x)));
+      await runner([JSON.stringify({ remarks: [] })]).r.run('order');
+      // The creator's own resolution stays as it is; a slide remark no longer found is superseded as before.
+      expect((await store.remarks()).map((x) => [x.text, x.status])).toEqual([['Range finding.', 'resolved']]);
+    });
   });
 
   it('trigger rejects an unknown check name', () => {

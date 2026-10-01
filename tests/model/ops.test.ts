@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyChange, diffVersions, rebaseLane, slidesInRange, validateBody, type Snapshot } from '../../src/model/ops.js';
+import { applyChange, changesNothing, diffVersions, rebaseLane, slidesInRange, validateBody, type Snapshot } from '../../src/model/ops.js';
 import { hashSlide, newId } from '../../src/model/ids.js';
 import type { Change, Lane, Slide } from '../../src/model/types.js';
 
@@ -163,15 +163,16 @@ describe('rebaseLane', () => {
     expect(rebaseLane(b, fixture(), fixture()).lane.changes.map((c) => c.status)).toEqual(['pending', 'pending']);
   });
 
-  it('a move whose slide already sits at its target on main is already on main; a real move stays pending', () => {
-    // fixture order: s1 s2 s3 s4 s5. s3 already sits after s2; s1 already first.
+  it('a move whose slide main put at its target since the lane was proposed is already on main; a real move stays pending', () => {
+    // At the lane's base s3 and s1 sat elsewhere; main (fixture order s1 s2 s3 s4 s5) has since put them in place.
+    const v1: Snapshot = { ...fixture(), order: ['s2', 's1', 's4', 's3', 's5'] };
     const b = lane([
       { id: 'b1', kind: 'move', slide: 's3', after: 's2', ...base },
       { id: 'b2', kind: 'move', slide: 's1', after: null, ...base },
       { id: 'b3', kind: 'move', slide: 's5', after: 's1', ...base },
       { id: 'b4', kind: 'modify', slide: 's4', patch: { title: 'x' }, ...base },
     ]);
-    const r = rebaseLane(b, fixture(), fixture());
+    const r = rebaseLane(b, fixture(), v1);
     expect(statuses(r.lane)).toEqual([
       ['b1', 'accepted'],
       ['b2', 'accepted'],
@@ -201,6 +202,65 @@ describe('rebaseLane', () => {
       ['b1', 'pending'],
       ['b2', 'pending'],
     ]);
+  });
+
+  describe('QA5 a refusal never makes the next moves "already on main"', () => {
+    // The lane pulls the block s4 s5 s6 forward, chained: s4 after s1, then s5 after s4, then s6 after s5.
+    // On main s5 already follows s4 and s6 follows s5: those moves only mean something after the first one.
+    const v1: Snapshot = { order: ['s1', 's2', 's3', 's4', 's5', 's6', 's7'], slides: Object.fromEntries(['s1', 's2', 's3', 's4', 's5', 's6', 's7'].map((id) => [id, slide(id)])) };
+    const chain = (a: Change['status'], b: Change['status'] = 'pending'): Lane =>
+      lane([
+        { id: 'A', kind: 'move', slide: 's4', after: 's1', reason: 'r', status: a },
+        { id: 'B', kind: 'move', slide: 's5', after: 's4', reason: 'r', status: b },
+        { id: 'C', kind: 'move', slide: 's6', after: 's5', ...base },
+      ]);
+
+    it('all pending: the chained moves stay pending', () => {
+      const r = rebaseLane(chain('pending'), v1, v1);
+      expect(statuses(r.lane)).toEqual([
+        ['A', 'pending'],
+        ['B', 'pending'],
+        ['C', 'pending'],
+      ]);
+    });
+
+    it('refuse A: B and C stay pending, with no cause', () => {
+      const r = rebaseLane(chain('refused'), v1, v1);
+      expect(statuses(r.lane)).toEqual([
+        ['A', 'refused'],
+        ['B', 'pending'],
+        ['C', 'pending'],
+      ]);
+      expect(r.causes).toEqual({});
+    });
+
+    it('refuse A, then accept B (main unchanged by it): C stays pending', () => {
+      const r = rebaseLane(chain('refused', 'accepted'), ok(applyChange(v1, chain('refused').changes[1]!)), v1);
+      expect(statuses(r.lane)).toEqual([
+        ['A', 'refused'],
+        ['B', 'accepted'],
+        ['C', 'pending'],
+      ]);
+      expect(r.causes).toEqual({});
+    });
+
+    it('accept A, then refuse B: C stays pending (the QA5 focus repro)', () => {
+      const main = ok(applyChange(v1, chain('pending').changes[0]!));
+      const r = rebaseLane(chain('accepted', 'refused'), main, v1);
+      expect(statuses(r.lane).at(-1)).toEqual(['C', 'pending']);
+      expect(r.causes).toEqual({});
+    });
+
+    it('a chained move main really took meanwhile is still already on main', () => {
+      // Another lane moved the whole block: main now holds every move of this lane.
+      const main: Snapshot = { ...v1, order: ['s1', 's4', 's5', 's6', 's2', 's3', 's7'] };
+      const r = rebaseLane(chain('pending'), main, v1);
+      expect(statuses(r.lane)).toEqual([
+        ['A', 'accepted'],
+        ['B', 'accepted'],
+        ['C', 'accepted'],
+      ]);
+    });
   });
 
   it('QA3 stale modify: v1 title A, the lane sets B, main changed it to C: orphan with the field and the base version', () => {
@@ -398,5 +458,19 @@ describe('chained inserts on an empty deck (an outline lane)', () => {
     expect(r.causes).toEqual({});
     const main2 = ok(applyChange(main1, outline[1]!));
     expect(ok(applyChange(main2, outline[2]!)).order).toEqual(['n1', 'n2', 'n3']);
+  });
+});
+
+describe('changesNothing (QA5: no-op changes are never proposed)', () => {
+  it('a move to where the slide already sits, a modify to the values it holds, an identical insert change nothing', () => {
+    const snap = fixture();
+    expect(changesNothing(snap, { ...base, id: 'c', kind: 'move', slide: 's3', after: 's2' })).toBe(true);
+    expect(changesNothing(snap, { ...base, id: 'c', kind: 'move', slide: 's1', after: null })).toBe(true);
+    expect(changesNothing(snap, { ...base, id: 'c', kind: 'move', slide: 's3', after: 's4' })).toBe(false);
+    expect(changesNothing(snap, { ...base, id: 'c', kind: 'modify', slide: 's2', patch: { title: 'Title s2' } })).toBe(true);
+    expect(changesNothing(snap, { ...base, id: 'c', kind: 'modify', slide: 's2', patch: { title: 'Title s2', notes: 'new' } })).toBe(false);
+    expect(changesNothing(snap, { ...base, id: 'c', kind: 'insert', after: 's1', slide: { ...slide('n1'), title: 'Title s2', story: 'story s2', body: '<div>s2</div>' } })).toBe(true);
+    expect(changesNothing(snap, { ...base, id: 'c', kind: 'insert', after: 's1', slide: slide('n1') })).toBe(false);
+    expect(changesNothing(snap, { ...base, id: 'c', kind: 'remove', slide: 's2' })).toBe(false);
   });
 });

@@ -5,7 +5,7 @@ import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@
 import { z } from 'zod';
 import { newId } from '../model/ids.js';
 import { imageStyleFor, type ImageGen } from './imageGen.js';
-import { applyChange, orderedAnchor, validateBody } from '../model/ops.js';
+import { applyChange, changesNothing, orderedAnchor, validateBody } from '../model/ops.js';
 import { AddRemarkInputSchema, NewChangeSchema, ProposeLaneInputSchema, SlideKindSchema, type NewChange } from '../model/schema.js';
 import type { Anchor, Change, Lane, Origin, Remark, Snapshot } from '../model/types.js';
 import { loadThemeCss } from '../render/defaultTheme.js';
@@ -387,6 +387,53 @@ function replay(snap: Snapshot, changes: Change[], sourceIndex: number[]): Inval
   return invalid;
 }
 
+/** Why a no-op change was left out of a lane, in the model's terms. */
+function noOpReason(c: Change): string {
+  switch (c.kind) {
+    case 'move':
+      return `changes nothing: slide ${c.slide} already sits ${c.after === null ? 'first' : `right after ${c.after}`} at that point of the lane`;
+    case 'modify':
+      return `changes nothing: slide ${c.slide} already has these values (${Object.keys(c.patch).join(', ')}) at that point of the lane`;
+    case 'insert':
+      return `changes nothing: an identical slide already sits ${c.after === null ? 'first' : `right after ${c.after}`} at that point of the lane`;
+    case 'remove':
+      return 'changes nothing';
+  }
+}
+
+/** Slide ids a change names (its target, its after). */
+const namedSlides = (c: Change): string[] =>
+  c.kind === 'insert' ? (c.after === null ? [] : [c.after]) : c.kind === 'move' ? [c.slide, ...(c.after === null ? [] : [c.after])] : [c.slide];
+
+/**
+ * Leaves out the pending changes from the input that would change nothing where they apply: on `snap` with the
+ * lane's earlier pending changes applied, in lane order. A lane never offers the creator a change that does nothing
+ * (accepting it would commit an empty version; the rebase could only call it "already on main"). An insert another
+ * change names stays: dropping it would break that change. Changes kept as they were (sourceIndex -1) are left to the
+ * rebase. Changes that fail to apply are left for the replay to report.
+ */
+function dropNoOps(snap: Snapshot, changes: readonly Change[], sourceIndex: readonly number[]): { changes: Change[]; sourceIndex: number[]; dropped: Invalid[] } {
+  const named = new Set(changes.flatMap(namedSlides));
+  const out: Change[] = [];
+  const outIndex: number[] = [];
+  const dropped: Invalid[] = [];
+  let sim = snap;
+  changes.forEach((c, i) => {
+    const index = sourceIndex[i]!;
+    if (c.status === 'pending' && index >= 0 && changesNothing(sim, c) && !(c.kind === 'insert' && named.has(c.slide.id))) {
+      dropped.push({ index, reason: noOpReason(c) });
+      return;
+    }
+    if (c.status === 'pending') {
+      const r = applyChange(sim, c);
+      if (r.ok) sim = r.next;
+    }
+    out.push(c);
+    outIndex.push(index);
+  });
+  return { changes: out, sourceIndex: outIndex, dropped };
+}
+
 const rejected = (invalid: Invalid[]): ToolError => ({
   error: `Rejected: ${invalid.length} change(s) invalid; nothing was saved. Fix the listed changes (index is 0-based in the changes array) and call again.`,
   invalid,
@@ -403,8 +450,16 @@ async function createLocked(ctx: LockedStore, input: ProposeLaneInput, as: { ori
   const [state, snap] = await Promise.all([store.state(), store.snapshot()]);
   const anchorErr = anchorProblem(snap, input.anchor);
   if (anchorErr) return { error: `Rejected; nothing was saved: ${anchorErr}`, invalid: [] };
-  const { changes, invalid } = checkChanges(snap, input.changes);
-  if (invalid.length) return rejected(invalid);
+  const checked = checkChanges(snap, input.changes);
+  if (checked.invalid.length) return rejected(checked.invalid);
+  const { changes, dropped } = dropNoOps(
+    snap,
+    checked.changes,
+    checked.changes.map((_, i) => i),
+  );
+  if (changes.length === 0) {
+    return { error: 'Rejected: every change leaves the deck as it is; nothing was saved. Propose only changes that move, edit, add or remove something.', dropped };
+  }
   const lane: Lane = {
     id: newId('l'),
     label: input.label,
@@ -417,7 +472,7 @@ async function createLocked(ctx: LockedStore, input: ProposeLaneInput, as: { ori
   };
   await store.putLane(lane);
   bus.emit({ type: 'lane.created', laneId: lane.id });
-  return { laneId: lane.id, changes: changes.map(described) };
+  return { laneId: lane.id, changes: changes.map(described), dropped };
 }
 
 /** Call under the deck lock: merges a revision into a lane that is not closed, validated against current main. */
@@ -439,20 +494,25 @@ async function reviseLocked(ctx: LockedStore, lane: Lane, input: RevisedChange[]
     return reasons.length ? [{ index, reason: reasons.join('; ') }] : [];
   });
   if (refs.length) return rejected(refs);
+  // A revised or added change that does nothing where it lands is left out (a revised one leaves the lane).
+  const live = dropNoOps(snap, plan.changes, plan.sourceIndex);
+  const dropped = live.dropped.map((x) => ({ ...x, reason: named(x.reason, bound.names) }));
+  const left = new Set(live.changes.map((c) => c.id));
   // The pending changes replay in lane order on current main, so a revision that contradicts a kept change is caught.
-  const conflicts = replay(snap, plan.changes, plan.sourceIndex).map((x) => ({ ...x, reason: named(x.reason, bound.names) }));
+  const conflicts = replay(snap, live.changes, live.sourceIndex).map((x) => ({ ...x, reason: named(x.reason, bound.names) }));
   if (conflicts.length) return rejected(conflicts);
   // Validated against the current main, so the lane now bases on it.
-  const next: Lane = { ...lane, baseVersion: state.version, changes: plan.changes };
+  const next: Lane = { ...lane, baseVersion: state.version, changes: live.changes };
   await store.putLane(next);
   bus.emit({ type: 'lane.updated', laneId: lane.id });
   return {
     laneId: lane.id,
     kept: plan.kept,
-    updated: plan.updated,
-    added: plan.added,
-    dropped: plan.dropped,
-    changes: plan.changes.map(described),
+    updated: plan.updated.filter((id) => left.has(id)),
+    added: plan.added.filter((id) => left.has(id)),
+    discarded: [...plan.dropped, ...plan.updated.filter((id) => !left.has(id))],
+    dropped,
+    changes: live.changes.map(described),
   };
 }
 
@@ -653,6 +713,7 @@ export function makeDeckTools(ctx: DeckToolContext): { server: McpSdkServerConfi
         'Propose a lane: a labelled, coherent set of changes (insert/modify/remove/move) anchored on a slide, a range, or the arc, with a one-line reason per change. Slide ids must exist; insert.after/move.after may be null for "first". ' +
           'To insert several slides in a row (an outline, or a whole deck when it has no slides yet), give each insert a ref ("n1", "n2", ...) and set the after of the next insert to the ref of the one before; the result gives the slideId of every insert. ' +
           'Invalid input is rejected with the offending change indexes and nothing is saved. ' +
+          'A change that would change nothing (a move to where the slide already sits, a modify to the values it holds) is left out and listed under dropped with its index and reason. ' +
           'A proposal that repeats an open lane (same anchor and label, or the same slide field changed by a recent lane on that anchor) revises that lane instead: the result then says revisedExisting. Set alternative: true only when the creator asked for an alternative.',
         ProposeLaneToolSchema.shape,
         wrap(h.propose_lane),
@@ -661,7 +722,7 @@ export function makeDeckTools(ctx: DeckToolContext): { server: McpSdkServerConfi
         'revise_lane',
         'Revise an open lane. Each change revises the pending change it names by id (or, without an id, the one of the same kind on the same slide; a modify patch merges into the old one), or is added. ' +
           'Pending changes you do not mention stay as they are with their ids (keep, the default); replace: true discards them. Accepted and refused changes always stay. ' +
-          'Returns the kept, updated, added and dropped change ids. Use when asked to modify an existing lane.',
+          'Returns the kept, updated and added change ids, the discarded ones (replace, or a revision that would change nothing), and under dropped the input changes left out because they change nothing (index and reason). Use when asked to modify an existing lane.',
         ReviseLaneInputSchema.shape,
         wrap(h.revise_lane),
       ),

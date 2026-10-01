@@ -104,6 +104,15 @@ function alreadyOnMain(main: Snapshot, change: Change, laneInserted: ReadonlySet
   }
 }
 
+/**
+ * True when applying `change` to `snap` would leave it as it is: a move to where the slide already sits, a modify to
+ * the values the slide already holds, an insert of a slide identical to the one already right after its predecessor.
+ * A remove always changes something (or fails). What a proposal must never contain.
+ */
+export function changesNothing(snap: Snapshot, change: Change): boolean {
+  return change.kind !== 'remove' && alreadyOnMain(snap, change, new Set());
+}
+
 /** Fields of a pending modify that main changed since `base` to something else than the patch's value. */
 function staleFields(base: Snapshot, main: Snapshot, change: Change): string[] {
   if (change.kind !== 'modify') return [];
@@ -124,15 +133,19 @@ export interface Rebased {
 }
 
 /**
- * Re-judges the pending changes of `lane` on `main`; `base` is main at the lane's baseVersion. A pending change is:
- * - 'accepted' (cause "already on main") when applying it would leave main as it is;
+ * Re-judges the pending changes of `lane` on `main`; `base` is main at the lane's baseVersion. Each pending change is
+ * judged where it would really apply: on main with the lane's earlier surviving pending changes applied ("sim"). It is:
+ * - 'accepted' (cause "already on main") when it changes nothing on sim, while it did change something on the lane's
+ *   own view (base, plus the lane's accepted changes, plus the same earlier pending changes): main took it meanwhile.
+ *   A change that is a no-op on both is a no-op because of the lane's own decisions (a refused earlier move of a
+ *   chain): it stays pending, never "accepted" on the creator's behalf;
  * - 'orphan' when a slide it references no longer exists, when it is a modify of a field main changed since the
  *   lane's base to another value (it would silently overwrite that change), or a move an earlier pending change of
- *   the lane already makes;
+ *   the lane already makes (a no-op on sim, not on bare main);
  * - left pending otherwise.
  * The lane's own accepted changes count as part of its base, so they never make its other changes stale. A slide
  * inserted by an earlier live change of the same lane counts as existing, so "insert n1, then insert after n1"
- * survives, and a move is judged on main as the lane's earlier pending changes leave it. Decided changes are untouched.
+ * survives. Decided changes are untouched.
  */
 export function rebaseLane(lane: Lane, main: Snapshot, base: Snapshot): Rebased {
   const known = new Set<SlideId>(main.order.filter((id) => Object.hasOwn(main.slides, id)));
@@ -145,23 +158,32 @@ export function rebaseLane(lane: Lane, main: Snapshot, base: Snapshot): Rebased 
     if (r.ok) seen = r.next;
   }
   const causes: Record<string, string> = {};
-  // Main with the lane's surviving pending changes applied so far: where a move would start from.
+  // Main with the lane's surviving pending changes applied so far: where a change would really apply.
   let sim = main;
+  // The lane's own view with the same changes applied: what the change meant when it was proposed.
+  let own = seen;
+  const advance = (c: Change): void => {
+    const r = applyChange(sim, c);
+    if (r.ok) sim = r.next;
+    const o = applyChange(own, c);
+    if (o.ok) own = o.next;
+  };
   const changes = lane.changes.map((c): Change => {
     if (c.status !== 'pending') {
       if (c.kind === 'insert' && c.status === 'accepted' && main.order.includes(c.slide.id)) known.add(c.slide.id);
       return c;
     }
-    // On main, and as the lane's earlier pending changes leave it: an earlier move may still displace this one.
-    if (alreadyOnMain(main, c, laneInserted) && alreadyOnMain(sim, c, laneInserted)) {
+    const noOpHere = alreadyOnMain(sim, c, laneInserted);
+    if (noOpHere && !alreadyOnMain(own, c, laneInserted)) {
       causes[c.id] = ALREADY_ON_MAIN;
+      advance(c);
       return { ...c, status: 'accepted' };
     }
     if (referencedSlides(c).some((id) => !known.has(id))) {
       causes[c.id] = 'a slide it needs is no longer on main';
       return { ...c, status: 'orphan' };
     }
-    if (isNoOpMove(sim, c)) {
+    if (noOpHere && c.kind === 'move' && !isNoOpMove(main, c)) {
       causes[c.id] = 'an earlier change of this lane already puts the slide there';
       return { ...c, status: 'orphan' };
     }
@@ -174,8 +196,7 @@ export function rebaseLane(lane: Lane, main: Snapshot, base: Snapshot): Rebased 
       known.add(c.slide.id);
       laneInserted.add(c.slide.id);
     }
-    const r = applyChange(sim, c);
-    if (r.ok) sim = r.next;
+    advance(c);
     return c;
   });
   return { lane: { ...lane, changes }, causes };

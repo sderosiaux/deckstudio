@@ -189,7 +189,7 @@ describe('deck tools', () => {
       laneId,
       replace: true,
       changes: [{ kind: 'move', slide: 's5', after: 's1', reason: 'close earlier' }],
-    })) as { laneId: string; added: string[]; kept: string[]; updated: string[]; dropped: string[] };
+    })) as { laneId: string; added: string[]; kept: string[]; updated: string[]; discarded: string[] };
     expect(res.laneId).toBe(laneId);
     const after = (await store.lane(laneId))!;
     expect(after.changes.map((c) => [c.kind, c.status])).toEqual([
@@ -197,12 +197,72 @@ describe('deck tools', () => {
       ['move', 'pending'],
     ]);
     expect(after.changes[0]).toEqual(accepted);
-    expect(res).toMatchObject({ kept: [], updated: [], added: [after.changes[1]!.id], dropped: [lane.changes[1]!.id] });
+    expect(res).toMatchObject({ kept: [], updated: [], added: [after.changes[1]!.id], discarded: [lane.changes[1]!.id], dropped: [] });
     expect(events).toContainEqual({ type: 'lane.updated', laneId });
 
     expect(await h.revise_lane({ laneId: 'l_missing', changes: [{ kind: 'remove', slide: 's1', reason: 'r' }] })).toMatchObject({
       error: expect.stringContaining('l_missing'),
     });
+  });
+
+  it('QA5 propose_lane drops no-op changes (a move in place, a modify to the same values, an identical insert) and says why', async () => {
+    const h = makeDeckToolHandlers(ctx);
+    const res = (await h.propose_lane({
+      label: 'Tidy the middle',
+      anchor: { kind: 'arc' },
+      changes: [
+        { kind: 'move', slide: 's3', after: 's2', reason: 'already there' },
+        { kind: 'move', slide: 's5', after: 's1', reason: 'close earlier' },
+        { kind: 'modify', slide: 's2', patch: { title: 'Title s2' }, reason: 'same title' },
+        // After the move above, s2 follows s5: moving it after s5 changes nothing either.
+        { kind: 'move', slide: 's2', after: 's5', reason: 'in place after the first move' },
+        { kind: 'insert', after: 's3', slide: { title: 'Title s4', story: 'story of s4', notes: '', body: '<p>body s4</p>', assets: [], kind: 'text' }, reason: 'twin of s4' },
+        { kind: 'modify', slide: 's4', patch: { title: 'Sharper' }, reason: 'real edit' },
+      ],
+    })) as { laneId: string; dropped: { index: number; reason: string }[]; changes: unknown[] };
+    expect(res.dropped.map((d) => d.index)).toEqual([0, 2, 3, 4]);
+    for (const d of res.dropped) expect(d.reason).toMatch(/changes nothing/);
+    const lane = (await store.lane(res.laneId))!;
+    expect(lane.changes.map((c) => c.reason)).toEqual(['close earlier', 'real edit']);
+    expect(res.changes).toHaveLength(2);
+
+    const none = (await h.propose_lane({
+      label: 'Nothing',
+      anchor: { kind: 'arc' },
+      changes: [{ kind: 'move', slide: 's1', after: null, reason: 'already first' }],
+    })) as { error: string; dropped: { index: number }[] };
+    expect(none.error).toMatch(/nothing was saved/);
+    expect(none.dropped.map((d) => d.index)).toEqual([0]);
+    expect((await store.lanes()).filter((l) => l.label === 'Nothing')).toEqual([]);
+  });
+
+  it('QA5 revise_lane drops a no-op change: a new move in place, and a revision that moves a slide back where it sits', async () => {
+    const h = makeDeckToolHandlers(ctx);
+    const { laneId } = (await h.propose_lane({
+      label: 'Reorder',
+      anchor: { kind: 'arc' },
+      changes: [
+        { kind: 'move', slide: 's5', after: 's1', reason: 'close earlier' },
+        { kind: 'modify', slide: 's3', patch: { title: 'B' }, reason: 'b' },
+      ],
+    })) as { laneId: string };
+    const before = (await store.lane(laneId))!;
+    const res = (await h.revise_lane({
+      laneId,
+      changes: [
+        { id: before.changes[0]!.id, kind: 'move', slide: 's5', after: 's4', reason: 'back in place' },
+        { kind: 'move', slide: 's3', after: 's2', reason: 'already there' },
+        { kind: 'remove', slide: 's4', reason: 'real' },
+      ],
+    })) as { updated: string[]; added: string[]; dropped: { index: number; reason: string }[] };
+    expect(res.dropped.map((d) => d.index)).toEqual([0, 1]);
+    const after = (await store.lane(laneId))!;
+    expect(after.changes.map((c) => [c.kind, c.reason])).toEqual([
+      ['modify', 'b'],
+      ['remove', 'real'],
+    ]);
+    expect(res.updated).toEqual([]);
+    expect(res.added).toEqual([after.changes[1]!.id]);
   });
 
   it('revise_lane keeps what it is not told to change: one new change keeps the other two with their ids and patches', async () => {
@@ -220,7 +280,7 @@ describe('deck tools', () => {
       kept: string[];
       updated: string[];
       added: string[];
-      dropped: string[];
+      discarded: string[];
     };
     const after = (await store.lane(laneId))!;
     expect(after.changes.slice(0, 2)).toEqual(before.changes);
@@ -230,6 +290,7 @@ describe('deck tools', () => {
       kept: before.changes.map((c) => c.id),
       updated: [],
       added: [after.changes[2]!.id],
+      discarded: [],
       dropped: [],
       changes: after.changes.map((c) => ({ id: c.id, summary: expect.any(String) })),
     });
