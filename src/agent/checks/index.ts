@@ -11,6 +11,11 @@ export interface ChecksStatus {
   running: CheckName[];
   /** When each check's last run ended (ISO), null if it has not run since the server started. */
   lastRun: Record<CheckName, string | null>;
+  /**
+   * What the last run of each check could not do, in words for the creator ("no slides yet"); null after a normal run.
+   * The runner always sets it; optional because the web app also builds statuses of its own (web/src/screens/BriefChecks.tsx).
+   */
+  note?: Record<CheckName, string | null>;
 }
 
 export const CheckResultSchema = z.object({
@@ -153,6 +158,6 @@ NewChange is one of:
   { "kind": "move", "slide": "<slide id>", "after": "<slide id>" | null, "reason": "one line" }
 
 Rules: use only the slide ids listed above ("after": null means first position). Every remark has all four keys. ${laneRule}
-In "text", refer to a slide by its id alone (e.g. "the claim of s_AbCdEfGhIj comes too late"): the creator reads it as "slide N (title)" in the deck order of the moment, so numbers stay right when slides move. "label" names the fix, not the slide: an imperative of what the lane does ("Enlarge the trigger sub-caption", "Define share groups before using them"), never "slide N (title)" alone and never an id. Name the slide in the reason of each change, by its id like in "text".
+In "text", refer to a slide by its id alone (e.g. "the claim of s_AbCdEfGhIj comes too late"): the creator reads it as "slide N (title)" in the deck order of the moment, so numbers stay right when slides move. "label" names the fix, not the slide: an imperative of what the lane does ("Enlarge the caption under the diagram", "Define the term before its first use"), never "slide N (title)" alone and never an id. Name the slide in the reason of each change, by its id like in "text".
 If there is nothing to report, return { "remarks": [] }.`.trim();
 }

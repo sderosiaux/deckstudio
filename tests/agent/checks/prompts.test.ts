@@ -38,3 +38,42 @@ describe('check prompts and the design rules', () => {
     expect(def.buildPrompt(input('')).includes('design-rules')).toBe(false);
   });
 });
+
+describe('check prompts judge any deck against its brief', () => {
+  const defs: [string, CheckDef][] = [
+    ['arc', arc],
+    ['order', order],
+    ['gaps', gaps],
+    ['render', render],
+  ];
+
+  it.each(defs)('%s: no kind of event or topic assumed, no example taken from a particular deck', (_name, def) => {
+    const text = `${def.system}\n${def.buildPrompt(input(rules))}`;
+    expect(text).not.toMatch(/conference|talk\b|technical|kafka|share group|interactive quer|compacted topic|trigger sub-caption/i);
+  });
+
+  it.each(defs.slice(0, 3))('%s: says the brief is the only yardstick', (_name, def) => {
+    expect(def.system).toMatch(/the brief is your only yardstick/i);
+  });
+
+  it('arc: judges opening, progression and landing against the audience, message, abstract and pattern; no fixed slide count', () => {
+    const p = arc.buildPrompt(input(''));
+    expect(p).toMatch(/against its brief: its audience, its message, its abstract and its pattern/);
+    expect(p).toMatch(/Opening:.*this audience/);
+    expect(p).toMatch(/Landing:.*message of the brief/);
+    expect(p).not.toMatch(/first 3 slides|hook/i);
+    expect(p).toMatch(/never report a part as missing because decks of some kind usually have one/i);
+  });
+
+  it('order: what this audience can be assumed to know comes from the brief', () => {
+    expect(order.buildPrompt(input(''))).toMatch(/the audience in the brief/);
+  });
+
+  it('render: judges legibility, and colours, fonts and layout only against the design rules, never a palette of its own', () => {
+    const p = render.buildPrompt(input(rules));
+    expect(p).toMatch(/colours, fonts and layout only against the design rules above/i);
+    expect(p).not.toMatch(/#[0-9A-F]{6}\b/i);
+    const bare = render.buildPrompt(input(''));
+    expect(bare).toMatch(/no design rules: judge legibility and composition only, never a palette or a style of your own/i);
+  });
+});

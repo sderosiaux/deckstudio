@@ -369,3 +369,34 @@ describe('slidesInRange', () => {
     expect(slidesInRange(order, { kind: 'arc' })).toEqual(order);
   });
 });
+
+describe('chained inserts on an empty deck (an outline lane)', () => {
+  const empty: Snapshot = { order: [], slides: {} };
+  const outline: Change[] = [
+    { ...base, id: 'c1', kind: 'insert', after: null, slide: slide('n1') },
+    { ...base, id: 'c2', kind: 'insert', after: 'n1', slide: slide('n2') },
+    { ...base, id: 'c3', kind: 'insert', after: 'n2', slide: slide('n3') },
+  ];
+  const lane: Lane = { id: 'l1', label: 'Outline', anchor: { kind: 'arc' }, origin: 'user', baseVersion: 0, changes: outline, status: 'open', createdAt: '2026-09-30T00:00:00.000Z' };
+
+  it('applyChange replays each insert after the slide the previous one inserted, in order', () => {
+    const preview = outline.reduce((snap, c) => ok(applyChange(snap, c)), empty);
+    expect(preview.order).toEqual(['n1', 'n2', 'n3']);
+    expect(Object.keys(preview.slides).sort()).toEqual(['n1', 'n2', 'n3']);
+  });
+
+  it('an insert after a slide the lane has not inserted yet fails on its own', () => {
+    expect(applyChange(empty, outline[1]!)).toEqual({ ok: false, error: 'unknown slide n1 (insert after)' });
+  });
+
+  it('rebase keeps the whole chain pending on the empty main, then after the first insert lands on main', () => {
+    expect(rebaseLane(lane, empty, empty).lane.changes.map((c) => c.status)).toEqual(['pending', 'pending', 'pending']);
+    const main1 = ok(applyChange(empty, outline[0]!));
+    const accepted1: Lane = { ...lane, changes: lane.changes.map((c) => (c.id === 'c1' ? { ...c, status: 'accepted' as const } : c)) };
+    const r = rebaseLane(accepted1, main1, empty);
+    expect(r.lane.changes.map((c) => c.status)).toEqual(['accepted', 'pending', 'pending']);
+    expect(r.causes).toEqual({});
+    const main2 = ok(applyChange(main1, outline[1]!));
+    expect(ok(applyChange(main2, outline[2]!)).order).toEqual(['n1', 'n2', 'n3']);
+  });
+});

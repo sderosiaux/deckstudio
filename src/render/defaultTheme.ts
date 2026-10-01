@@ -15,6 +15,7 @@ h1{font-size:96px;line-height:.98;letter-spacing:-.03em;font-weight:800}
 h2{font-size:82px;line-height:1;letter-spacing:-.03em;font-weight:800}
 .big{font-size:64px;line-height:1.12;letter-spacing:-.02em;font-weight:700}
 .cap{font-size:32px;line-height:1.3;color:var(--grey)}
+.content{position:absolute;left:96px;right:96px;top:186px;bottom:96px;display:flex;flex-direction:column;justify-content:center;gap:28px}
 .acc{color:var(--accent)}
 .grey{color:var(--grey)}
 .strata{position:absolute;left:0;right:0;height:120px;pointer-events:none}

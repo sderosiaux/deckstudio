@@ -175,7 +175,7 @@ describe('CheckRunner', () => {
 
   it('status() reports queued and running checks, dedupes a run of the same name and stamps lastRun', async () => {
     const { r, calls, release } = gated([JSON.stringify({ remarks: [] })]);
-    expect(r.status()).toEqual({ running: [], lastRun: { arc: null, order: null, gaps: null, render: null } });
+    expect(r.status()).toEqual({ running: [], lastRun: { arc: null, order: null, gaps: null, render: null }, note: { arc: null, order: null, gaps: null, render: null } });
     const a = r.run('order');
     const b = r.run('gaps');
     expect(r.run('order')).toBe(a);
@@ -506,14 +506,14 @@ describe('CheckRunner', () => {
     await thumbs.start();
     const notesOnly = { label: 'Explain the sub-caption', anchor: { kind: 'slide', slide: 's2' }, changes: [{ kind: 'modify', slide: 's2', patch: { notes: 'say it' }, reason: 'r' }] };
     const storyOnly = { label: 'Retell', anchor: { kind: 'slide', slide: 's3' }, changes: [{ kind: 'modify', slide: 's3', patch: { story: 'x', notes: 'y' }, reason: 'r' }] };
-    const visual = { label: 'Enlarge the trigger sub-caption', anchor: { kind: 'slide', slide: 's4' }, changes: [{ kind: 'modify', slide: 's4', patch: { body: '<p class="big">x</p>', notes: 'n' }, reason: 'r' }] };
+    const visual = { label: 'Enlarge the caption under the diagram', anchor: { kind: 'slide', slide: 's4' }, changes: [{ kind: 'modify', slide: 's4', patch: { body: '<p class="big">x</p>', notes: 'n' }, reason: 'r' }] };
     const { r } = runner([JSON.stringify({ remarks: [
       { anchor: { kind: 'slide', slide: 's2' }, severity: 'warn', text: 'sub-caption at 17px', lane: notesOnly },
       { anchor: { kind: 'slide', slide: 's3' }, severity: 'warn', text: 'overlap', lane: storyOnly },
       { anchor: { kind: 'slide', slide: 's4' }, severity: 'warn', text: 'tiny caption', lane: visual },
     ] })]);
     const out = await r.run('render');
-    expect(out.lanes.map((l) => l.label)).toEqual(['Enlarge the trigger sub-caption']);
+    expect(out.lanes.map((l) => l.label)).toEqual(['Enlarge the caption under the diagram']);
     const remarks = await store.remarks();
     expect(remarks.map((x) => [x.text, x.laneId === null])).toEqual([
       ['sub-caption at 17px', true],
@@ -529,7 +529,7 @@ describe('CheckRunner', () => {
     expect(p).toMatch(/never only the notes or the story/);
     const contract = CHECKS.order.buildPrompt({ brief, snap: snap(five), deckOrder: snap(five).order, allowLanes: true });
     expect(contract).toMatch(/"label" names the fix, not the slide/);
-    expect(contract).toContain('Enlarge the trigger sub-caption');
+    expect(contract).toContain('Enlarge the caption under the diagram');
     expect(contract).toMatch(/name the slide in the reason/i);
   });
 
@@ -592,6 +592,35 @@ describe('CheckRunner', () => {
   it('parseCheckOutput takes the first { to the last } of a chatty answer', () => {
     const ok = parseCheckOutput(`Here you go:\n\`\`\`json\n${remarkJson({ kind: 'arc' }, 'x')}\n\`\`\`\nDone.`, new Set(['s1']));
     expect(ok.ok).toBe(true);
+  });
+
+  it('an empty deck: every check returns no remarks without a model call, and records lastRun with the note "no slides yet"', async () => {
+    const blank = await DeckStore.init(join(tmp.dir, `blank-${Date.now()}-${Math.random().toString(36).slice(2)}`), 'blank', brief);
+    // A failure remark left by an earlier run on that deck is superseded like any other run's.
+    await blank.putRemarks([
+      { id: 'r_f', anchor: { kind: 'arc' }, text: 'check arc failed: timeout', origin: 'check:arc', severity: 'info', status: 'open', laneId: null, createdAt: '2026-09-30T00:00:00.000Z' },
+    ]);
+    const fake = fakeQuery([remarkJson({ kind: 'arc' }, 'should never be asked')]);
+    const r = new CheckRunner({ store: blank, thumbs, bus, model: 'claude-opus-5', queryImpl: fake.impl });
+    runners.push(r);
+    for (const name of ['arc', 'order', 'gaps', 'render'] as const) {
+      expect(await r.run(name)).toEqual({ remarks: [], lanes: [] });
+      expect(r.status().lastRun[name]).toMatch(/^\d{4}-/);
+      expect(r.status().note?.[name]).toBe('no slides yet');
+    }
+    expect(fake.calls).toEqual([]);
+    expect(await blank.remarks()).toEqual([]);
+
+    // The note survives a restart, and the first run on slides clears it.
+    const again = new CheckRunner({ store: blank, thumbs, bus, model: 'claude-opus-5', queryImpl: fake.impl });
+    runners.push(again);
+    await waitFor(() => again.status().note?.gaps != null);
+    expect(again.status().note?.gaps).toBe('no slides yet');
+    await blank.commit(snap(five), { kind: 'import' });
+    await again.run('arc');
+    expect(fake.calls).toHaveLength(1);
+    expect(again.status().note?.arc).toBeNull();
+    expect(again.status().note?.gaps).toBe('no slides yet');
   });
 
   it('trigger rejects an unknown check name', () => {
