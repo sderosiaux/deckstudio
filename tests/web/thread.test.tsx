@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { Thread, describeTool, formatElapsed } from '../../web/src/components/Thread.js';
+import { LONG_TURN_TEXT, Thread, describeTool, formatElapsed, laneCounts, plural } from '../../web/src/components/Thread.js';
 import type { BusEvent, LanePreviewPayload, ProposalApi, ThreadApi } from '../../web/src/api.js';
 import type { Change, Lane, Slide, SlideId, ThreadMessage, Version } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
@@ -378,5 +378,121 @@ describe('Thread proposal cards (QA3)', () => {
     expect(card.getAttribute('data-lane')).toBe('l1');
     const reply = screen.getAllByTestId('thread-message').find((m) => m.getAttribute('data-role') === 'assistant')!;
     expect(reply.contains(card)).toBe(true);
+  });
+});
+
+describe('an outline reply is a receipt, not ten cards', () => {
+  const inserts: Change[] = Array.from({ length: 10 }, (_, i) => ({
+    id: `i${i + 1}`,
+    kind: 'insert',
+    after: i === 0 ? null : `n${i}`,
+    slide: slide(`n${i + 1}`, `Claim number ${i + 1}`),
+    reason: `slide ${i + 1} of the outline`,
+    status: 'pending',
+  }));
+  const outline = mkLane('lo', { kind: 'arc' }, inserts, 'Outline of the talk');
+
+  const reply = async (t: ReturnType<typeof setup>, onShowLane?: (id: string) => void) => {
+    render(<Thread threadKey="global" context={{ kind: 'arc' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} navigate={t.navigate} onShowLane={onShowLane} />);
+    send('Draft the outline: 10 slides');
+    await vi.waitFor(() => expect(t.api.postMessage).toHaveBeenCalled());
+    t.emit({ type: 'lane.created', laneId: 'lo' });
+    t.stored.push({ id: 'm2', thread: 'global', role: 'assistant', text: 'Here is the outline.', context: null, at: '2026-09-30T10:00:05.000Z' });
+    t.emit({ type: 'assistant.done', thread: 'global', messageId: 'm2' });
+    return waitFor(() => screen.queryByTestId('thread-proposal'));
+  };
+
+  it('more than 3 changes: one head "lane: <label>, 10 inserts", the titles numbered one per line, one accept all, open on the strip', async () => {
+    const t = setup({ lo: outline });
+    const show = vi.fn();
+    const card = await reply(t, show);
+    await vi.waitFor(() => expect(within(card).getByTestId('receipt-head').textContent).toBe('lane: Outline of the talk, 10 inserts'));
+    const lines = within(card).getAllByTestId('receipt-line');
+    expect(lines).toHaveLength(10);
+    expect(lines.map((l) => l.textContent)).toEqual(inserts.map((_, i) => `${i + 1}Claim number ${i + 1}`));
+    // no before/after pairs, no per-change buttons
+    expect(within(card).queryAllByTestId('proposal-change')).toHaveLength(0);
+    expect(within(card).queryAllByTestId('slide-preview')).toHaveLength(0);
+    expect(within(card).queryAllByRole('button', { name: 'accept' })).toHaveLength(0);
+    expect(within(card).getAllByRole('button', { name: 'accept all in order' })).toHaveLength(1);
+    fireEvent.click(within(card).getByRole('button', { name: 'open on the strip' }));
+    expect(show).toHaveBeenCalledWith('lo');
+    expect(t.navigate).not.toHaveBeenCalled();
+  });
+
+  it('accept all in order accepts each pending change after the previous one resolves, then says it once in the thread', async () => {
+    const t = setup({ lo: outline });
+    const waiting: Array<() => void> = [];
+    t.api.acceptChange.mockImplementation(
+      (laneId: string) =>
+        new Promise((resolve) => {
+          const n = waiting.length + 2;
+          waiting.push(() => resolve({ version: version(n), lane: { ...outline, changes: [] } }));
+        }),
+    );
+    const card = await reply(t);
+    fireEvent.click(await waitFor(() => within(card).queryByRole('button', { name: 'accept all in order' })));
+    for (let i = 0; i < 10; i++) {
+      // one call in flight at a time, in the lane's order
+      await vi.waitFor(() => expect(t.api.acceptChange).toHaveBeenCalledTimes(i + 1));
+      expect(t.api.acceptChange).toHaveBeenLastCalledWith('lo', `i${i + 1}`);
+      expect(within(card).getByTestId('accept-all-progress').textContent).toBe(`accepting ${i + 1} of 10…`);
+      await act(async () => waiting[i]!());
+    }
+    await vi.waitFor(() => expect(screen.getAllByTestId('thread-note').map((n) => n.textContent)).toContain('accepted 10 changes into main, now v11'));
+    expect(t.api.acceptChange).toHaveBeenCalledTimes(10);
+  });
+
+  it('accept all stops on the first error and reports it in the thread notes', async () => {
+    const t = setup({ lo: outline });
+    let calls = 0;
+    t.api.acceptChange.mockImplementation(async () => {
+      calls++;
+      if (calls === 3) throw new Error('slide n2 is not on main');
+      return { version: version(calls + 1), lane: { ...outline, changes: [] } };
+    });
+    const card = await reply(t);
+    fireEvent.click(await waitFor(() => within(card).queryByRole('button', { name: 'accept all in order' })));
+    const note = await waitFor(() => screen.queryAllByTestId('thread-note').find((n) => n.textContent?.startsWith('accept all stopped')));
+    expect(note.textContent).toBe('accept all stopped at change 3 of 10 (Claim number 3): slide n2 is not on main, 2 changes accepted before it');
+    expect(t.api.acceptChange).toHaveBeenCalledTimes(3);
+    expect(within(card).getByRole('alert').textContent).toContain('accept all stopped at change 3 of 10');
+  });
+
+  it('3 changes or fewer keep the before/after pairs', async () => {
+    const t = setup({ lo: { ...outline, changes: inserts.slice(0, 3) } });
+    const card = await reply(t);
+    await vi.waitFor(() => expect(within(card).getAllByTestId('proposal-change')).toHaveLength(3));
+    expect(within(card).queryByTestId('receipt-head')).toBeNull();
+    expect(within(card).queryByRole('button', { name: 'accept all in order' })).toBeNull();
+  });
+});
+
+describe('plurals and the long-turn line', () => {
+  it('"1 slide", "2 slides"; a lane by kind: "1 insert", "10 inserts", "2 inserts, 1 move"', () => {
+    expect(plural(1, 'slide')).toBe('1 slide');
+    expect(plural(2, 'slide')).toBe('2 slides');
+    expect(plural(0, 'slide')).toBe('0 slides');
+    const ins = (id: string): Change => ({ id, kind: 'insert', after: null, slide: slide(id), reason: '', status: 'pending' });
+    const mv: Change = { id: 'm', kind: 'move', slide: 's1', after: 's3', reason: '', status: 'pending' };
+    expect(laneCounts([ins('a')])).toBe('1 insert');
+    expect(laneCounts(Array.from({ length: 10 }, (_, i) => ins(`a${i}`)))).toBe('10 inserts');
+    expect(laneCounts([ins('a'), mv, ins('b')])).toBe('2 inserts, 1 move');
+  });
+
+  it('past 4 minutes the pending row keeps counting and adds that long outlines take a few minutes', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    const t = setup();
+    render(<Thread threadKey="global" context={{ kind: 'arc' }} order={order} slides={slides} api={t.api} subscribe={t.subscribe} />);
+    send('Draft the outline');
+    act(() => vi.advanceTimersByTime(239_000));
+    expect(screen.getByTestId('thread-elapsed').textContent).toBe('3:59');
+    expect(screen.queryByTestId('thread-long')).toBeNull();
+    act(() => vi.advanceTimersByTime(8_000));
+    expect(screen.getByTestId('thread-elapsed').textContent).toBe('4:07');
+    expect(screen.getByTestId('thread-long').textContent).toBe(LONG_TURN_TEXT);
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.getByTestId('thread-elapsed').textContent).toBe('5:07');
+    expect(screen.getByTestId('thread-pending').textContent).toContain('still working, long outlines take a few minutes');
   });
 });

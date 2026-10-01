@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import type { Anchor, Change, Lane, Remark, Slide, SlideId, SlidePatch } from '../../../src/model/types.js';
 import { focusPath, navigate, remarkApi as defaultRemarkApi, thumbUrl, type LaneApi, type LaneChange, type LanePayload, type LanePreviewPayload, type RemarkApi } from '../api.js';
 import { ChangeButtons, settledNote } from './ChangeButtons.js';
@@ -345,6 +345,28 @@ export function describeChange(c: Change, mainOrder: SlideId[], preview: LanePre
   return c.kind === 'move' && inLane >= 0 ? `move ${where}, to ${inLane + 1}` : `${c.kind} ${where}`;
 }
 
+/** A decision the row shows before the server confirms it: the change's id and the status it is given. */
+export type Optimistic = Readonly<Record<string, 'accepted' | 'refused'>>;
+
+/** The lane as the creator just decided it: each pending change clicked takes its decided status at once. */
+export function withDecisions(lane: Lane, decided: Optimistic): Lane {
+  if (!lane.changes.some((c) => c.status === 'pending' && decided[c.id])) return lane;
+  return { ...lane, changes: lane.changes.map((c) => (c.status === 'pending' && decided[c.id] ? { ...c, status: decided[c.id]! } : c)) };
+}
+
+/**
+ * A change on one short line for the 120px header column: "move slide 17 to 9", "modify slide 3", "insert slide 4"
+ * (main's number for a slide on main, the lane's for a new one or a move's landing).
+ */
+export function shortChange(c: Change, mainOrder: SlideId[], preview: LanePreviewPayload | undefined): string {
+  const id = targetOf(c);
+  const onMain = mainOrder.indexOf(id);
+  const inLane = preview ? preview.order.indexOf(id) : -1;
+  if (c.kind === 'insert') return inLane >= 0 ? `insert slide ${inLane + 1}` : `insert ${c.slide.title}`;
+  const where = onMain >= 0 ? `slide ${onMain + 1}` : 'a slide';
+  return c.kind === 'move' && inLane >= 0 ? `move ${where} to ${inLane + 1}` : `${c.kind} ${where}`;
+}
+
 /**
  * Accept, refuse or discard on one lane, one call at a time: `busy` while a call runs, `error` holds the server's
  * message of the last failed one. Shared by every place that decides a lane's changes.
@@ -352,13 +374,15 @@ export function describeChange(c: Change, mainOrder: SlideId[], preview: LanePre
 export function useLaneActions(laneId: string, api: LaneApi) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const run = async (fn: () => Promise<unknown>): Promise<void> => {
+  const run = async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true);
     setError(null);
     try {
       await fn();
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -366,6 +390,9 @@ export function useLaneActions(laneId: string, api: LaneApi) {
   return {
     busy,
     error,
+    /** Accepts or refuses one change; resolves to whether the server took it. */
+    decide: (verb: 'accept' | 'refuse', changeId: string): Promise<boolean> =>
+      run(() => (verb === 'accept' ? api.acceptChange(laneId, changeId) : api.refuseChange(laneId, changeId))),
     accept: (changeId: string): void => void run(() => api.acceptChange(laneId, changeId)),
     refuse: (changeId: string): void => void run(() => api.refuseChange(laneId, changeId)),
     discard: (): void => void run(() => api.discardLane(laneId)),
@@ -377,7 +404,7 @@ export function useLaneActions(laneId: string, api: LaneApi) {
  * lane occupies only the columns it touches, so each proposed slide sits under the slide it replaces.
  */
 export function LaneRow({
-  lane,
+  lane: serverLane,
   preview,
   mainOrder,
   mainThumbs,
@@ -393,7 +420,29 @@ export function LaneRow({
   onFlashEnd,
   mainSlides,
 }: LaneRowProps) {
-  const { busy, error, accept, refuse, discard } = useLaneActions(lane.id, api);
+  const { busy, error, decide, discard } = useLaneActions(serverLane.id, api);
+  // Decisions shown at once, before the server's lane.updated: dropped once the server's lane has the change decided,
+  // or when the call fails.
+  const [decided, setDecided] = useState<Optimistic>({});
+  useEffect(() => {
+    setDecided((prev) => {
+      const keep = Object.entries(prev).filter(([id]) => serverLane.changes.find((c) => c.id === id)?.status === 'pending');
+      return keep.length === Object.keys(prev).length ? prev : Object.fromEntries(keep);
+    });
+  }, [serverLane]);
+  const lane = withDecisions(serverLane, decided);
+  const decideNow = (verb: 'accept' | 'refuse') => (changeId: string): void => {
+    setDecided((prev) => ({ ...prev, [changeId]: verb === 'accept' ? 'accepted' : 'refused' }));
+    void decide(verb, changeId).then((ok) => {
+      if (!ok)
+        setDecided((prev) => {
+          const { [changeId]: _dropped, ...rest } = prev;
+          return rest;
+        });
+    });
+  };
+  const accept = decideNow('accept');
+  const refuse = decideNow('refuse');
   const [remarksOpen, setRemarksOpen] = useState(false);
   const row = useRef<HTMLDivElement>(null);
   // A native listener: the flash ends with its CSS animation, however the browser names that event to React.
@@ -553,6 +602,32 @@ export function LaneRow({
             {discardBtn}
             {remarksBtn}
             {chip}
+            {chip && pending.length > 0 ? (
+              // The changed cells lie outside the columns in view: what the lane does, one change a line, each a link to it.
+              <ul data-testid="lane-offscreen" style={{ listStyle: 'none', margin: '2px 0 0', padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {pending.map((c) => {
+                  const href = focusPath(lane.id, c.id);
+                  return (
+                    <li key={c.id}>
+                      <a
+                        href={href}
+                        title={`${describe(c)}: ${c.reason}`}
+                        className="link"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                          e.preventDefault();
+                          onOpenChange(lane.id, c.id);
+                        }}
+                        style={{ fontSize: 'var(--fs-meta)', lineHeight: '16px', color: 'var(--ink)' }}
+                      >
+                        {shortChange(c, mainOrder, preview)}
+                      </a>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
           </>
         )}
       </div>
@@ -672,6 +747,7 @@ export function LaneRow({
               </div>
             ) : null}
           </section>
+          {cells.flatMap((cell) => (cell.dest ? [<MoveConnector key={`move:${cell.id}`} col={cell.col} boundary={cell.dest.boundary} />] : []))}
         </div>
         {remarksOpen && remarks.length > 0 ? (
           <div data-testid="lane-remarks" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '0 6px' }}>
@@ -922,8 +998,8 @@ const movedTitle: CSSProperties = {
 };
 
 /**
- * Where the accent hairline that leaves the slide's thumb on main (drawn by MoveRisers down to the slot's top) lands:
- * a dot on the top edge of the moved slide's card, which sits in its old column with "moved to 24" and its title under it.
+ * Where the row's move path (MoveConnector) starts: a dot on the top edge of the moved slide's card, which sits in its
+ * old column with "moved to 24" and its title under it.
  */
 function MoveMark() {
   return (
@@ -957,64 +1033,33 @@ export function edgeTarget(cells: readonly Cell[], view: { first: number; end: n
   return { side: 'left', col: Math.max(...changed.filter((c) => c < view.first)) };
 }
 
-interface Riser {
-  key: string;
-  x: number;
-  top: number;
-  height: number;
-}
-
 /**
- * The vertical part of every moved mark under `root`: a 1px accent hairline from the bottom of the slide's thumb on
- * main down to its slot in the lane row. Drawn behind the rows, measured
- * from the laid out strip, so it follows the column width and whatever sits between main and the lane. The remark
- * cards in between keep clear of its column (placeCards' avoid), so the line reads unbroken.
- * `root` must be positioned and form a stacking context (z-index 0) so the hairlines can sit under its rows.
+ * A moved slide's path inside its own lane row: an accent hairline along the row's top, from the dot on the moved
+ * card's top edge (its old column) to the column boundary where it lands, ending on a short tick. It is a cell of the
+ * row's own grid, so it never crosses main's strip or another row; nothing is drawn when the slide stays in place.
  */
-export function MoveRisers({ root, deps }: { root: RefObject<HTMLElement | null>; deps: readonly unknown[] }) {
-  const [risers, setRisers] = useState<Riser[]>([]);
-  useLayoutEffect(() => {
-    const el = root.current;
-    if (!el) return;
-    let frame = 0;
-    const update = (): void => {
-      frame = 0;
-      const box = el.getBoundingClientRect();
-      const next = [...el.querySelectorAll<HTMLElement>('[data-testid="moved-slot"]')].flatMap((slot, i) => {
-        const id = slot.closest('[data-testid="lane-cell"]')?.getAttribute('data-slide');
-        const thumb = id ? el.querySelector(`[data-strip="main"] [data-testid="thumb"][data-slide="${CSS.escape(id)}"] .edge-frame`) : null;
-        if (!thumb) return [];
-        const from = thumb.getBoundingClientRect();
-        const to = slot.getBoundingClientRect();
-        if (to.top <= from.bottom) return [];
-        return [{ key: `${id}:${i}`, x: Math.round(to.left - box.left + MOVE_X), top: Math.round(from.bottom - box.top), height: Math.round(to.top - from.bottom) }];
-      });
-      setRisers((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
-    };
-    const schedule = (): void => {
-      if (!frame) frame = requestAnimationFrame(update);
-    };
-    update();
-    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
-    ro?.observe(el);
-    const mo = typeof MutationObserver === 'undefined' ? null : new MutationObserver(schedule);
-    mo?.observe(el, { childList: true, subtree: true });
-    return () => {
-      if (frame) cancelAnimationFrame(frame);
-      ro?.disconnect();
-      mo?.disconnect();
-    };
-  }, [root, ...deps]);
+export function MoveConnector({ col, boundary }: { col: number; boundary: number }) {
+  if (boundary === col || boundary === col + 1) return null;
+  const back = boundary < col;
+  // Earlier: from the gap before column `boundary` to the moved card's dot; later: from the dot to the gap before `boundary`.
+  const span = back ? `${boundary + 1} / ${col + 1}` : `${col + 1} / ${boundary + 1}`;
+  const style: CSSProperties = {
+    gridRow: '1',
+    gridColumn: span,
+    alignSelf: 'start',
+    position: 'relative',
+    zIndex: 1,
+    height: 0,
+    marginTop: 5,
+    borderTop: '1px solid var(--accent)',
+    pointerEvents: 'none',
+    ...(back
+      ? { marginLeft: 'calc(var(--col-gap) / -2)', marginRight: `calc(-1 * (var(--col-gap) + ${MOVE_X}px))` }
+      : { marginLeft: MOVE_X, marginRight: 'calc(var(--col-gap) / -2)' }),
+  };
   return (
-    <>
-      {risers.map((r) => (
-        <span
-          key={r.key}
-          data-testid="move-riser"
-          aria-hidden
-          style={{ position: 'absolute', zIndex: -1, left: r.x, top: r.top, width: 1, height: r.height, background: 'var(--accent)', pointerEvents: 'none' }}
-        />
-      ))}
-    </>
+    <span data-testid="move-path" data-from={col} data-to={boundary} aria-hidden style={style}>
+      <span style={{ position: 'absolute', top: -1, [back ? 'left' : 'right']: -0.5, width: 1, height: 9, background: 'var(--accent)' }} />
+    </span>
   );
 }

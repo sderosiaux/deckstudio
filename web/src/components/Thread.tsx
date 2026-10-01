@@ -211,6 +211,39 @@ export function fieldLines(c: Change, slides: Record<SlideId, Slide>, order: Sli
   });
 }
 
+/** "1 slide", "2 slides": a count and its noun, singular for one. */
+export function plural(n: number, noun: string): string {
+  return `${n} ${n === 1 ? noun : `${noun}s`}`;
+}
+
+/** Changes a proposal lists as before/after pairs; a lane with more becomes a receipt: its titles, one line each. */
+export const RECEIPT_OVER = 3;
+
+/** What a lane holds, by kind, in the order the kinds first appear: "10 inserts", "2 inserts, 1 move". */
+export function laneCounts(changes: readonly Change[]): string {
+  const counts = new Map<Change['kind'], number>();
+  for (const c of changes) counts.set(c.kind, (counts.get(c.kind) ?? 0) + 1);
+  return [...counts].map(([kind, n]) => plural(n, kind)).join(', ');
+}
+
+/**
+ * One line of a receipt: the inserted slide's title; for the other kinds the verb, main's slide number and title, and
+ * for a move where it lands in the lane ("move slide 17, Hook, to 9").
+ */
+export function receiptLine(c: Change, slides: Record<SlideId, Slide>, order: SlideId[], laneOrder?: SlideId[]): string {
+  if (c.kind === 'insert') return c.slide.title;
+  const at = order.indexOf(c.slide);
+  const title = slides[c.slide]?.title;
+  const where = [at >= 0 ? `slide ${at + 1}` : null, title ?? null].filter(Boolean).join(', ') || 'a slide';
+  if (c.kind !== 'move') return `${c.kind} ${where}`;
+  const to = laneOrder ? laneOrder.indexOf(c.slide) : -1;
+  return to >= 0 ? `move ${where}, to ${to + 1}` : `move ${where}`;
+}
+
+/** After this long the pending row says a long turn is normal: an outline takes a few minutes. */
+export const LONG_TURN_MS = 4 * 60 * 1000;
+export const LONG_TURN_TEXT = 'still working, long outlines take a few minutes';
+
 const lineBox: CSSProperties = { margin: 0, fontSize: 'var(--fs-body)', lineHeight: 1.4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' };
 
 function FieldDiff({ line }: { line: FieldLine }) {
@@ -254,6 +287,10 @@ function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, n
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ack, setAck] = useState<string | null>(null);
+  // "accept all in order" under way: how many of how many are accepted so far.
+  const [run, setRun] = useState<{ done: number; total: number } | null>(null);
+  // Where the last "accept all in order" stopped; a reload of the lane keeps it (its own error is cleared then).
+  const [stopped, setStopped] = useState<string | null>(null);
   const gen = useRef(0);
 
   const load = useCallback(async () => {
@@ -265,7 +302,8 @@ function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, n
       if (g !== gen.current) return;
       setData({ lane, preview });
       setError(null);
-      const ids = [...new Set(changesToShow(lane, context).filter((c) => c.kind !== 'insert').map(targetOf))];
+      // A receipt shows titles only: no pair, so no main thumb to fetch.
+      const ids = lane.changes.length > RECEIPT_OVER ? [] : [...new Set(changesToShow(lane, context).filter((c) => c.kind !== 'insert').map(targetOf))];
       for (const id of ids) {
         const t = await api.thumbFor(id);
         if (g !== gen.current) return;
@@ -303,6 +341,9 @@ function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, n
   if (!laneAnswers(lane, context, threadKey)) return null;
 
   const changes = changesToShow(lane, context);
+  const pendingCount = lane.status === 'open' ? lane.changes.filter((c) => c.status === 'pending').length : 0;
+  // A lane with more changes than a card holds as pairs (an outline: ten inserts) reads as a receipt.
+  const receipt = lane.changes.length > RECEIPT_OVER;
   const first = lane.status === 'open' ? lane.changes.find((c) => c.status === 'pending') : undefined;
   const follow = (path: string) => (e: MouseEvent) => {
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -338,6 +379,40 @@ function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, n
     return [left, right];
   };
 
+  /**
+   * Accepts the lane's pending changes one after the other, in the lane's order (an insert lands after the one before
+   * it), each call once the previous resolved; the first error stops the run and says where, here and in the thread.
+   */
+  const acceptAll = async (): Promise<void> => {
+    const queue = lane.changes.filter((c) => c.status === 'pending');
+    if (queue.length === 0) return;
+    setBusy(true);
+    setError(null);
+    setStopped(null);
+    let last: number | null = null;
+    for (const [i, c] of queue.entries()) {
+      setRun({ done: i, total: queue.length });
+      try {
+        last = (await api.acceptChange(lane.id, c.id)).version.n;
+      } catch (err) {
+        const done = i > 0 ? `, ${plural(i, 'change')} accepted before it` : '';
+        const text = `accept all stopped at change ${i + 1} of ${queue.length} (${receiptLine(c, slides, order, preview?.order)}): ${errorText(err)}${done}`;
+        setStopped(text);
+        onNote(text);
+        setRun(null);
+        setBusy(false);
+        void load();
+        return;
+      }
+    }
+    const text = `accepted ${plural(queue.length, 'change')} into main, now v${last}`;
+    setRun(null);
+    setAck(text);
+    onNote(text);
+    setBusy(false);
+    void load();
+  };
+
   const decide = async (verb: 'accept' | 'refuse', c: Change): Promise<void> => {
     setBusy(true);
     setError(null);
@@ -359,63 +434,109 @@ function Proposal({ laneId, context, threadKey, order, slides, api, subscribe, n
       data-lane={lane.id}
       style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 6, padding: 12, borderRadius: 'var(--radius)', background: 'var(--card)', boxShadow: '0 0 0 1px var(--line)' }}
     >
-      {actions !== 'none' && onShowLane ? (
-        <button type="button" className="link" onClick={() => onShowLane(lane.id)} style={{ color: 'var(--ink)', fontWeight: 700, whiteSpace: 'normal', alignSelf: 'flex-start' }}>
-          lane: {lane.label}
-        </button>
-      ) : first && actions !== 'none' ? (
-        <a href={focusPath(lane.id, first.id)} onClick={follow(focusPath(lane.id, first.id))} className="link" style={{ color: 'var(--ink)', fontWeight: 700, whiteSpace: 'normal' }}>
-          lane: {lane.label}
-        </a>
-      ) : (
-        <span style={{ fontWeight: 700 }}>lane: {lane.label}</span>
-      )}
-      {changes.map((c) => {
-        const [left, right] = pair(c);
-        const href = focusPath(lane.id, c.id);
-        return (
-          <div key={c.id} data-testid="proposal-change" data-change={c.id} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-              <SlidePreview {...left} width={PAIR_WIDTH} />
-              <SlidePreview {...right} width={PAIR_WIDTH} />
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-              {fieldLines(c, slides, order, preview?.order).map((l) => (
-                <FieldDiff key={l.field} line={l} />
-              ))}
-            </div>
-            <p className="meta" style={{ margin: 0, lineHeight: 1.4 }}>
-              {c.kind}: {c.reason}
-            </p>
-            {actions === 'none' ? null : (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                {actions === 'all' ? (
-                  <>
-                    <button type="button" className="btn-primary" disabled={busy} onClick={() => void decide('accept', c)}>
-                      accept
-                    </button>
-                    <button type="button" className="btn" disabled={busy} onClick={() => void decide('refuse', c)}>
-                      refuse
-                    </button>
-                  </>
-                ) : null}
-                <a href={href} onClick={follow(href)} className="link" style={actions === 'all' ? { marginLeft: 6 } : undefined}>
+      {receipt ? (
+        <>
+          <span data-testid="receipt-head" style={{ fontWeight: 700 }}>
+            lane: {lane.label}, {laneCounts(lane.changes)}
+          </span>
+          <ol data-testid="receipt-list" style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {lane.changes.map((c, i) => (
+              <li key={c.id} data-testid="receipt-line" data-change={c.id} data-status={c.status} title={`${c.kind}: ${c.reason}`} style={{ ...lineBox, display: 'flex', gap: 8 }}>
+                <span className="muted mono" style={{ flex: '0 0 auto', minWidth: '2ch', textAlign: 'right' }}>
+                  {i + 1}
+                </span>
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', color: c.status === 'pending' ? 'var(--ink)' : 'var(--grey)' }}>
+                  {receiptLine(c, slides, order, preview?.order)}
+                </span>
+                {c.status === 'pending' ? null : <span className="meta">{c.status}</span>}
+              </li>
+            ))}
+          </ol>
+          {actions === 'none' ? null : (
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+              {pendingCount > 0 ? (
+                <button type="button" className="btn-primary" disabled={busy} onClick={() => void acceptAll()}>
+                  accept all in order
+                </button>
+              ) : null}
+              {onShowLane ? (
+                <button type="button" className="link" onClick={() => onShowLane(lane.id)}>
+                  open on the strip
+                </button>
+              ) : first ? (
+                <a href={focusPath(lane.id, first.id)} onClick={follow(focusPath(lane.id, first.id))} className="link">
                   open in focus
                 </a>
+              ) : null}
+            </div>
+          )}
+          {run ? (
+            <p data-testid="accept-all-progress" className="meta" style={{ margin: 0 }}>
+              accepting {run.done + 1} of {run.total}…
+            </p>
+          ) : null}
+        </>
+      ) : (
+        <>
+        {actions !== 'none' && onShowLane ? (
+          <button type="button" className="link" onClick={() => onShowLane(lane.id)} style={{ color: 'var(--ink)', fontWeight: 700, whiteSpace: 'normal', alignSelf: 'flex-start' }}>
+            lane: {lane.label}
+          </button>
+        ) : first && actions !== 'none' ? (
+          <a href={focusPath(lane.id, first.id)} onClick={follow(focusPath(lane.id, first.id))} className="link" style={{ color: 'var(--ink)', fontWeight: 700, whiteSpace: 'normal' }}>
+            lane: {lane.label}
+          </a>
+        ) : (
+          <span style={{ fontWeight: 700 }}>lane: {lane.label}</span>
+        )}
+        {changes.map((c) => {
+          const [left, right] = pair(c);
+          const href = focusPath(lane.id, c.id);
+          return (
+            <div key={c.id} data-testid="proposal-change" data-change={c.id} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+                <SlidePreview {...left} width={PAIR_WIDTH} />
+                <SlidePreview {...right} width={PAIR_WIDTH} />
               </div>
-            )}
-          </div>
-        );
-      })}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                {fieldLines(c, slides, order, preview?.order).map((l) => (
+                  <FieldDiff key={l.field} line={l} />
+                ))}
+              </div>
+              <p className="meta" style={{ margin: 0, lineHeight: 1.4 }}>
+                {c.kind}: {c.reason}
+              </p>
+              {actions === 'none' ? null : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  {actions === 'all' ? (
+                    <>
+                      <button type="button" className="btn-primary" disabled={busy} onClick={() => void decide('accept', c)}>
+                        accept
+                      </button>
+                      <button type="button" className="btn" disabled={busy} onClick={() => void decide('refuse', c)}>
+                        refuse
+                      </button>
+                    </>
+                  ) : null}
+                  <a href={href} onClick={follow(href)} className="link" style={actions === 'all' ? { marginLeft: 6 } : undefined}>
+                    open in focus
+                  </a>
+                </div>
+              )}
+            </div>
+          );
+        })}
+        </>
+      )}
       {ack ? (
         <p role="status" style={{ margin: 0, fontSize: 'var(--fs-body)', fontWeight: 500, color: 'var(--ink)' }}>
           {ack}
         </p>
       ) : null}
-      {changes.length === 0 && !ack ? <p className="meta" style={{ margin: 0 }}>No change left to decide in this lane.</p> : null}
-      {error ? (
+      {!receipt && changes.length === 0 && !ack ? <p className="meta" style={{ margin: 0 }}>No change left to decide in this lane.</p> : null}
+      {error || stopped ? (
         <p role="alert" style={{ margin: 0, fontSize: 12, color: 'var(--warn)' }}>
-          {error}
+          {error ?? stopped}
         </p>
       ) : null}
     </div>
@@ -726,6 +847,11 @@ export function Thread({
             {formatElapsed(now - pending.since)}
           </span>
           {pending.tool ? <span className="muted">{describeTool(pending.tool)}</span> : null}
+          {now - pending.since >= LONG_TURN_MS ? (
+            <span data-testid="thread-long" className="muted">
+              {LONG_TURN_TEXT}
+            </span>
+          ) : null}
         </p>
       ) : null}
       {streaming || (tool && !pending) ? (

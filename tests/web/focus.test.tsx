@@ -388,6 +388,31 @@ describe('Focus', () => {
     expect(scroll.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it('below the breakpoint (1200px) "changes in this lane" stays, in the body above the thread, and folds to its title', async () => {
+    narrow();
+    const navigate = vi.fn();
+    render(<Focus laneId="l1" changeId="c3" api={stubApi()} subscribe={noEvents} navigate={navigate} />);
+    await waitFor(() => screen.queryByTestId('focus-changes') && crumb().includes('change 2 of 3'));
+    const list = screen.getByTestId('focus-changes');
+    expect(screen.getByTestId('focus-scroll').contains(list)).toBe(true);
+    expect(list.compareDocumentPosition(screen.getByTestId('thread')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const rows = within(list).getAllByRole('listitem');
+    expect(rows.map((r) => r.getAttribute('data-change'))).toEqual(['c1', 'c2', 'c3', 'c4', 'c5']);
+    expect(rows[2]!.getAttribute('aria-current')).toBe('true');
+    fireEvent.click(within(rows[4]!).getByRole('link'));
+    expect(navigate).toHaveBeenLastCalledWith('/lane/l1/change/c5');
+    // Collapsible, never removed.
+    const toggle = within(list).getByRole('button', { name: /changes in this lane/ });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(within(screen.getByTestId('focus-changes')).queryAllByRole('listitem')).toHaveLength(0);
+    expect(toggle.textContent).toContain('show 5');
+    fireEvent.click(toggle);
+    expect(within(screen.getByTestId('focus-changes')).getAllByRole('listitem')).toHaveLength(5);
+    expect(themeCss()).toMatch(/\.focus-changes\[data-collapsible='true'\] \{[^}]*max-height: none/);
+  });
+
   it('a lane anchored on a slide opens its thread with the exchange of that slide conversation that created it, read-only', async () => {
     const api = stubApi({ ...lane([c1]), anchor: { kind: 'slide', slide: 's3' }, createdAt: '2026-09-30T10:00:03.000Z' });
     const slideThread: ThreadMessage[] = [

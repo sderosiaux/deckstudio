@@ -207,6 +207,21 @@ describe('BriefChecks', () => {
     await waitFor(() => within(row('arc')).getByTestId('check-dot').getAttribute('data-status') === 'warn');
     expect(within(row('order')).getByTestId('check-dot').getAttribute('data-status')).toBe('ok');
   });
+
+  it('refetches the remarks on deck.changed: the server names slides at read time, so the text follows the chip', async () => {
+    const api = stubApi();
+    let push: (e: BusEvent) => void = () => undefined;
+    render(<BriefChecks api={api} subscribe={(h) => ((push = h), () => undefined)} navigate={vi.fn()} />);
+    await waitFor(() => screen.queryAllByTestId('check-row').length === 4);
+    await waitFor(() => header('order').getAttribute('aria-expanded') === 'true');
+    const before = api.getRemarks.mock.calls.length;
+    const renamed = remark('r_order', { origin: 'check:order', anchor: { kind: 'slide', slide: 's2' }, text: 'slide 2 (Title s2) now comes after its detail.', laneId: 'l1' });
+    api.getRemarks.mockResolvedValue([renamed]);
+    push({ type: 'deck.changed', version: 4 });
+    await waitFor(() => api.getRemarks.mock.calls.length === before + 1);
+    await waitFor(() => within(row('order')).queryAllByTestId('remark')[0]?.textContent?.includes('slide 2 (Title s2) now comes after its detail.') === true);
+    expect(within(within(row('order')).getAllByTestId('remark')[0]!).getByTestId('anchor-chip').textContent).toBe('slide 2');
+  });
 });
 
 describe('BriefChecks live status', () => {

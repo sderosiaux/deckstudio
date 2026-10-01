@@ -34,6 +34,12 @@ const type = (label: RegExp | string, value: string): void => {
 };
 
 describe('Home', () => {
+  it('a one-slide deck reads "1 slide", never "1 slides"', async () => {
+    render(<Home api={stubApi([deck({ id: 'one', slides: 1, version: 1 })])} navigate={navigate} now={() => NOW} />);
+    await waitFor(() => screen.queryAllByTestId('deck-card').length === 1);
+    expect(within(screen.getByTestId('deck-card')).getByText('1 slide, v1')).toBeTruthy();
+  });
+
   it('lists every deck as a card: cover, title, slides and version, last change; a click opens the deck', async () => {
     const api = stubApi([
       deck({ id: 'sf', title: 'Kafka at scale', slides: 22, version: 14, updatedAt: '2026-09-30T11:00:00.000Z', coverSlideId: 's1' }),
