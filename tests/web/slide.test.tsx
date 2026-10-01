@@ -309,6 +309,23 @@ describe('Slide screen', () => {
     expect(themeCss()).not.toMatch(/\.slide-side-scroll \{[^}]*max-height/);
   });
 
+  it('the work column holds the render and its conversation, the text beside or under them; the render fills it up to 1100px', async () => {
+    const t = setup();
+    render(<SlideScreen slideId="s3" api={t.api} subscribe={t.subscribe} navigate={t.navigate} />);
+    await waitFor(() => laneRows().length === 2);
+    const work = screen.getByTestId('slide-work');
+    const text = screen.getByTestId('slide-text');
+    for (const id of ['slide-toggle', 'slide-stage', 'thread']) expect(work.contains(screen.getByTestId(id))).toBe(true);
+    for (const id of ['slide-story', 'slide-notes']) expect(text.contains(screen.getByTestId(id))).toBe(true);
+    expect(work.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const css = themeCss();
+    expect(css).toMatch(/\.slide-stage \{[^}]*1100px/);
+    // Wide enough, the text column moves beside the render instead of leaving a band right of it.
+    expect(css).toMatch(/@container slide-body \(min-width: [0-9]+px\) \{\s*\.slide-grid \{[^}]*grid-template-columns/);
+    // No empty 120px gutter on this screen.
+    expect(css).not.toMatch(/\.slide-main \{[^}]*var\(--gutter\)/);
+  });
+
   it('below the breakpoint, one column: render, conversation, story, notes, then lanes and remarks', async () => {
     narrow();
     const t = setup({ remarks: [remark('r1', { kind: 'slide', slide: 's3' })] });

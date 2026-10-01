@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import type { Anchor, Change, Lane, Slide, SlideId, ThreadKey, ThreadMessage } from '../../../src/model/types.js';
 import {
   focusApi,
@@ -99,12 +99,6 @@ export function stripCells(lane: Lane, mainOrder: readonly SlideId[]): { id: Sli
   });
 }
 
-/** Five slides of `order` centred on position `at`, slid inward at the deck ends; fewer when the deck is shorter. */
-export function excerpt(order: readonly SlideId[], at: number, size = 5): { start: number; ids: SlideId[] } {
-  const start = Math.max(0, Math.min(at - Math.floor(size / 2), order.length - size));
-  return { start, ids: order.slice(start, start + size) };
-}
-
 /** "from your request on slide 3", "unsolicited, from check: arc, on slides 2–4": where the lane comes from and what it is anchored on. */
 export function originLine(lane: Lane, order: SlideId[], slides: Record<SlideId, Slide>): string {
   const on = describeAnchor(lane.anchor, order, slides);
@@ -183,22 +177,36 @@ function RangeUnderline({ count, cols, label }: { count: number; cols: { start: 
   );
 }
 
-/** A move as structure: five slides of one side around the moved one, which carries the selection ring. */
-function MoveExcerpt({ side, caption, order, slides, at, slide, url }: { side: 'main' | 'lane'; caption: string; order: SlideId[]; slides: Record<SlideId, Slide>; at: number; slide: SlideId; url(id: SlideId): string | undefined }) {
-  const { start, ids } = excerpt(order, at);
+/**
+ * A move as structure: one side's whole order as a strip of renders, the moved slide twice its neighbours' width and
+ * ringed; the strip scrolls so the moved slide sits in its middle. The theme sizes the thumbs from the body's height.
+ */
+function MoveStrip({ side, caption, order, slides, slide, url }: { side: 'main' | 'lane'; caption: string; order: SlideId[]; slides: Record<SlideId, Slide>; slide: SlideId; url(id: SlideId): string | undefined }) {
+  const list = useRef<HTMLDivElement>(null);
+  const at = order.indexOf(slide);
+  useLayoutEffect(() => {
+    const box = list.current;
+    if (!box) return;
+    const centre = (): void => {
+      const item = box.children[at] as HTMLElement | undefined;
+      if (item) box.scrollLeft = Math.max(0, item.offsetLeft + item.offsetWidth / 2 - box.clientWidth / 2);
+    };
+    centre();
+    if (typeof ResizeObserver !== 'function') return;
+    // The thumbs follow the viewport: a resize moves the moved slide, so it is centred again.
+    const ro = new ResizeObserver(centre);
+    ro.observe(box);
+    return () => ro.disconnect();
+  }, [at, order.length]);
   return (
-    <figure
-      data-testid="move-excerpt"
-      data-side={side}
-      style={{ margin: 0, display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderRadius: 'var(--radius)', background: 'var(--card)', boxShadow: side === 'lane' ? '0 0 0 2px var(--accent), var(--shadow)' : '0 0 0 1px var(--line), var(--shadow)' }}
-    >
-      <figcaption data-testid="move-caption" style={{ fontSize: 'var(--fs-meta)', lineHeight: '16px', color: 'var(--grey)' }}>
+    <figure data-testid="move-strip" data-side={side} className="move-strip">
+      <figcaption data-testid="move-caption" className="move-caption">
         {caption}
       </figcaption>
-      <div role="list" style={{ display: 'flex', gap: 'var(--col-gap)', padding: '4px 4px 6px', ['--thumb-w' as string]: '76px', ['--thumb-h' as string]: 'calc(76px * 9 / 16)' }}>
-        {ids.map((id, i) => (
-          <div role="listitem" key={id}>
-            <Thumb slideId={id} n={start + i + 1} title={slides[id]?.title ?? id} url={url(id)} selected={id === slide} hoverTitle={false} onClick={() => undefined} />
+      <div ref={list} role="list" className="move-strip-list">
+        {order.map((id, i) => (
+          <div role="listitem" key={id} className="move-strip-item" data-moved={id === slide ? 'true' : undefined} style={{ ['--move-k' as string]: id === slide ? '2' : '1' }}>
+            <Thumb slideId={id} n={i + 1} title={slides[id]?.title ?? id} url={url(id)} selected={id === slide} hoverTitle={false} onClick={() => undefined} />
           </div>
         ))}
       </div>
@@ -568,7 +576,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
     input?.focus({ preventScroll: true });
   };
 
-  const bar: CSSProperties = { flex: `0 0 ${BAR_HEIGHT}px`, height: BAR_HEIGHT, display: 'flex', alignItems: 'center', gap: 20, padding: '0 24px 0 calc(24px + var(--gutter))', background: 'var(--paper)', borderTop: '1px solid var(--line)' };
+  const bar: CSSProperties = { flex: `0 0 ${BAR_HEIGHT}px`, height: BAR_HEIGHT, display: 'flex', alignItems: 'center', gap: 20, padding: '0 24px', background: 'var(--paper)', borderTop: '1px solid var(--line)' };
 
   // "slide 3, Hook" for a slide on main, the lane's title for one it adds.
   const describeTarget = (c: Change): string => {
@@ -653,7 +661,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
           </div>
           <BackToMain navigate={navigate} style={{ alignSelf: 'flex-start' }} />
         </ScreenHeader>
-        {/* One left edge: the body starts on the title's column (24px padding + the 120px gutter), as the strip below. */}
+        {/* One left edge: the body starts on the title's column, 24px in; no empty gutter, the renders take that width. */}
         <div className="focus-pane">
           <main ref={pane} data-testid="focus-scroll" className="focus-scroll" onScroll={measure}>
             {!change ? (
@@ -666,22 +674,22 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
                   </p>
                 ) : null}
                 {asMove && target ? (
-                  <div data-testid="focus-pair" className="focus-pair">
-                    <MoveExcerpt side="main" caption={`main, was ${mainAt + 1}`} order={deck.order} slides={deck.slides} at={mainAt} slide={target} url={mainUrl} />
-                    <MoveExcerpt side="lane" caption={`this lane, now ${laneAt + 1}`} order={preview.order} slides={preview.slides} at={laneAt} slide={target} url={laneUrl} />
+                  <div data-testid="focus-pair" className="focus-move">
+                    <MoveStrip side="main" caption={`main, was ${mainAt + 1}`} order={deck.order} slides={deck.slides} slide={target} url={mainUrl} />
+                    <MoveStrip side="lane" caption={`this lane, now ${laneAt + 1}`} order={preview.order} slides={preview.slides} slide={target} url={laneUrl} />
                   </div>
                 ) : (
-                  <div data-testid="focus-pair" className="focus-pair">
+                  <div data-testid="focus-pair" className="focus-pair" data-shape={left?.variant === 'missing' ? 'after' : right?.variant === 'missing' ? 'before' : 'both'}>
                     {left ? <SlidePreview {...left} /> : null}
                     {right ? <SlidePreview {...right} /> : null}
                   </div>
                 )}
-                <p data-testid="focus-reason" style={{ margin: 0, display: 'flex', gap: 12, alignItems: 'baseline', fontSize: 13, maxWidth: 924 }}>
+                <p data-testid="focus-reason" style={{ margin: 0, display: 'flex', gap: 12, alignItems: 'baseline', fontSize: 13, maxWidth: '80ch' }}>
                   <span className="meta">{change.kind}</span>
                   <span style={{ color: 'var(--grey)' }}>{nameSlides(change.reason, deck.order, { ...preview.slides, ...deck.slides })}</span>
                 </p>
                 {texts.length > 0 ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 924, width: '100%' }}>
+                  <div data-testid="focus-diffs" className="focus-diffs">
                     {texts.map((t) => (
                       <TextDiff key={t.field} label={t.field} before={t.before} after={t.after} />
                     ))}

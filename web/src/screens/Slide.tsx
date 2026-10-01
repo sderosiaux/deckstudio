@@ -103,7 +103,8 @@ export function nameSlides(text: string, order: readonly SlideId[], slides: Reco
   });
 }
 
-const TEXT_WIDTH = 800;
+/** Story and notes stay under 80 characters a line: freed width goes to the render, not to longer lines. */
+const TEXT_WIDTH = '80ch';
 /** The conversation under the render stops growing here and scrolls, following its latest message. */
 const THREAD_MAX = 'min(420px, 50vh)';
 
@@ -589,7 +590,7 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
   );
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div className="slide-screen" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <ScreenHeader>
         <h1 data-testid="slide-crumb" className="screen-title" title={slide.title} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           slide {at + 1} of {deck.order.length}, {slide.title}
@@ -599,11 +600,17 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
         <BackToMain navigate={navigate} />
       </ScreenHeader>
       <div data-testid="slide-layout" className="slide-layout" data-columns={wide ? '2' : '1'}>
-        {/* The work column starts on the title's left edge (24px padding + the 120px gutter). */}
+        {/* The work column starts on the title's left edge, 24px in: no empty gutter, the render takes that width. */}
         <main ref={bodyRef} data-testid="slide-body" className="slide-main">
-          {render}
-          {talk}
-          {text}
+          <div className="slide-grid">
+            <div data-testid="slide-work" className="slide-work">
+              {render}
+              {talk}
+            </div>
+            <div data-testid="slide-text" className="slide-text">
+              {text}
+            </div>
+          </div>
           {wide ? null : (
             <>
               {lanesSection}

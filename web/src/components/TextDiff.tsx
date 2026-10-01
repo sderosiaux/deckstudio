@@ -215,7 +215,7 @@ export function TextDiff({ label, before, after, bare = false }: TextDiffProps) 
     });
   }
   return (
-    <section data-testid="text-diff" data-field={label} aria-label={`${label} changes`} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+    <section data-testid="text-diff" data-field={label} aria-label={`${label} changes`} style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: '80ch' }}>
       {bare ? null : <header className="meta" style={{ fontWeight: 500 }}>{label}</header>}
       <div style={{ fontSize: 13, lineHeight: 1.55, display: 'flex', flexDirection: 'column', gap: 2 }}>{body}</div>
     </section>
