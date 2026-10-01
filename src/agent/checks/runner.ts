@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { hashSlide, newId } from '../../model/ids.js';
-import { slidesInRange } from '../../model/ops.js';
+import { anchorIsStale, orderedAnchor, slidesInRange } from '../../model/ops.js';
 import type { Anchor, Brief, Lane, Origin, Remark, SlideId, Snapshot } from '../../model/types.js';
 import { loadThemeCss } from '../../render/defaultTheme.js';
 import type { ThumbService } from '../../render/thumbs.js';
@@ -103,7 +103,7 @@ export interface CheckRunnerOptions {
   bus: Bus;
   model: string;
   queryImpl?: typeof query;
-  /** Quiet period after the last accept before all checks run. */
+  /** Quiet period after the last deck change before all checks run. */
   debounceMs?: number;
 }
 
@@ -191,7 +191,7 @@ export class CheckRunner {
   private readonly note: Record<CheckName, string | null> = { arc: null, order: null, gaps: null, render: null };
   /** Memo reads and writes, in call order. */
   private memoChain: Promise<unknown>;
-  /** The after-accept batch queued or running; an accept meanwhile only marks it dirty. */
+  /** The after-deck-change batch queued or running; a deck change meanwhile only marks it dirty. */
   private batch: Promise<void> | null = null;
   private dirty = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -250,7 +250,8 @@ export class CheckRunner {
     return { running: CHECK_NAMES.filter((n) => this.started.has(n)), lastRun: { ...this.lastRun }, note: { ...this.note } };
   }
 
-  scheduleAfterAccept(): void {
+  /** Any move of main (accept, restore, direct edit, co-author tool): all checks run again once it settles. */
+  scheduleAfterDeckChange(): void {
     if (this.disposed) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
@@ -277,7 +278,7 @@ export class CheckRunner {
 
   // -------------------------------------------------------------------------
 
-  /** All four checks on the current deck; accepts that land meanwhile add exactly one more batch. */
+  /** All four checks on the current deck; deck changes that land meanwhile add exactly one more batch. */
   private runBatch(): void {
     const all = CHECK_NAMES.map((name) => this.run(name).catch((e) => this.report(name, e)));
     this.batch = Promise.all(all).then(() => {
@@ -351,8 +352,8 @@ export class CheckRunner {
   /**
    * Housekeeping before a run: lanes are rebased on main (a stale change is orphaned, one main already took is
    * accepted, a lane left with nothing to decide closes), remarks found on the preview of a lane that is now closed
-   * are resolved, and a remark anchored on a slide that left main (and not on a lane preview) is dropped: it would
-   * read "slide ?".
+   * are resolved (so are remarks whose range a move reversed), and a remark anchored on a slide that left main (and
+   * not on a lane preview) is dropped: it would read "slide ?".
    */
   private async tidyRemarks(): Promise<void> {
     const { store, bus } = this.opts;
@@ -568,6 +569,9 @@ export class CheckRunner {
     }
     // A failure remark is always superseded by the check's next run on the same target.
     if (isFailureRemark(r, t.def.name)) return true;
+    // A remark main no longer matches (resolved as stale when main moved, see resolveStaleRemarks) is superseded by
+    // the check's next deck-wide run: the run reports on the deck as it is now.
+    if (t.laneId === null && t.scopeIds === null && anchorIsStale(t.order, r.anchor)) return true;
     if (await this.actedOn(r, origin)) return false;
     if (t.laneId !== null || t.scopeIds === null) return true;
     const ids = r.anchor.kind === 'range' ? slidesInRange([...t.order], r.anchor) : anchorIds(r.anchor);
@@ -596,7 +600,9 @@ export class CheckRunner {
     // go stale. A lane label is stored as is, so it is named now. A problem reported twice in one answer (the same
     // finding, even reworded) is kept once, as first worded.
     const fresh: Item[] = [];
-    for (const it of items) {
+    for (const raw of items) {
+      // Ranges are stored in deck order (the run's order): only a later move can turn one around.
+      const it = { ...raw, anchor: orderedAnchor(t.order, raw.anchor) };
       if (bestMatch(it, fresh)) continue;
       const lane = it.lane ? { ...it.lane, label: nameSlides(it.lane.label, { order: t.order, slides: t.snap.slides }, { titles: false }) } : null;
       // A render remark is about what the audience sees: a lane that only edits notes or story does not fix it.

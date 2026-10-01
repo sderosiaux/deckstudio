@@ -56,7 +56,10 @@ export function laneRoutes(app: FastifyInstance): void {
     if (!(LIST_STATUSES as readonly string[]).includes(status)) {
       return reply.code(400).send({ error: `invalid status "${status}": expected ${LIST_STATUSES.join(', ')}` });
     }
-    const all = await deckOf(req).store.lanes();
+    const deck = deckOf(req);
+    // Main may have moved without this process rebasing yet (debounce pending, another writer): judge on it first.
+    await deck.lanes.syncWithMain();
+    const all = await deck.store.lanes();
     const open = all.filter((l) => l.status === 'open');
     return withVariants(status === 'all' ? all : all.filter((l) => l.status === status), open);
   });
@@ -70,7 +73,8 @@ export function laneRoutes(app: FastifyInstance): void {
   });
 
   app.get<{ Params: Params }>('/api/lanes/:id', async (req, reply) => {
-    const { store } = deckOf(req);
+    const { store, lanes } = deckOf(req);
+    await lanes.syncWithMain();
     const lane = await store.lane(req.params.id);
     if (!lane) return reply.code(404).send({ error: `unknown lane ${req.params.id}` });
     const open = (await store.lanes()).filter((l) => l.status === 'open');

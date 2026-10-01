@@ -265,3 +265,29 @@ export function slidesInRange(order: SlideId[], anchor: Anchor): SlideId[] {
     }
   }
 }
+
+/** The anchor with a range written backwards (to before from in `order`) turned around; anything else as is. */
+export function orderedAnchor(order: readonly SlideId[], anchor: Anchor): Anchor {
+  if (anchor.kind !== 'range') return anchor;
+  const i = order.indexOf(anchor.from);
+  const j = order.indexOf(anchor.to);
+  return i >= 0 && j >= 0 && i > j ? { kind: 'range', from: anchor.to, to: anchor.from } : anchor;
+}
+
+/**
+ * True when `order` no longer matches what the anchor described: a slide that left it, or a range whose endpoints
+ * a move put the other way round (ranges are stored in deck order, see orderedAnchor).
+ */
+export function anchorIsStale(order: readonly SlideId[], anchor: Anchor): boolean {
+  switch (anchor.kind) {
+    case 'arc':
+      return false;
+    case 'slide':
+      return !order.includes(anchor.slide);
+    case 'range': {
+      const i = order.indexOf(anchor.from);
+      const j = order.indexOf(anchor.to);
+      return i < 0 || j < 0 || i > j;
+    }
+  }
+}

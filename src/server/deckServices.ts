@@ -65,9 +65,11 @@ export async function createDeckServices(opts: DeckServicesOptions): Promise<Dec
   const bus = new Bus();
   const model = (await store.state()).model;
   const checks = opts.checks === undefined ? new CheckRunner({ store, thumbs, bus, model }) : opts.checks;
-  const offs: Array<() => void> = [];
+  const lanes = new LaneService(store, bus);
+  // Whoever moved main (accept, restore, direct edit, co-author tool), the lanes are judged again on it.
+  const offs: Array<() => void> = [bus.on('deck.changed', () => lanes.scheduleSync())];
   if (checks instanceof CheckRunner) {
-    offs.push(bus.on('deck.changed', () => checks.scheduleAfterAccept()));
+    offs.push(bus.on('deck.changed', () => checks.scheduleAfterDeckChange()));
     offs.push(
       bus.on('lane.created', (e) => {
         if (e.type === 'lane.created') checks.scheduleAfterLane(e.laneId);
@@ -87,13 +89,14 @@ export async function createDeckServices(opts: DeckServicesOptions): Promise<Dec
     store,
     bus,
     thumbs,
-    lanes: new LaneService(store, bus),
+    lanes,
     history: new HistoryService(store, bus),
     agent,
     checks,
     dispose: () =>
       (disposed ??= (async () => {
         for (const off of offs) off();
+        lanes.dispose();
         // A turn still running when the deck closes is aborted, not left writing into a closed deck.
         await agent.interrupt();
         if (checks instanceof CheckRunner) checks.dispose();

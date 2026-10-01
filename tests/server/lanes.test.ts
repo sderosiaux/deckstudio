@@ -206,7 +206,8 @@ describe('lanes API', () => {
     const res = await accept('l_a', 'c_bad');
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toMatch(/zz/);
-    expect((await getLane('l_a')).changes[0]!.status).toBe('pending');
+    // The failed accept wrote nothing (a read would rebase the lane: its change can never apply).
+    expect((await store.lane('l_a'))!.changes[0]!.status).toBe('pending');
     expect((await versions()).map((v) => v.n)).toEqual([0, 1]);
 
     expect((await accept('l_nope', 'c_bad')).statusCode).toBe(404);
@@ -410,6 +411,68 @@ describe('lanes API', () => {
     expect(p.slides.s2.title).toBe('S2 preview');
     expect(Object.keys(p.thumbs)).toEqual(['s2']);
     await waitFor(() => events.some((e) => e.type === 'thumb.ready' && e.hash === p.thumbs.s2.hash), { timeout: 20_000 });
+  });
+
+  const listLanes = async (q = ''): Promise<Lane[]> => (await app.inject({ method: 'GET', url: `/api/lanes${q}` })).json();
+  const move = (id: string, target: string, after: string | null): Change => ({ id, kind: 'move', slide: target, after, reason: 'r', status: 'pending' });
+  const openRemarks = async (): Promise<string[]> => ((await app.inject({ method: 'GET', url: '/api/remarks?status=open' })).json() as Remark[]).map((r) => r.id);
+  const remarkBase = { origin: 'check:arc' as const, severity: 'warn' as const, status: 'open' as const, laneId: null, createdAt: '2026-09-30T00:00:00.000Z' };
+
+  it('QA4 a lane on v7 whose field main changes at v8 through a restore is served orphan with its cause, without any accept', async () => {
+    for (let k = 2; k <= 7; k++) await setTitle('s5', `five v${k}`);
+    expect((await store.state()).version).toBe(7);
+    await store.putLane({ ...lane('l_a', [modify('c_a', 's2', 'New title')]), baseVersion: 7 });
+    expect((await listLanes()).map((l) => l.id)).toEqual(['l_a']);
+
+    // v8 written behind the server's back: no event, only the next read can notice it.
+    await setTitle('s2', 'Restored title');
+    const served = await getLane('l_a');
+    expect(served.changes.map((c) => c.status)).toEqual(['orphan']);
+    expect(served.status).toBe('closed');
+    expect((await laneThread('l_a')).join('\n')).toMatch(/title changed on main since v7/);
+    expect((await listLanes()).map((l) => l.id)).toEqual([]);
+    expect(events).toContainEqual({ type: 'lane.closed', laneId: 'l_a' });
+    expect(events.filter((e) => e.type === 'deck.changed')).toEqual([]);
+  });
+
+  it('QA4 any deck.changed (a direct slide edit) rebases open and draft lanes once, with no read and no accept', async () => {
+    await store.putLane(lane('l_a', [modify('c_a', 's2', 'Lane title')]));
+    await store.putLane({ ...lane('l_d', [modify('c_d', 's2', 'Draft title'), modify('c_d4', 's4', 'Four')]), status: 'draft', origin: 'check:order' });
+    const patch = await app.inject({ method: 'PATCH', url: '/api/slides/s2', payload: { title: 'Edited by hand' } });
+    expect(patch.statusCode).toBe(200);
+    await waitFor(() => events.some((e) => e.type === 'lane.closed' && e.laneId === 'l_a'));
+    const a = (await store.lane('l_a'))!;
+    expect(a.changes[0]!.status).toBe('orphan');
+    const d = (await store.lane('l_d'))!;
+    expect(d.status).toBe('draft');
+    expect(d.changes.map((c) => c.status)).toEqual(['orphan', 'pending']);
+    // Each lane's rebase is told once in its thread.
+    expect(await laneThread('l_a')).toHaveLength(1);
+    expect(await laneThread('l_d')).toHaveLength(1);
+  });
+
+  it('QA4 a move that reverses a range remark resolves it; a slide remark and a lane-preview remark stay open', async () => {
+    await store.putLane({ ...lane('l_preview', [modify('c_p', 's5', 'P'), modify('c_p1', 's1', 'P1')]) });
+    await store.putRemarks([
+      { ...remarkBase, id: 'r_range', anchor: { kind: 'range', from: 's2', to: 's4' }, text: 'too long between s2 and s4' },
+      { ...remarkBase, id: 'r_slide', anchor: { kind: 'slide', slide: 's4' }, text: 'dense' },
+      { ...remarkBase, id: 'r_preview', anchor: { kind: 'range', from: 's5', to: 's1' }, text: 'on the preview', origin: 'check:render', sourceLaneId: 'l_preview' },
+    ]);
+    await store.putLane(lane('l_m', [move('c_m', 's4', 's1')]));
+    expect((await accept('l_m', 'c_m')).statusCode).toBe(200);
+    expect((await store.state()).order).toEqual(['s1', 's4', 's2', 's3', 's5']);
+    expect(await openRemarks()).toEqual(['r_slide', 'r_preview']);
+    expect((await store.remarks()).find((r) => r.id === 'r_range')!.status).toBe('resolved');
+    expect(events).toContainEqual({ type: 'remarks.changed' });
+  });
+
+  it('QA4 a reorder written behind the server resolves reversed range remarks on the next lane read', async () => {
+    await store.putRemarks([{ ...remarkBase, id: 'r_range', anchor: { kind: 'range', from: 's1', to: 's3' }, text: 'opening' }]);
+    expect(await openRemarks()).toEqual(['r_range']);
+    const main = await store.snapshot();
+    await store.commit({ ...main, order: ['s3', 's1', 's2', 's4', 's5'] }, { kind: 'restore', from: 1, entry: '{}' });
+    await listLanes();
+    expect(await openRemarks()).toEqual([]);
   });
 });
 

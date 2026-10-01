@@ -200,10 +200,10 @@ describe('CheckRunner', () => {
   it('accepts during a running batch coalesce into exactly one more batch', async () => {
     // Thumbs are not started: render fails before querying, so each batch makes three queries.
     const { r, calls, release } = gated([JSON.stringify({ remarks: [] })], 10);
-    r.scheduleAfterAccept();
+    r.scheduleAfterDeckChange();
     await waitFor(() => calls.length === 1);
     for (let k = 0; k < 3; k++) {
-      r.scheduleAfterAccept();
+      r.scheduleAfterDeckChange();
       await waitFor(() => !timerArmed(r));
     }
     await waitFor(async () => {
@@ -276,12 +276,12 @@ describe('CheckRunner', () => {
     expect((await store.remarks()).map((x) => [x.text, x.laneId])).toEqual([['reorder', l.id]]);
   });
 
-  it('scheduleAfterAccept debounces and then runs the four checks one after the other', async () => {
+  it('scheduleAfterDeckChange debounces and then runs the four checks one after the other', async () => {
     const { r, calls } = runner([JSON.stringify({ remarks: [] })], 30);
     await thumbs.start();
-    r.scheduleAfterAccept();
-    r.scheduleAfterAccept();
-    r.scheduleAfterAccept();
+    r.scheduleAfterDeckChange();
+    r.scheduleAfterDeckChange();
+    r.scheduleAfterDeckChange();
     await waitFor(() => calls.length >= 4 && events.filter((e) => e.type === 'checks.status').length >= 8, { timeout: 20_000 });
     expect(calls.map((c) => c.options.systemPrompt)).toEqual([CHECKS.arc.system, CHECKS.order.system, CHECKS.gaps.system, CHECKS.render.system]);
     expect(calls[3]!.options).toMatchObject({ allowedTools: ['Read'], maxTurns: 6 });
@@ -500,6 +500,25 @@ describe('CheckRunner', () => {
       ['r_preview', 'open'],
       ['r_user', 'open'],
     ]);
+  });
+
+  it('QA4 a remark whose range a move reversed is resolved, then superseded by the next run of its check', async () => {
+    const base = { origin: 'check:arc' as const, severity: 'warn' as const, status: 'open' as const, laneId: null, createdAt: '2026-09-30T00:00:00.000Z' };
+    await store.putRemarks([
+      { ...base, id: 'r_gone_away', anchor: { kind: 'range', from: 's2', to: 's4' }, text: 'twelve slides before the answer' },
+      { ...base, id: 'r_order', anchor: { kind: 'range', from: 's2', to: 's4' }, text: 'order finding', origin: 'check:order' },
+    ]);
+    const main = await store.snapshot();
+    await store.commit({ ...main, order: ['s1', 's4', 's2', 's3', 's5'] }, { kind: 'restore', from: 1, entry: '{}' });
+    await runner([JSON.stringify({ remarks: [] })]).r.run('arc');
+    // The arc run supersedes its own stale remark; the order remark waits, resolved, for the order run.
+    expect((await store.remarks()).map((x) => [x.id, x.status])).toEqual([['r_order', 'resolved']]);
+    await runner([remarkJson({ kind: 'range', from: 's3', to: 's2' }, 'order finding')]).r.run('order');
+    // The stale remark is gone; the finding made on the current order replaces it, stored in deck order.
+    const after = await store.remarks();
+    expect(after.map((x) => [x.origin, x.status, x.text])).toEqual([['check:order', 'open', 'order finding']]);
+    expect(after[0]!.id).not.toBe('r_order');
+    expect(after[0]!.anchor).toEqual({ kind: 'range', from: 's2', to: 's3' });
   });
 
   it('QA3 render lanes must change what is rendered: a notes-only lane is dropped, the remark stays without a draft', async () => {

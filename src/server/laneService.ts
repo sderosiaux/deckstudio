@@ -1,5 +1,5 @@
 import { hashSlide, newId } from '../model/ids.js';
-import { ALREADY_ON_MAIN, applyChange, rebaseLane } from '../model/ops.js';
+import { ALREADY_ON_MAIN, anchorIsStale, applyChange, rebaseLane } from '../model/ops.js';
 import type { Change, Lane, Remark, SlideId, Snapshot, Version } from '../model/types.js';
 import type { DeckStore } from '../store/deckStore.js';
 import type { Bus } from './bus.js';
@@ -41,7 +41,22 @@ export function resolveLaneRemarks(remarks: readonly Remark[], closedLaneIds: re
   return changed ? next : null;
 }
 
-/** Open lanes rewritten after main moved; `remarksChanged` when some remark of a now-closed lane was resolved. */
+/**
+ * Resolves the open remarks about main whose anchor no longer matches `order`: a slide that left main, or a range a
+ * move reversed. Their wording described a deck that is gone; the next run of their check reports on the new one.
+ * Remarks found on a lane preview are left alone (their anchor lives in the preview's order). Null when nothing changes.
+ */
+export function resolveStaleRemarks(remarks: readonly Remark[], order: readonly SlideId[]): Remark[] | null {
+  let changed = false;
+  const next = remarks.map((r) => {
+    if (r.status !== 'open' || r.sourceLaneId || !anchorIsStale(order, r.anchor)) return r;
+    changed = true;
+    return { ...r, status: 'resolved' as const };
+  });
+  return changed ? next : null;
+}
+
+/** Open lanes rewritten after main moved; `remarksChanged` when some remark was resolved (closed lane, stale anchor). */
 export interface LaneRebase {
   lanes: Lane[];
   remarksChanged: boolean;
@@ -109,9 +124,10 @@ export async function rebaseOnMain(store: DeckStore, lane: Lane, main: Snapshot,
 /**
  * Call under the deck lock right after a commit moved main to `main` (or whenever main may have moved under the
  * lanes). Rebases every open lane on it (orphaning stale changes, accepting those already on main), closes lanes
- * left without a pending change and resolves their remarks. `touched` is a lane the caller already modified (the
- * one whose change was just accepted): it is always written and listed first.
- * Draft lanes are rebased too (they may end up closed) but otherwise stay drafts.
+ * left without a pending change and resolves their remarks, and resolves remarks whose anchor main no longer matches.
+ * `touched` is a lane the caller already modified (the one whose change was just accepted): it is always written
+ * and listed first. Draft lanes are rebased too (they may end up closed) but otherwise stay drafts.
+ * Idempotent: a second call on the same main changes nothing and writes no thread note.
  */
 export async function rebaseOpenLanesAfterMain(store: DeckStore, main: Snapshot, touched?: Lane): Promise<LaneRebase> {
   // Drafts are rebased like open lanes: main moved under them too.
@@ -124,9 +140,11 @@ export async function rebaseOpenLanesAfterMain(store: DeckStore, main: Snapshot,
     await store.putLane(next);
     lanes.push(next);
   }
-  const resolved = resolveLaneRemarks(await store.remarks(), lanes.filter((l) => l.status === 'closed').map((l) => l.id));
-  if (resolved) await store.putRemarks(resolved);
-  return { lanes, remarksChanged: resolved !== null };
+  const remarks = await store.remarks();
+  const ofLanes = resolveLaneRemarks(remarks, lanes.filter((l) => l.status === 'closed').map((l) => l.id)) ?? remarks;
+  const resolved = resolveStaleRemarks(ofLanes, main.order) ?? ofLanes;
+  if (resolved !== remarks) await store.putRemarks(resolved);
+  return { lanes, remarksChanged: resolved !== remarks };
 }
 
 /** Emits what a rebase changed. Call after releasing the deck lock, once deck.changed went out. */
@@ -140,15 +158,59 @@ function emitLane(bus: Bus, lane: Lane): void {
   if (lane.status === 'closed') bus.emit({ type: 'lane.closed', laneId: lane.id });
 }
 
+/** Quiet period after the last deck.changed before the lanes are rebased on main. */
+export const LANE_SYNC_DEBOUNCE_MS = 100;
+
 /**
  * Every lane mutation runs under the deck lock, so accepts are strictly sequential
  * and each one applies on top of the previous commit (Review Focus 5).
+ * Lanes follow main: every deck change schedules a rebase (scheduleSync), and reads rebase first when main moved
+ * since the last one (syncWithMain), so a lane is never served as judged on an older main, whoever moved it.
  */
 export class LaneService {
+  /** Deck version the lanes were last rebased on, in this process. Null: not yet. */
+  private rebasedAt: number | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
+
   constructor(
     private readonly store: DeckStore,
     private readonly bus: Bus,
+    private readonly debounceMs = LANE_SYNC_DEBOUNCE_MS,
   ) {}
+
+  /**
+   * Rebases every open and draft lane on main (and resolves the remarks it leaves stale) unless that was already
+   * done for the current version. Emits what changed.
+   */
+  async syncWithMain(): Promise<void> {
+    const rebase = await this.store.withLock(async () => {
+      const { version } = await this.store.state();
+      if (version === this.rebasedAt) return null;
+      const out = await rebaseOpenLanesAfterMain(this.store, await this.store.snapshot());
+      this.rebasedAt = version;
+      return out;
+    });
+    if (rebase) emitLaneRebase(this.bus, rebase);
+  }
+
+  /** Debounced syncWithMain, for deck.changed: a burst of changes costs one rebase. */
+  scheduleSync(): void {
+    if (this.disposed) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.disposed) return;
+      this.syncWithMain().catch((e: unknown) => console.error(`[lanes] rebase after a deck change failed: ${e instanceof Error ? e.message : String(e)}`));
+    }, this.debounceMs);
+    this.timer.unref?.();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
 
   async accept(laneId: string, changeId: string): Promise<{ version: Version; lane: Lane }> {
     const out = await this.store.withLock(async () => {
@@ -161,6 +223,7 @@ export class LaneService {
       // Acting on a draft opens it.
       const accepted: Lane = { ...this.withStatus(lane, changeId, 'accepted'), status: 'open' };
       const rebase = await rebaseOpenLanesAfterMain(this.store, res.next, accepted);
+      this.rebasedAt = version.n;
       return { version, rebase };
     });
 

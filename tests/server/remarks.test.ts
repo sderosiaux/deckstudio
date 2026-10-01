@@ -86,6 +86,14 @@ describe('remarks and checks API', () => {
     expect(events).toContainEqual({ type: 'remarks.changed' });
   });
 
+  it('QA4 a range written backwards is stored in deck order, so a later deck change cannot read it as reversed', async () => {
+    await build();
+    const res = await create({ anchor: { kind: 'range', from: 's4', to: 's2' }, text: 'Thin middle.', severity: 'warn' });
+    expect(res.statusCode).toBe(201);
+    expect((res.json() as Remark).anchor).toEqual({ kind: 'range', from: 's2', to: 's4' });
+    expect((await store.remarks())[0]!.anchor).toEqual({ kind: 'range', from: 's2', to: 's4' });
+  });
+
   it('rejects an invalid body or an anchor on an unknown slide, saving nothing', async () => {
     await build();
     expect((await create({ anchor: { kind: 'arc' }, text: '', severity: 'warn' })).statusCode).toBe(400);
@@ -294,6 +302,21 @@ describe('remarks and checks API', () => {
       return (await status()).running.length === 0;
     });
     // Thumbs are not started: render fails before querying. arc, order and gaps each ran once.
+    expect(queried).toHaveLength(3);
+  });
+
+  it('QA4 a history restore schedules exactly one batch of checks', async () => {
+    const { runner, queried, release } = gatedRunner();
+    await build(runner);
+    const main = await store.snapshot();
+    await store.commit({ ...main, slides: { ...main.slides, s2: { ...main.slides.s2!, title: 'Changed' } } }, { kind: 'import' });
+    const res = await app.inject({ method: 'POST', url: '/api/history/restore', payload: { from: 1, entry: { kind: 'modified', slide: 's2', fields: ['title'] } } });
+    expect(res.statusCode).toBe(200);
+    await waitFor(() => queried.length === 1);
+    await waitFor(async () => {
+      release();
+      return queried.length >= 3 && (await status()).running.length === 0;
+    });
     expect(queried).toHaveLength(3);
   });
 });

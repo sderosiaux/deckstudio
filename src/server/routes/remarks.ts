@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { nameSlides, type SlideBook } from '../../agent/checks/index.js';
 import type { AgentSession } from '../../agent/session.js';
 import { newId } from '../../model/ids.js';
+import { orderedAnchor } from '../../model/ops.js';
 import { AddRemarkInputSchema } from '../../model/schema.js';
 import type { Anchor, Remark } from '../../model/types.js';
 import type { DeckStore } from '../../store/deckStore.js';
@@ -56,6 +57,8 @@ export function remarkRoutes(app: FastifyInstance): void {
       return reply.code(400).send({ error: `invalid status "${status}": expected open or resolved` });
     }
     const { store, lanes } = deckOf(req);
+    // Remarks main no longer matches are resolved by the same rebase that judges the lanes.
+    await lanes.syncWithMain();
     const all = openFirst(await presentRemarks(await store.remarks(), store, lanes));
     return status ? all.filter((r) => r.status === status) : all;
   });
@@ -67,11 +70,13 @@ export function remarkRoutes(app: FastifyInstance): void {
     const { anchor, text, severity } = parsed.data;
     // Same lock as lanes and the agent's add_remark: remarks.json is read-modify-written by all of them.
     const out = await store.withLock(async () => {
-      const unknown = unknownSlides((await store.state()).order, anchor as Anchor);
+      const { order } = await store.state();
+      const unknown = unknownSlides(order, anchor as Anchor);
       if (unknown.length) return { error: `anchor references unknown slide id(s): ${unknown.join(', ')}` } as const;
       const remark: Remark = {
         id: newId('r'),
-        anchor: anchor as Anchor,
+        // In deck order: a range only reads as reversed once a move turned it around (see anchorIsStale).
+        anchor: orderedAnchor(order, anchor as Anchor),
         text,
         origin: 'user',
         severity,

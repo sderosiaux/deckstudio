@@ -5,7 +5,7 @@ import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@
 import { z } from 'zod';
 import { newId } from '../model/ids.js';
 import { imageStyleFor, type ImageGen } from './imageGen.js';
-import { applyChange, validateBody } from '../model/ops.js';
+import { applyChange, orderedAnchor, validateBody } from '../model/ops.js';
 import { AddRemarkInputSchema, NewChangeSchema, ProposeLaneInputSchema, SlideKindSchema, type NewChange } from '../model/schema.js';
 import type { Anchor, Change, Lane, Origin, Remark, Snapshot } from '../model/types.js';
 import { loadThemeCss } from '../render/defaultTheme.js';
@@ -571,11 +571,12 @@ export function makeDeckToolHandlers(ctx: DeckToolContext): DeckToolHandlers {
       if (!p.ok) return p.err;
       const { anchor, text, severity } = p.value;
       return store.withLock(async () => {
-        const anchorErr = anchorProblem(await store.snapshot(), anchor);
+        const main = await store.snapshot();
+        const anchorErr = anchorProblem(main, anchor);
         if (anchorErr) return { error: `Rejected; nothing was saved: ${anchorErr}` };
         const remark: Remark = {
           id: newId('r'),
-          anchor,
+          anchor: orderedAnchor(main.order, anchor),
           text,
           origin: 'user',
           severity,
