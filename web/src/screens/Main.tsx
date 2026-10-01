@@ -29,7 +29,7 @@ import {
 } from '../api.js';
 import { EdgeFade, useVisibleColumns } from '../components/EdgeFade.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { FAILED_THUMB, LaneRow, MoveRisers, anchorColumns, laneLetter, movedColumns } from '../components/LaneRow.js';
+import { FAILED_THUMB, LaneRow, MoveRisers, anchorColumns, movedColumns } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
 import { RemarkRow, placeCards, type Pinned } from '../components/RemarkRow.js';
 import { ScreenHeader } from '../components/ScreenHeader.js';
@@ -442,6 +442,50 @@ export function Main() {
     return () => removeEventListener('keydown', onKey);
   }, [context]);
 
+  // Escape clears the selection; Home and End take the canvas to the start and the end of the strip. Never while typing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.defaultPrevented || modified(e) || typingIn(e.target)) return;
+      if (e.key === 'Escape') {
+        setContext((c) => (c.kind === 'arc' ? c : { kind: 'arc' }));
+        return;
+      }
+      const el = canvas.current;
+      if (!el || (e.key !== 'Home' && e.key !== 'End')) return;
+      e.preventDefault();
+      el.scrollLeft = e.key === 'End' ? el.scrollWidth : 0;
+    };
+    addEventListener('keydown', onKey);
+    return () => removeEventListener('keydown', onKey);
+  }, []);
+
+  // A plain mouse has one wheel: shift+wheel scrolls the strip sideways (a horizontal wheel or trackpad does natively).
+  useEffect(() => {
+    const el = canvas.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent): void => {
+      if (!e.shiftKey || e.deltaX !== 0 || e.deltaY === 0) return;
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [load.status]);
+
+  // The versions rail is pinned under the canvas, outside it: the canvas ends on a blank as tall as the rail, so the
+  // last lane row scrolls well clear of the rail's edge.
+  const rail = useRef<HTMLDivElement>(null);
+  const [railHeight, setRailHeight] = useState(0);
+  useLayoutEffect(() => {
+    const el = rail.current;
+    if (!el) return;
+    const measure = (): void => setRailHeight(el.offsetHeight);
+    measure();
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, [load.status]);
+
   // Clicking empty space (not a thumb, not a button) clears the selection back to the whole deck.
   const clearOnEmpty = (e: MouseEvent<HTMLElement>): void => {
     if (e.target instanceof Element && e.target.closest('button, a, input, [data-testid="thumb"], [data-testid="post-it"]')) return;
@@ -475,6 +519,12 @@ export function Main() {
   };
   const trackedRemarkApi = { proposeRemark: propose, resolveRemark: remarkApi.resolveRemark };
   const draftOf = (r: Remark): string | undefined => (r.laneId && drafts.has(r.laneId) ? r.laneId : undefined);
+  // The remark's lane is open on main (opened from its card, or proposed from it): the card names it, linked to its row.
+  const openedLane = (r: Remark): { label: string; onShow(): void } | undefined => {
+    const lane = r.laneId ? lanes.find((l) => l.id === r.laneId) : undefined;
+    if (!lane) return undefined;
+    return { label: lane.label, onShow: () => document.getElementById(`lane-row-${lane.id}`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }) };
+  };
   const pinned: Pinned[] = mainRemarks.flatMap((remark) => {
     if (remark.anchor.kind === 'arc') return [];
     const cols = anchorColumns(remark.anchor, deck.order);
@@ -489,7 +539,15 @@ export function Main() {
         selected,
         card: (
           <div onClick={() => setContext(remark.anchor)} style={{ cursor: 'pointer' }}>
-            <RemarkPostIt remark={remark} onPropose={propose} onResolve={remarkApi.resolveRemark} draftLaneId={draftOf(remark)} onOpenLane={openLane} selected={selected} />
+            <RemarkPostIt
+              remark={remark}
+              onPropose={propose}
+              onResolve={remarkApi.resolveRemark}
+              draftLaneId={draftOf(remark)}
+              onOpenLane={openLane}
+              selected={selected}
+              openedLane={openedLane(remark)}
+            />
           </div>
         ),
       },
@@ -501,7 +559,7 @@ export function Main() {
   const mainAvoid = movedBelow(0);
   // Main keeps its lanes in view: one row of cards, the selection's own remarks first; the pins still mark every slide.
   const hiddenRemarks = pinned.length - placeCards(pinned, deck.order.length, REMARK_ROWS, view, mainAvoid).length;
-  const warnCount = mainRemarks.filter((r) => r.severity === 'warn').length;
+  const openCount = mainRemarks.length;
   // The player opens on the selected slide (last of a range); Escape in the player comes back here with it selected.
   const presentSlide = context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : null;
   const presentHref = playerHref(presentSlide ? deck.order.indexOf(presentSlide) : -1);
@@ -539,13 +597,19 @@ export function Main() {
             style={{ marginLeft: 'auto', color: 'var(--ink)', display: 'inline-flex', gap: 6, alignItems: 'baseline' }}
           >
             <span>Brief and checks</span>
-            {warnCount > 0 ? <span data-testid="warn-badge" className="meta">{warnCount}</span> : null}
+            {openCount > 0 ? <span data-testid="remark-count" className="meta">{openCount} open {openCount === 1 ? 'remark' : 'remarks'}</span> : null}
           </a>
           <a href={presentHref} className="btn-primary" title="esc returns here" style={{ alignSelf: 'center' }}>Present</a>
         </ScreenHeader>
-        {/* Sized to its rows (scrolling past the window height): the versions rail follows 48px under the lowest lane element. */}
-        <div style={{ position: 'relative', flex: '0 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <main ref={canvas} data-testid="canvas" className="fit-columns" onClick={clearOnEmpty} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '8px 24px 24px 24px' }}>
+        {/* The canvas takes the height left above the versions rail and scrolls both ways; the rail stays put under it. */}
+        <div style={{ position: 'relative', flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <main
+            ref={canvas}
+            data-testid="canvas"
+            className="fit-columns"
+            onClick={clearOnEmpty}
+            style={{ flex: 1, minHeight: 0, overflow: 'auto', paddingTop: 8, paddingRight: 24, paddingLeft: 24, paddingBottom: railHeight }}
+          >
             {deck.order.length === 0 ? (
               <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
             ) : (
@@ -562,20 +626,27 @@ export function Main() {
                     order={deck.order}
                     slides={deck.slides}
                     thumbs={shownThumbs}
-                    selected={context.kind === 'slide' ? context.slide : context.kind === 'range' ? context.to : undefined}
+                    selected={context.kind === 'slide' ? context.slide : rangeCols ? deck.order.slice(rangeCols.start, rangeCols.start + rangeCols.span) : undefined}
                     onSelect={onSelect}
                     onOpen={presentFrom}
                     titleLink={context.kind === 'slide' ? editLink : undefined}
                   />
                   {rangeCols
-                    ? gridRow(<div data-testid="range-selection" style={{ gridColumn: `${rangeCols.start + 1} / span ${rangeCols.span}`, height: 2, borderRadius: 1, background: 'var(--accent)' }} />)
+                    ? gridRow(
+                        <div style={{ gridColumn: `${rangeCols.start + 1} / span ${rangeCols.span}`, marginTop: -16 }}>
+                          <div data-testid="range-selection" style={{ height: 2, borderRadius: 1, background: 'var(--accent)' }} />
+                          <span data-testid="range-caption" className="meta" style={{ display: 'block', marginTop: 2, color: 'var(--ink)', fontWeight: 500, whiteSpace: 'nowrap' }}>
+                            {anchorLabel(context, deck.order)}
+                          </span>
+                        </div>,
+                      )
                     : null}
                   {pinned.length > 0 ? (
                     <div style={{ display: 'flex', marginTop: 2 }}>
                       <div className="gutter" style={{ paddingTop: 14 }}>
                         {hiddenRemarks > 0 ? (
                           <span className="meta" data-testid="remarks-more" style={{ display: 'block' }}>
-                            {hiddenRemarks} more {hiddenRemarks === 1 ? 'remark' : 'remarks'}: select a slide to see its own
+                            {hiddenRemarks} more {hiddenRemarks === 1 ? 'remark' : 'remarks'}: select a slide
                           </span>
                         ) : null}
                       </div>
@@ -602,7 +673,6 @@ export function Main() {
                     <LaneRow
                       key={l.id}
                       lane={l}
-                      letter={laneLetter(i)}
                       preview={previews[l.id]}
                       mainOrder={deck.order}
                       mainThumbs={shownThumbs}
@@ -621,8 +691,7 @@ export function Main() {
           </main>
           <EdgeFade visible={visible} />
         </div>
-        {/* 24px here plus the canvas's 24px bottom padding. */}
-        <div style={{ padding: '24px 24px 16px' }}>
+        <div ref={rail} data-testid="versions-rail" style={{ flex: '0 0 auto', padding: '16px 24px', borderTop: '1px solid var(--line)', background: 'var(--paper)' }}>
           <VersionLine versions={versions} current={deck.state.version} />
         </div>
       </div>

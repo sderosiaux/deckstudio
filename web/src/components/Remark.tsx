@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
+import { useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import type { Anchor, Remark as RemarkT, SlideId } from '../../../src/model/types.js';
 
 /** Short anchor label against main's current order: "slide 6", "slides 14–19", "arc". */
@@ -109,7 +109,15 @@ export interface PostItProps {
   onOpenLane?(laneId: string): Promise<void>;
   /** The current selection is on this remark's slides: the one card with an accent border. */
   selected?: boolean;
+  /** The lane linked to this remark is open on main: the card names it, as a link that brings its row into view. */
+  openedLane?: { label: string; onShow(): void } | undefined;
 }
+
+/** A click on a card's action is that action only: it never reaches the card, which selects the remark's slides. */
+const only = (fn: () => void) => (e: MouseEvent): void => {
+  e.stopPropagation();
+  fn();
+};
 
 const CLAMP_LINES = 3;
 const LINE_H = 1.35;
@@ -171,9 +179,9 @@ function WordClamp({ text, lines }: { text: string; lines: number }) {
 }
 
 /** A remark pinned under its slide: a plain card with the text (three lines at most, cut after a word), propose and resolve. Fills its slot's width. */
-export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpenLane, selected = false }: PostItProps) {
+export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpenLane, selected = false, openedLane }: PostItProps) {
   const [state, setState] = useState<{ kind: 'idle' } | { kind: 'busy' } | { kind: 'sent' } | { kind: 'opened' } | { kind: 'error'; message: string }>({ kind: 'idle' });
-  const draft = draftLaneId !== undefined && onOpenLane !== undefined;
+  const draft = draftLaneId !== undefined && onOpenLane !== undefined && !openedLane;
   const act = (fn: () => Promise<unknown>, after: 'idle' | 'sent' | 'opened'): void => {
     setState({ kind: 'busy' });
     fn().then(
@@ -192,6 +200,7 @@ export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpen
         position: 'relative',
         zIndex: 1,
         width: '100%',
+        minWidth: 0,
         padding: '8px 10px',
         borderRadius: 'var(--radius)',
         background: 'var(--card)',
@@ -210,21 +219,30 @@ export function RemarkPostIt({ remark, onPropose, onResolve, draftLaneId, onOpen
           {state.kind === 'opened' ? 'opening…' : 'draft ready'}
         </span>
       ) : null}
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-        {draft ? (
-          <button type="button" className="link" disabled={state.kind === 'busy' || state.kind === 'opened'} onClick={() => act(() => onOpenLane(draftLaneId), 'opened')} style={verb}>
+      {openedLane ? (
+        <button type="button" className="link" data-testid="lane-opened" onClick={only(openedLane.onShow)} style={{ ...verb, overflowWrap: 'anywhere', whiteSpace: 'normal' }}>
+          lane opened: {openedLane.label}
+        </button>
+      ) : null}
+      {/* Actions wrap inside the card: a narrow card stacks them, never spills them over its border. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: 12, rowGap: 4, alignItems: 'center', minWidth: 0 }}>
+        {openedLane ? null : draft ? (
+          <button type="button" className="link" disabled={state.kind === 'busy' || state.kind === 'opened'} onClick={only(() => act(() => onOpenLane(draftLaneId), 'opened'))} style={verb}>
             open lane
           </button>
         ) : (
-          <button type="button" className="link" disabled={state.kind === 'busy'} onClick={() => act(() => onPropose(remark.id), 'sent')} style={verb}>
+          <button type="button" className="link" disabled={state.kind === 'busy'} onClick={only(() => act(() => onPropose(remark.id), 'sent'))} style={verb}>
             {state.kind === 'sent' ? 'asked' : 'propose'}
           </button>
         )}
-        <button type="button" className="link" aria-label="resolve" disabled={state.kind === 'busy'} onClick={() => act(() => onResolve(remark.id), 'idle')} style={{ fontSize: 12 }}>
+        <button type="button" className="link" aria-label="resolve" disabled={state.kind === 'busy'} onClick={only(() => act(() => onResolve(remark.id), 'idle'))} style={{ fontSize: 12 }}>
           resolve
         </button>
-        {remark.severity === 'info' ? <span className="meta">info</span> : null}
         {state.kind === 'error' ? <span style={{ fontSize: 12, color: 'var(--warn)' }} title={state.message}>failed</span> : null}
+        {/* The severity is a fact about the remark, not an action: a muted tag at the end, and clicking it does nothing. */}
+        <span data-testid="severity-tag" className="tag" onClick={(e) => e.stopPropagation()} style={{ marginLeft: 'auto' }}>
+          {remark.severity}
+        </span>
       </div>
     </div>
   );

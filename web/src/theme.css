@@ -76,3 +76,12 @@ button { font: inherit; }
 .thumb-title-link { visibility: visible; pointer-events: auto; cursor: pointer; text-decoration: none; transition: color .15s ease; }
 .thumb-title-link:hover { color: var(--accent); }
 [role='list']:hover .thumb-wrap:not(:hover) .thumb-title-link { visibility: hidden; }
+
+/* A muted fact about an item (a remark's severity): a small outlined pill, never styled like an action. */
+.tag {
+  display: inline-block; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); background: var(--paper);
+  font-size: var(--fs-meta); line-height: 16px; color: var(--grey); cursor: default; user-select: none;
+}
+
+/* A range on main: every slide of it is ringed; their titles stay hidden (they would overlap), the range caption names it. */
+[data-range] .thumb[aria-pressed='true']:not(:hover) .thumb-title { visibility: hidden; }

@@ -125,7 +125,7 @@ const remark = (id: string, over: Partial<Remark>): Remark => ({
   createdAt: '2026-09-30T00:00:00.000Z',
   ...over,
 });
-const warnBadge = (): string | null => screen.queryByTestId('warn-badge')?.textContent ?? null;
+const remarkCount = (): string | null => screen.queryByTestId('remark-count')?.textContent ?? null;
 
 const laneCell = (laneId: string, slideId: SlideId): HTMLElement => {
   const row = screen.getAllByTestId('lane-row').find((r) => r.getAttribute('data-lane') === laneId)!;
@@ -342,7 +342,7 @@ describe('Main remarks', () => {
     expect(cols('r_slide')).toBe('1+1');
     expect(slot('r_range')).toBeUndefined();
     expect(screen.getByTestId('remarks-more').textContent).toContain('1 more remark');
-    expect(warnBadge()).toBe('1');
+    expect(remarkCount()).toBe('2 open remarks');
     // Selecting a slide of the range puts its remark first.
     fireEvent.click(screen.getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's4')!);
     await waitFor(() => slot('r_range') !== undefined);
@@ -353,10 +353,10 @@ describe('Main remarks', () => {
     m.getRemarks.mockResolvedValue([remark('r_slide', { anchor: { kind: 'slide', slide: 's2' }, status: 'resolved' })]);
     emit({ type: 'remarks.changed' });
     await waitFor(() => screen.queryByTestId('post-its') === null);
-    expect(warnBadge()).toBeNull();
+    expect(remarkCount()).toBeNull();
   });
 
-  it('a lane-scoped remark shows under that lane cell, not under main, and does not count in the warn badge', async () => {
+  it('a lane-scoped remark shows under that lane cell, not under main, and does not count in the header', async () => {
     m.getRemarks.mockResolvedValue([remark('r_lane', { anchor: { kind: 'slide', slide: 's3' }, sourceLaneId: 'l1' })]);
     await mounted();
     const laneRemarks = (laneId: string) => {
@@ -370,7 +370,7 @@ describe('Main remarks', () => {
     expect(screen.queryByTestId('post-its')).toBeNull();
     expect(screen.getAllByTestId('post-it')).toHaveLength(1);
     expect(laneRemarks('l2')).toHaveLength(0);
-    expect(warnBadge()).toBeNull();
+    expect(remarkCount()).toBeNull();
 
     fireEvent.click(within(slot!).getByRole('button', { name: 'resolve' }));
     expect(m.resolveRemark).toHaveBeenCalledWith('r_lane');
@@ -466,5 +466,141 @@ describe('subscribe', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('Main QA1', () => {
+  const mainThumb = (id: SlideId): HTMLElement => screen.getAllByTestId('thumb').find((t) => t.closest('[data-strip="main"]') && t.getAttribute('data-slide') === id)!;
+  const pressed = (): string[] =>
+    screen
+      .getAllByTestId('thumb')
+      .filter((t) => t.closest('[data-strip="main"]') && t.getAttribute('aria-pressed') === 'true')
+      .map((t) => t.getAttribute('data-slide')!);
+  const postIt = (id: string): HTMLElement => screen.getAllByTestId('post-it').find((p) => p.getAttribute('data-remark') === id)!;
+  afterEach(() => {
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it('action clicks on a remark card (resolve, propose, its severity tag) leave the selection as it was', async () => {
+    m.getRemarks.mockResolvedValue([remark('r_s2', { anchor: { kind: 'slide', slide: 's2' }, severity: 'info' })]);
+    await mounted();
+    await waitFor(() => screen.queryAllByTestId('post-it').length === 1);
+    fireEvent.click(mainThumb('s4'));
+    expect(pressed()).toEqual(['s4']);
+    fireEvent.click(within(postIt('r_s2')).getByTestId('severity-tag'));
+    expect(pressed()).toEqual(['s4']);
+    fireEvent.click(within(postIt('r_s2')).getByRole('button', { name: 'propose' }));
+    expect(m.proposeRemark).toHaveBeenCalledWith('r_s2');
+    expect(pressed()).toEqual(['s4']);
+    const resolve = within(postIt('r_s2')).getByRole('button', { name: 'resolve' }) as HTMLButtonElement;
+    await waitFor(() => !resolve.disabled);
+    fireEvent.click(resolve);
+    expect(m.resolveRemark).toHaveBeenCalledWith('r_s2');
+    expect(pressed()).toEqual(['s4']);
+    // The card body itself still selects what the remark is about.
+    fireEvent.click(within(postIt('r_s2')).getByText('text r_s2'));
+    expect(pressed()).toEqual(['s2']);
+  });
+
+  it('accept, refuse and discard on a lane row leave the selection as it was', async () => {
+    await mounted();
+    fireEvent.click(mainThumb('s1'));
+    const row = screen.getAllByTestId('lane-row')[0]!;
+    for (const b of within(row).getAllByRole('button').filter((x) => /^(accept|refuse)/.test(x.getAttribute('aria-label') ?? '') || x.textContent === 'discard lane')) {
+      fireEvent.click(b);
+    }
+    expect(pressed()).toEqual(['s1']);
+  });
+
+  it('a shift-click range rings every slide of the range, not only its last one', async () => {
+    await mounted();
+    fireEvent.click(mainThumb('s2'));
+    fireEvent.click(mainThumb('s4'), { shiftKey: true });
+    expect(pressed()).toEqual(['s2', 's3', 's4']);
+    expect(screen.getByTestId('range-caption').textContent).toBe('slides 2–4');
+  });
+
+  it('Escape clears the selection, but not while typing in a text field', async () => {
+    await mounted();
+    fireEvent.click(mainThumb('s3'));
+    fireEvent.keyDown(screen.getByLabelText('message'), { key: 'Escape' });
+    expect(pressed()).toEqual(['s3']);
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(pressed()).toEqual([]);
+  });
+
+  it('End and Home scroll the canvas to the end and the start of the strip; shift+wheel scrolls it sideways', async () => {
+    await mounted();
+    const canvas = screen.getByTestId('canvas');
+    Object.defineProperty(canvas, 'scrollWidth', { configurable: true, value: 4000 });
+    fireEvent.keyDown(document.body, { key: 'End' });
+    expect(canvas.scrollLeft).toBe(4000);
+    fireEvent.keyDown(document.body, { key: 'Home' });
+    expect(canvas.scrollLeft).toBe(0);
+    fireEvent.wheel(canvas, { deltaY: 120, deltaX: 0, shiftKey: true });
+    expect(canvas.scrollLeft).toBe(120);
+    // A plain vertical wheel is left to the browser.
+    fireEvent.wheel(canvas, { deltaY: 120, deltaX: 0 });
+    expect(canvas.scrollLeft).toBe(120);
+  });
+
+  it('the lane rows scroll inside the canvas; the versions rail sits outside it and the canvas keeps a bottom padding of its height', async () => {
+    const third = mkLane('l3', 's1', '2026-09-30T00:00:02.000Z');
+    const all = [...lanes, third];
+    m.getLanes.mockImplementation(async (status?: string) => (status === undefined ? all : []));
+    m.getLane.mockImplementation(async (id: string) => all.find((l) => l.id === id));
+    m.getLanePreview.mockImplementation(async (id: string) => previewOf(id, id === 'l1' ? 's3' : id === 'l2' ? 's5' : 's1'));
+    const desc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight')!;
+    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.getAttribute('data-testid') === 'versions-rail' ? 96 : 0;
+      },
+    });
+    try {
+      render(<Main />);
+      await waitFor(() => screen.queryAllByTestId('lane-row').length === 3);
+      const canvas = screen.getByTestId('canvas');
+      const rail = screen.getByTestId('versions-rail');
+      const last = screen.getAllByTestId('lane-row')[2]!;
+      expect(canvas.contains(last)).toBe(true);
+      expect(canvas.contains(rail)).toBe(false);
+      expect(canvas.style.overflow).toBe('auto');
+      await waitFor(() => canvas.style.paddingBottom === '96px');
+    } finally {
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', desc);
+    }
+  });
+
+  it('lane rows carry their full title and no letter', async () => {
+    await mounted();
+    expect(screen.getAllByTestId('lane-name').map((n) => n.textContent)).toEqual(['lane l1', 'lane l2']);
+  });
+
+  it('a remark whose lane is open on main says "lane opened: <title>" as a link that scrolls to that row', async () => {
+    m.getRemarks.mockResolvedValue([remark('r_o', { anchor: { kind: 'slide', slide: 's5' }, laneId: 'l2' })]);
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    await mounted();
+    const link = await waitFor(() => screen.queryByTestId('lane-opened'));
+    expect(link.textContent).toBe('lane opened: lane l2');
+    fireEvent.click(mainThumb('s1'));
+    scrolled.mockClear();
+    fireEvent.click(link);
+    expect((scrolled.mock.contexts[0] as HTMLElement).id).toBe('lane-row-l2');
+    expect(pressed()).toEqual(['s1']);
+  });
+
+  it('the header counts open remarks with a label; "N more remarks" counts only the cards not shown', async () => {
+    m.getRemarks.mockResolvedValue([
+      remark('r_a', { anchor: { kind: 'slide', slide: 's1' } }),
+      remark('r_b', { anchor: { kind: 'slide', slide: 's2' }, severity: 'info' }),
+      remark('r_c', { anchor: { kind: 'slide', slide: 's5' }, severity: 'info' }),
+    ]);
+    await mounted();
+    await waitFor(() => screen.queryAllByTestId('post-it').length > 0);
+    expect(screen.getByTestId('remark-count').textContent).toBe('3 open remarks');
+    const shown = screen.getAllByTestId('post-it').length;
+    expect(screen.getByTestId('remarks-more').textContent).toBe(`${3 - shown} more ${3 - shown === 1 ? 'remark' : 'remarks'}: select a slide`);
   });
 });
