@@ -5,7 +5,7 @@ import { LaneRow, VariantRow, variantGroups } from '../../web/src/components/Lan
 import { placeCards } from '../../web/src/components/RemarkRow.js';
 import { ContextChip } from '../../web/src/components/ContextChip.js';
 import { Thread } from '../../web/src/components/Thread.js';
-import type { BusEvent, LaneApi, LanePreviewPayload, ThreadApi } from '../../web/src/api.js';
+import { focusPath, type BusEvent, type LaneApi, type LanePreviewPayload, type ThreadApi } from '../../web/src/api.js';
 import type { Change, Lane, Remark, Slide, SlideId, ThreadMessage } from '../../src/model/types.js';
 import { act } from '@testing-library/react';
 import { waitFor } from '../helpers/waitFor.js';
@@ -60,22 +60,21 @@ describe('LaneRow', () => {
     render(<LaneRow lane={lane()} preview={preview} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
     const cells = screen.getAllByTestId('lane-cell');
     // n1 would go right after s2, but s3 (modified) and the removed s4 hold their columns: it takes the next free one.
+    // s2, unchanged, has no cell: main's row shows it.
     expect(cells.map((c) => `${c.getAttribute('data-slide')}:${c.getAttribute('data-mark')}:${c.getAttribute('data-col')}`)).toEqual([
-      's2:none:1',
       's3:modified:2',
       's4:removed:3',
       'n1:inserted:4',
     ]);
     expect(cells.every((c) => c.style.gridRow === '1 / span 2')).toBe(true);
-    expect(within(cells[3]!).getByTestId('insert-badge').textContent).toBe('+');
-    expect(within(cells[1]!).getByTestId('modified-dot')).toBeTruthy();
-    expect(within(cells[2]!).getByTestId('removed-slot')).toBeTruthy();
+    expect(within(cells[2]!).getByTestId('insert-badge').textContent).toBe('+');
+    expect(within(cells[0]!).getByTestId('modified-dot')).toBeTruthy();
+    expect(within(cells[1]!).getByTestId('removed-slot')).toBeTruthy();
     // the removed slot carries its own accept / refuse pair
-    expect(within(cells[2]!).getByRole('button', { name: 'accept: remove slide 4, Title s4' })).toBeTruthy();
-    expect(within(cells[2]!).getByRole('button', { name: 'refuse: remove slide 4, Title s4' })).toBeTruthy();
-    expect(within(cells[0]!).queryByRole('button', { name: /accept/ })).toBeNull();
+    expect(within(cells[1]!).getByRole('button', { name: 'accept: remove slide 4, Title s4' })).toBeTruthy();
+    expect(within(cells[1]!).getByRole('button', { name: 'refuse: remove slide 4, Title s4' })).toBeTruthy();
     // the inserted slide shows its ready preview thumb
-    expect((within(cells[3]!).getByTestId('thumb-image') as HTMLImageElement).getAttribute('src')).toBe('/api/thumbs/hn1.png');
+    expect((within(cells[2]!).getByTestId('thumb-image') as HTMLImageElement).getAttribute('src')).toBe('/api/thumbs/hn1.png');
   });
 
   it('clicking ✓ accepts that change id, ✗ refuses it, discard closes the lane', async () => {
@@ -150,13 +149,13 @@ describe('LaneRow', () => {
     const moved: LanePreviewPayload = { order: ['s1', 's4', 's2', 's3', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
     render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
     const cells = screen.getAllByTestId('lane-cell');
-    expect(cells.map((c) => `${c.getAttribute('data-slide')}:${c.getAttribute('data-col')}`)).toEqual(['s2:1', 's3:2', 's4:3']);
-    const slot = within(cells[2]!).getByTestId('moved-slot');
+    expect(cells.map((c) => `${c.getAttribute('data-slide')}:${c.getAttribute('data-col')}`)).toEqual(['s4:3']);
+    const slot = within(cells[0]!).getByTestId('moved-slot');
     expect(slot.style.border).toBe('');
     expect(slot.textContent).toContain('moved to 2');
     expect(within(slot).getByTestId('moved-title').textContent).toBe(mainSlides.s4!.title);
     expect(within(slot).getByTestId('move-connector')).toBeTruthy();
-    expect(within(cells[2]!).getByRole('button', { name: 'accept: move slide 4, Title s4, to 2' })).toBeTruthy();
+    expect(within(cells[0]!).getByRole('button', { name: 'accept: move slide 4, Title s4, to 2' })).toBeTruthy();
     expect(screen.getByTestId('lane-region').style.gridColumn).toBe('2 / span 3');
   });
 
@@ -166,8 +165,7 @@ describe('LaneRow', () => {
     const open = vi.fn();
     render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{ s4: '/api/thumbs/main-s4.png' }} api={stubApi()} onOpenChange={open} />);
     const slot = screen.getByTestId('moved-slot');
-    const thumb = within(slot).getByTestId('thumb');
-    expect(thumb.getAttribute('data-slide')).toBe('s4');
+    const thumb = within(slot).getByRole('link');
     expect((within(slot).getByTestId('thumb-image') as HTMLImageElement).getAttribute('src')).toBe('/api/thumbs/main-s4.png');
     // the slot names what moves once, under the thumb: no hover title on top of it
     expect(slot.querySelector('.thumb-title')).toBeNull();
@@ -493,5 +491,141 @@ describe('variants', () => {
     expect(api.acceptChange).toHaveBeenCalledWith('a', 'ca');
     fireEvent.click(within(cells[0]!).getByTestId('thumb'));
     expect(open).toHaveBeenCalledWith('a', 'ca');
+  });
+});
+
+describe('LaneRow QA4: decided cells, no ghosts, "+N" on pending only, moved slots open focus', () => {
+  const accepted: Change = { ...modifyS3, status: 'accepted' };
+  const refusedMove: Change = { id: 'c9', kind: 'move', slide: 's4', after: 's1', reason: 'earlier', status: 'refused' };
+  const stale: Change = { id: 'c6', kind: 'modify', slide: 's2', patch: { notes: 'n' }, reason: 'r', status: 'orphan' };
+  const pendingS5: Change = { id: 'c5', kind: 'modify', slide: 's5', patch: { title: 'New s5' }, reason: 'r', status: 'pending' };
+  const p: LanePreviewPayload = { order, slides: { ...mainSlides, s5: slide('s5', 'New s5') }, skipped: [], thumbs: {} };
+  const decidedLane = (): Lane => ({ ...lane({ changes: [accepted, refusedMove, stale, pendingS5] }), causes: { c6: 'slide 2 changed on main' } } as Lane);
+  const at = (id: string) => screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === id)!;
+
+  it('an accepted change keeps its column with its thumb and a muted "accepted" tag, no buttons; a refused one is dimmed and says "refused"; an orphan says "stale: <cause>"', () => {
+    render(<LaneRow lane={decidedLane()} preview={p} mainOrder={order} mainThumbs={{ s3: '/api/thumbs/main-s3.png', s4: '/api/thumbs/main-s4.png' }} api={stubApi()} />);
+    expect(screen.getAllByTestId('lane-cell').map((c) => `${c.getAttribute('data-slide')}:${c.getAttribute('data-mark')}:${c.getAttribute('data-col')}`)).toEqual([
+      's2:settled:1',
+      's3:settled:2',
+      's4:settled:3',
+      's5:modified:4',
+    ]);
+    const tag = (id: string) => within(at(id)).getByTestId('settled-tag');
+    expect(tag('s3').textContent).toBe('accepted');
+    expect(tag('s3').className).toContain('meta');
+    expect((within(at('s3')).getByTestId('thumb-image') as HTMLImageElement).getAttribute('src')).toBe('/api/thumbs/main-s3.png');
+    expect(within(at('s3')).getByTestId('settled-card').getAttribute('data-settled')).toBe('accepted');
+    expect(within(at('s3')).getByTestId('settled-card').style.opacity).toBe('');
+    // A refused move is no moved slot any more: its slide, dimmed, in its own column.
+    expect(tag('s4').textContent).toBe('refused');
+    expect(within(at('s4')).queryByTestId('moved-slot')).toBeNull();
+    expect(Number(within(at('s4')).getByTestId('settled-card').style.opacity)).toBeLessThan(1);
+    expect(tag('s2').textContent).toBe('stale: slide 2 changed on main');
+    expect(Number(within(at('s2')).getByTestId('settled-card').style.opacity)).toBeLessThan(1);
+    for (const id of ['s2', 's3', 's4']) expect(within(at(id)).queryByTestId('change-buttons')).toBeNull();
+    expect(within(at('s5')).getByTestId('change-buttons')).toBeTruthy();
+  });
+
+  it('unchanged slides of main never render in a lane row: after a move is accepted, only the cells of the lane\'s own changes remain', () => {
+    // Main after accepting "move slide 4 after slide 1": the anchor s2..s4 now spans the shifted slides s4, s2.
+    const after: SlideId[] = ['s1', 's4', 's2', 's3', 's5'];
+    const acceptedMove: Change = { ...refusedMove, status: 'accepted' };
+    const pv: LanePreviewPayload = { ...p, order: after };
+    render(<LaneRow lane={lane({ changes: [acceptedMove, pendingS5] })} preview={pv} mainOrder={after} mainThumbs={{}} api={stubApi()} />);
+    expect(screen.getAllByTestId('lane-cell').map((c) => `${c.getAttribute('data-slide')}:${c.getAttribute('data-mark')}:${c.getAttribute('data-col')}`)).toEqual(['s4:settled:1', 's5:modified:4']);
+  });
+
+  it('a lane with only pending changes has no context cell either, whatever its anchor covers', () => {
+    render(<LaneRow lane={lane({ anchor: { kind: 'range', from: 's1', to: 's5' }, changes: [pendingS5] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    expect(screen.getAllByTestId('lane-cell').map((c) => c.getAttribute('data-slide'))).toEqual(['s5']);
+  });
+
+  it('the row\'s "+N" counts the pending changes past the visible end, never the decided cells', async () => {
+    const { useRef } = await import('react');
+    const { EdgeFade, useVisibleColumns } = await import('../../web/src/components/EdgeFade.js');
+    function Canvas() {
+      const ref = useRef<HTMLDivElement>(null);
+      const visible = useVisibleColumns(ref, '[data-edge-item]', []);
+      return (
+        <div ref={ref} data-testid="scroller">
+          <LaneRow lane={decidedLane()} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} />
+          <EdgeFade visible={visible} />
+        </div>
+      );
+    }
+    const rect = (left: number, width: number, top = 0, height = 99): DOMRect => ({ left, width, top, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+    // Column c at 126 + 184c, 176 wide, in a 900px scroller: columns 3 and 4 reach past its end (900 - 48).
+    const spyRect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.hasAttribute('data-edge-item')) return rect(126 + Number(this.getAttribute('data-col')) * 184, 176);
+      if (this.classList.contains('gutter')) return rect(0, 120);
+      return rect(0, 900, 0, 300);
+    });
+    const spyWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(900);
+    try {
+      render(<Canvas />);
+      // The refused s4 (column 3) is past the end too, but only the pending modify of s5 counts.
+      expect(at('s4').getAttribute('data-edge-weight')).toBe('0');
+      expect(at('s5').getAttribute('data-edge-weight')).toBe('1');
+      expect(screen.getByTestId('edge-fade-count').textContent).toBe('+1');
+    } finally {
+      spyRect.mockRestore();
+      spyWidth.mockRestore();
+    }
+  });
+
+  it('a decided cell alone past the end is still covered, with no count', async () => {
+    const { useRef } = await import('react');
+    const { EdgeFade, useVisibleColumns } = await import('../../web/src/components/EdgeFade.js');
+    function Canvas() {
+      const ref = useRef<HTMLDivElement>(null);
+      const visible = useVisibleColumns(ref, '[data-edge-item]', []);
+      return (
+        <div ref={ref}>
+          <LaneRow lane={lane({ changes: [accepted, refusedMove] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} />
+          <EdgeFade visible={visible} />
+        </div>
+      );
+    }
+    const rect = (left: number, width: number, top = 0, height = 99): DOMRect => ({ left, width, top, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+    const spyRect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.hasAttribute('data-edge-item')) return rect(126 + Number(this.getAttribute('data-col')) * 184, 176);
+      if (this.classList.contains('gutter')) return rect(0, 120);
+      return rect(0, 900, 0, 300);
+    });
+    const spyWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(900);
+    try {
+      render(<Canvas />);
+      expect(screen.getByTestId('edge-fade')).toBeTruthy();
+      expect(screen.queryByTestId('edge-fade-count')).toBeNull();
+    } finally {
+      spyRect.mockRestore();
+      spyWidth.mockRestore();
+    }
+  });
+
+  it('a moved slot is a link to that change in focus, named after the move', () => {
+    const move: Change = { id: 'c9', kind: 'move', slide: 's4', after: 's1', reason: 'earlier', status: 'pending' };
+    const moved: LanePreviewPayload = { order: ['s1', 's4', 's2', 's3', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
+    const open = vi.fn();
+    render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{ s4: '/api/thumbs/main-s4.png' }} api={stubApi()} onOpenChange={open} />);
+    const link = within(screen.getByTestId('moved-slot')).getByRole('link', { name: 'open in focus: move slide 4 (Title s4)' });
+    expect(link.getAttribute('href')).toBe(focusPath('l1', 'c9'));
+    // The thumbnail, "moved to 2" and the title are all inside the link: a click anywhere on the slot opens it.
+    expect(within(link).getByTestId('thumb-image').getAttribute('src')).toBe('/api/thumbs/main-s4.png');
+    expect(within(link).getByTestId('moved-title')).toBeTruthy();
+    expect(link.querySelector('button')).toBeNull();
+    fireEvent.click(within(link).getByTestId('thumb-image'));
+    expect(open).toHaveBeenCalledWith('l1', 'c9');
+  });
+
+  it('without a handler, clicking a moved slot navigates to focusPath(lane, change)', () => {
+    const move: Change = { id: 'c9', kind: 'move', slide: 's4', after: 's1', reason: 'earlier', status: 'pending' };
+    const moved: LanePreviewPayload = { order: ['s1', 's4', 's2', 's3', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
+    history.replaceState(null, '', '/');
+    render(<LaneRow lane={lane({ changes: [move] })} preview={moved} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    fireEvent.click(screen.getByRole('link', { name: 'open in focus: move slide 4 (Title s4)' }));
+    expect(location.pathname).toBe(focusPath('l1', 'c9'));
+    history.replaceState(null, '', '/');
   });
 });

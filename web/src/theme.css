@@ -112,18 +112,17 @@ button { font: inherit; }
   font-size: var(--fs-meta); color: var(--ink); white-space: nowrap; transition: border-color .15s ease;
 }
 .edge-chip:hover { border-color: var(--grey-2); }
+/* A lane's moved slot is one link to that move in focus: its card rings on hover and keyboard focus. */
+.moved-open:hover .edge-frame { box-shadow: 0 0 0 1px var(--grey-2) !important; }
+.moved-open:focus-visible { outline: none; }
+.moved-open:focus-visible .edge-frame { box-shadow: 0 0 0 2px var(--paper), 0 0 0 3.5px var(--accent) !important; }
 /*
- * The selection's conversation holds the right column while something is selected: the remarks of the selection
- * first, then the log, the composer at the bottom. The remark list has no scroll box of its own (it cut cards): the
- * panel scrolls as a whole when a card unfolds past its height, and a fade at its bottom says more lies below.
+ * The selection's conversation holds the right column while something is selected: its header, then one middle that
+ * scrolls (the selection's remarks, then the log), then the composer, pinned at the bottom and always whole. The panel
+ * itself never scrolls: a card unfolding grows the middle, never pushes the composer out. A fade at the middle's
+ * bottom says more lies below.
  */
-.selection-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; }
-.selection-panel > [data-testid='thread'] { flex: 1 1 auto; min-height: 0; }
-.selection-panel [data-testid='thread'] > [role='log'] {
-  min-height: 96px;
-  /* Scrolled, the log's top line fades out under the remarks instead of being sliced by its edge. */
-  mask-image: linear-gradient(to bottom, transparent 0, #000 12px);
-}
+.selection-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .panel-fade {
   position: sticky; bottom: 0; flex: 0 0 48px; margin-top: -48px; height: 48px; pointer-events: none;
   background: linear-gradient(to bottom, transparent, var(--paper) 70%);

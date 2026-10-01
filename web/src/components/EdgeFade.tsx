@@ -3,9 +3,15 @@ import { useLayoutEffect, useState, type RefObject } from 'react';
 /** Width of the slot that holds a row's "+N" count, as --end-slot in theme.css. */
 export const END_W = 48;
 
-/** One row of a strip ([data-edge-row]) and how many of its items ([data-edge-item]) lie past the visible end. */
+/**
+ * One row of a strip ([data-edge-row]) and what of its items ([data-edge-item]) lies past the visible end. An item
+ * counts as its `data-edge-weight` (default 1): a lane cell weighs its pending changes, a decided one nothing.
+ */
 export interface EdgeRow {
+  /** The row's "+N": the summed weight of the items past the end. */
   hidden: number;
+  /** Items past the end, weighed or not: any one of them needs the paper cover. */
+  past: number;
   /** Middle of the row's cards, from the top of the scroller's box: where the count sits. */
   top: number;
 }
@@ -32,7 +38,12 @@ const same = (a: VisibleColumns | null, b: VisibleColumns | null): boolean =>
     a.hidden === b.hidden &&
     a.cut === b.cut &&
     a.rows.length === b.rows.length &&
-    a.rows.every((r, i) => r.hidden === b.rows[i]!.hidden && r.top === b.rows[i]!.top));
+    a.rows.every((r, i) => r.hidden === b.rows[i]!.hidden && r.past === b.rows[i]!.past && r.top === b.rows[i]!.top));
+
+const weight = (el: Element): number => {
+  const w = el.getAttribute('data-edge-weight');
+  return w === null ? 1 : Number(w) || 0;
+};
 
 function measure(scroller: HTMLElement, items: readonly Element[]): VisibleColumns | null {
   const box = scroller.getBoundingClientRect();
@@ -57,7 +68,8 @@ function measure(scroller: HTMLElement, items: readonly Element[]): VisibleColum
       if (r.right > right + 1 && r.left - 3 < cut) cut = Math.max(r.left - 3, left);
     }
     const frame = (cells[0]!.querySelector('.edge-frame') ?? cells[0]!).getBoundingClientRect();
-    return [{ hidden: cells.filter((c) => c.getBoundingClientRect().right > right + 1).length, top: Math.round(frame.top - box.top + frame.height / 2) }];
+    const past = cells.filter((c) => c.getBoundingClientRect().right > right + 1);
+    return [{ hidden: past.reduce((n, c) => n + weight(c), 0), past: past.length, top: Math.round(frame.top - box.top + frame.height / 2) }];
   });
   return { first, end, hidden, rows, cut: Math.round(cut - box.left) };
 }
@@ -108,7 +120,7 @@ export function useVisibleColumns(scroller: RefObject<HTMLElement | null>, selec
  * the size of the scroller.
  */
 export function EdgeFade({ visible, testId = 'edge-fade' }: { visible: VisibleColumns | null; testId?: string }) {
-  if (!visible || visible.rows.every((r) => r.hidden === 0)) return null;
+  if (!visible || visible.rows.every((r) => r.past === 0)) return null;
   return (
     <div data-testid={testId} aria-hidden style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: visible.cut, overflow: 'hidden', pointerEvents: 'none', background: 'var(--paper)' }}>
       {visible.rows.map((r, i) =>

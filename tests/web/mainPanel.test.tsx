@@ -373,7 +373,7 @@ describe('Main selection panel', () => {
 
   it('"+N" on both ends pages the strip; revealColumn brings a column to the left edge', () => {
     const page = vi.fn();
-    render(<StripPager visible={{ first: 9, end: 18, hidden: 12, rows: [{ hidden: 12, top: 60 }], cut: 900 }} onPage={page} />);
+    render(<StripPager visible={{ first: 9, end: 18, hidden: 12, rows: [{ hidden: 12, past: 12, top: 60 }], cut: 900 }} onPage={page} />);
     const prev = screen.getByRole('button', { name: 'show the previous slides (9 more)' });
     const next = screen.getByRole('button', { name: 'show the next slides (12 more)' });
     expect(prev.textContent).toBe('+9');
@@ -381,7 +381,7 @@ describe('Main selection panel', () => {
     fireEvent.click(next);
     expect(page.mock.calls).toEqual([[-1], [1]]);
     cleanup();
-    render(<StripPager visible={{ first: 0, end: 9, hidden: 0, rows: [{ hidden: 0, top: 60 }], cut: 900 }} onPage={page} />);
+    render(<StripPager visible={{ first: 0, end: 9, hidden: 0, rows: [{ hidden: 0, past: 0, top: 60 }], cut: 900 }} onPage={page} />);
     expect(screen.queryAllByRole('button')).toHaveLength(0);
 
     const canvas = document.createElement('div');
@@ -600,13 +600,15 @@ describe('Main panel QA3', () => {
     // The list itself never scrolls (a hidden overflow cut cards); the panel as a whole scrolls past its max height.
     const css = themeCss();
     expect(css).not.toMatch(/\.panel-remarks \{[^}]*(max-height|overflow)/);
-    expect(css).toMatch(/\.selection-panel \{[^}]*overflow-y: auto/);
+    // The panel itself never scrolls: its middle does, between the header and the composer.
+    expect(css).toMatch(/\.selection-panel \{[^}]*overflow: hidden/);
+    expect(css).not.toMatch(/\.selection-panel \{[^}]*overflow-y: auto/);
   });
 
-  it('a panel taller than its max height shows a bottom fade until scrolled to its end', async () => {
+  it('a panel whose middle runs past its height shows a bottom fade, over the composer, until scrolled to its end', async () => {
     const sh = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollHeight')!;
     const ch = Object.getOwnPropertyDescriptor(Element.prototype, 'clientHeight')!;
-    const isPanel = (el: Element) => el.getAttribute('data-testid') === 'selection-panel';
+    const isPanel = (el: Element) => el.getAttribute('data-testid') === 'thread-body';
     Object.defineProperty(Element.prototype, 'scrollHeight', { configurable: true, get(this: Element) { return isPanel(this) ? 900 : 0; } });
     Object.defineProperty(Element.prototype, 'clientHeight', { configurable: true, get(this: Element) { return isPanel(this) ? 500 : 0; } });
     try {
@@ -614,8 +616,10 @@ describe('Main panel QA3', () => {
       fireEvent.click(thumb('s3'));
       const p = await waitFor(() => panel());
       await waitFor(() => within(p).queryByTestId('panel-fade'));
-      p.scrollTop = 400;
-      fireEvent.scroll(p);
+      const body = within(p).getByTestId('thread-body');
+      expect(within(body).getByTestId('panel-fade')).toBeTruthy();
+      body.scrollTop = 400;
+      fireEvent.scroll(body);
       await waitFor(() => within(p).queryByTestId('panel-fade') === null);
     } finally {
       Object.defineProperty(Element.prototype, 'scrollHeight', sh);
@@ -644,5 +648,65 @@ describe('Main panel QA3', () => {
     expect(text.getAttribute('aria-expanded')).toBe('true');
     fireEvent.click(text);
     expect(text.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  describe('QA4: the composer is pinned at the bottom of the panel', () => {
+    const tallLog = (n: number): ThreadMessage[] =>
+      Array.from({ length: n }, (_, i) => ({ ...msg(`m${i}`, i % 2 === 0 ? 'user' : 'assistant', i % 2 === 0 ? { kind: 'slide', slide: 's3' } : null, `2026-09-30T00:00:${String(i).padStart(2, '0')}.000Z`), thread: 'slide:s3' }));
+
+    it('the panel is a flex column: header, then one scrolling middle (remarks and log), then the composer outside it', async () => {
+      m.getRemarks.mockResolvedValue([remark('r1', { kind: 'slide', slide: 's3' }), remark('r2', { kind: 'slide', slide: 's3' })]);
+      m.getThread.mockImplementation(async (key: string) => (key === 'slide:s3' ? tallLog(40) : []));
+      await mounted();
+      fireEvent.click(thumb('s3'));
+      const p = await waitFor(() => panel());
+      await waitFor(() => within(p).queryAllByTestId('thread-message').length === 40);
+      const thread = within(p).getByTestId('thread');
+      expect(thread.parentElement).toBe(p);
+      const body = within(thread).getByTestId('thread-body');
+      const form = within(thread).getByLabelText('message').closest('form')!;
+      // The composer is the thread's last child, right after the scrolling middle, never inside it.
+      expect(body.parentElement).toBe(thread);
+      expect(form.parentElement).toBe(thread);
+      expect(thread.lastElementChild).toBe(form);
+      expect(form.previousElementSibling).toBe(body);
+      expect(body.contains(form)).toBe(false);
+      expect(body.style.overflowY).toBe('auto');
+      expect(body.style.minHeight).toBe('0px');
+      expect(form.style.flexShrink).toBe('0');
+      // Remarks and log scroll together in the middle; neither scrolls on its own.
+      expect(body.contains(within(p).getByTestId('panel-remarks'))).toBe(true);
+      const log = within(body).getByRole('log');
+      expect(log.style.overflowY).toBe('');
+      expect(within(body).getByTestId('thread-lead').style.overflowY).toBe('');
+      // The panel and the thread fill their box without scrolling it.
+      const css = readFileSync(join(process.cwd(), 'web/src/theme.css'), 'utf8');
+      expect(css).toMatch(/\.selection-panel \{[^}]*display: flex[^}]*flex-direction: column/);
+      expect(thread.style.minHeight).toBe('0px');
+      // Expanding a remark card grows the middle only: the composer stays where it is.
+      fireEvent.click(within(within(p).getAllByTestId('post-it')[0]!).getByTestId('remark-text'));
+      expect(thread.lastElementChild).toBe(form);
+      expect(body.contains(within(p).getAllByTestId('post-it')[0]!)).toBe(true);
+    });
+
+    it('with a tall log, opening the panel keeps its remarks in view; a sent request scrolls the middle to the end', async () => {
+      const sh = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollHeight')!;
+      Object.defineProperty(Element.prototype, 'scrollHeight', { configurable: true, get(this: Element) { return this.getAttribute('data-testid') === 'thread-body' ? 2400 : 0; } });
+      try {
+        m.getRemarks.mockResolvedValue([remark('r1', { kind: 'slide', slide: 's3' })]);
+        m.getThread.mockImplementation(async (key: string) => (key === 'slide:s3' ? tallLog(40) : []));
+        await mounted();
+        fireEvent.click(thumb('s3'));
+        const p = await waitFor(() => panel());
+        await waitFor(() => within(p).queryAllByTestId('thread-message').length === 40);
+        const body = within(p).getByTestId('thread-body');
+        expect(body.scrollTop).toBe(0);
+        fireEvent.change(within(p).getByLabelText('message'), { target: { value: 'tighten it' } });
+        fireEvent.click(within(p).getByRole('button', { name: 'Send' }));
+        await waitFor(() => body.scrollTop === 2400);
+      } finally {
+        Object.defineProperty(Element.prototype, 'scrollHeight', sh);
+      }
+    });
   });
 });

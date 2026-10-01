@@ -490,40 +490,6 @@ function SlideText({ slide }: { slide: DeckPayload['slides'][SlideId] | undefine
   );
 }
 
-/**
- * The selection panel's box: it scrolls as a whole past its max height, and while more lies below its visible bottom
- * a fade says so. Measured after every render, on scroll, and when its content changes (messages arrive).
- */
-function PanelBox({ style, children, ...rest }: React.HTMLAttributes<HTMLElement> & { 'data-testid': string; 'data-slide': string | undefined; 'data-kind': string }) {
-  const box = useRef<HTMLElement>(null);
-  const [more, setMore] = useState(false);
-  const measure = useCallback(() => {
-    const el = box.current;
-    if (el) setMore(el.scrollHeight - el.clientHeight - el.scrollTop > 1);
-  }, []);
-  useLayoutEffect(measure);
-  useEffect(() => {
-    const el = box.current;
-    if (!el) return;
-    el.addEventListener('scroll', measure, { passive: true });
-    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
-    ro?.observe(el);
-    const mo = typeof MutationObserver === 'undefined' ? null : new MutationObserver(measure);
-    mo?.observe(el, { childList: true, subtree: true, characterData: true });
-    return () => {
-      el.removeEventListener('scroll', measure);
-      ro?.disconnect();
-      mo?.disconnect();
-    };
-  }, [measure]);
-  return (
-    <section ref={box} {...rest} data-overflow={more ? 'true' : undefined} style={style}>
-      {children}
-      {more ? <div data-testid="panel-fade" className="panel-fade" aria-hidden /> : null}
-    </section>
-  );
-}
-
 export function Main() {
   const [load, setLoad] = useState<Load>({ status: 'loading' });
   const [thumbs, setThumbs] = useState<Record<SlideId, string | undefined>>({});
@@ -1272,7 +1238,8 @@ export function Main() {
         }
       />
     ) : (
-      <PanelBox data-testid="selection-panel" data-slide={panelSlide} data-kind={context.kind} aria-label={panelTitle} className="selection-panel">
+      // The panel never scrolls as a whole: its middle (remarks, log) does, and the composer stays pinned under it.
+      <section data-testid="selection-panel" data-slide={panelSlide} data-kind={context.kind} aria-label={panelTitle} className="selection-panel">
         <Thread
           key={context.kind === 'slide' ? `slide:${context.slide}` : 'range'}
           threadKey={context.kind === 'slide' ? `slide:${context.slide}` : 'global'}
@@ -1289,6 +1256,7 @@ export function Main() {
           autoFocus={focusComposer}
           knownLanes={lanes}
           onShowLane={showLane}
+          scrollBody
           lead={
             panelRemarks.length > 0 || notesBlock || selectedText ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -1299,7 +1267,7 @@ export function Main() {
             ) : null
           }
         />
-      </PanelBox>
+      </section>
     );
   const pickFromSheet = (id: SlideId, e: MouseEvent<HTMLElement>): void => {
     shift.current = e.shiftKey;
