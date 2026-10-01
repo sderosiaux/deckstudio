@@ -37,6 +37,19 @@ const BLOCK = new Set([
   'BLOCKQUOTE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH', 'FIGURE', 'FIGCAPTION', 'DL', 'DT', 'DD', 'HR',
 ]);
 const isCode = (el: Element): boolean => el.tagName === 'PRE' || el.classList.contains('code');
+/** Inline elements a slide uses as labels of their own: a caption, a big number, an svg text; each takes a line. */
+const LABEL_TAGS = new Set(['LABEL', 'CAPTION', 'text', 'textPath']);
+const LABEL_CLASSES = ['cap', 'big', 'src'];
+const isLine = (el: Element): boolean => BLOCK.has(el.tagName) || LABEL_TAGS.has(el.tagName) || LABEL_CLASSES.some((c) => el.classList.contains(c));
+
+/** "[image: event flow]": an image's alt text, else its file name, so a swapped asset still reads as a changed line. */
+function imageLine(el: Element): string | null {
+  const alt = (el.getAttribute('alt') ?? el.getAttribute('aria-label') ?? '').replace(/\s+/g, ' ').trim();
+  if (alt) return `[image: ${alt}]`;
+  const src = (el.getAttribute('src') ?? el.getAttribute('href') ?? '').split(/[?#]/)[0]!;
+  const file = src.startsWith('data:') ? '' : src.split('/').pop() ?? '';
+  return file ? `[image: ${file}]` : null;
+}
 
 /** Text of a code block, line by line as written; a `.src` caption (a block in the slide theme) gets its own line. */
 function codeLines(el: Element): string[] {
@@ -65,8 +78,9 @@ function codeLines(el: Element): string[] {
 }
 
 /**
- * Plain text of a slide body, one entry per line: tags stripped, block elements and `<br>` break lines,
- * whitespace collapsed, empty lines dropped. Code blocks (`pre`, `.code`) keep their lines verbatim.
+ * Plain text of a slide body, one entry per line, every text node in document order: tags stripped, block elements,
+ * labels (`.cap`, `.big`, `.src`, `label`, svg `text`) and `<br>` break lines, whitespace collapsed, empty lines dropped.
+ * Code blocks (`pre`, `.code`) keep their lines verbatim. An image is a line of its own, "[image: alt]".
  */
 export function plainText(html: string): string[] {
   const doc = new DOMParser().parseFromString(`<!doctype html><body>${html}</body>`, 'text/html');
@@ -94,7 +108,13 @@ export function plainText(html: string): string[] {
       lines.push(...codeLines(el));
       return;
     }
-    const block = BLOCK.has(el.tagName);
+    if (el.tagName === 'IMG' || el.tagName === 'image') {
+      flush();
+      const line = imageLine(el);
+      if (line) lines.push(line);
+      return;
+    }
+    const block = isLine(el);
     if (block) flush();
     for (const c of Array.from(el.childNodes)) walk(c);
     if (block) flush();

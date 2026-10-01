@@ -71,4 +71,37 @@ describe('plainText', () => {
     const html = '<h2>Consumer</h2><pre class="code"><span class="src">Share.java</span><span class="kw">var</span> props = x;\n  try (var r = open()) {\n    r.poll();\n  }</pre>';
     expect(plainText(html)).toEqual(['Consumer', 'Share.java', 'var props = x;', '  try (var r = open()) {', '    r.poll();', '  }']);
   });
+
+  it('keeps every text node in document order: footers, figcaptions, labels and .cap/.big each on a line, images as their alt', () => {
+    const html =
+      '<h2>Two topics</h2><div class="cols"><figure><img src="assets/a.png" alt="event flow"><figcaption>events fan out</figcaption></figure>' +
+      '<div><span class="big">1 owner</span><span class="cap">per command</span><label>queue</label></div></div>' +
+      '<footer>something happened · any number of readers</footer><footer>something should happen · one owner</footer>';
+    expect(plainText(html)).toEqual([
+      'Two topics',
+      '[image: event flow]',
+      'events fan out',
+      '1 owner',
+      'per command',
+      'queue',
+      'something happened · any number of readers',
+      'something should happen · one owner',
+    ]);
+  });
+
+  it('names an image without alt text by its file, so swapping the asset is a visible line change', () => {
+    expect(plainText('<img src="assets/t07.png" alt style="left:0">')).toEqual(['[image: t07.png]']);
+  });
+
+  it('reads the labels of an inline svg, one per text element', () => {
+    expect(plainText('<svg viewBox="0 0 10 10"><text x="0" y="1">producer</text><text x="0" y="5">consumer</text></svg>')).toEqual(['producer', 'consumer']);
+  });
+
+  it('shows a footer-only body change as a removed and an added line, never "no text change"', () => {
+    const before = '<h2>Events and commands</h2><footer>something happened · any number of readers</footer>';
+    const after = '<h2>Events and commands</h2><footer><b>happened · many readers</b></footer>';
+    render(<TextDiff label="body" before={plainText(before)} after={plainText(after)} />);
+    expect(screen.getByTestId('text-diff').textContent).not.toContain('no text change');
+    expect(ops()).toEqual(['same:Events and commands', 'del:something happened · any number of readers', 'add:happened · many readers']);
+  });
 });

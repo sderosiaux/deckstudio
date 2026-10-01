@@ -248,6 +248,9 @@ button { font: inherit; }
 /* A size container: the move strips and the pair size their renders from the body's own width and height. */
 .focus-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 16px; display: flex; flex-direction: column; gap: 16px; container: focus-body / size; }
 /* The diff runs on below: paper fades in over its last 48px. */
+/* Narrow, the thread follows the renders in the body: its log takes the body's height less the thread header and
+   composer (about 150px), so scrolled to, the newest reply and the composer show together. */
+.focus-thread { --focus-log-max: max(200px, calc(100cqh - 150px)); max-width: 924px; padding: 8px 0 16px; border-top: 1px solid var(--line); }
 .focus-fade { position: absolute; left: 0; right: 0; bottom: 0; height: 48px; pointer-events: none; background: linear-gradient(to bottom, color-mix(in srgb, var(--paper) 0%, transparent), var(--paper)); }
 /* The lane's slides as numbers: changed ones filled, refused ones struck, the one on screen ringed. A click unfolds the strips. */
 .focus-strip { flex: 0 0 48px; height: 48px; display: flex; align-items: center; gap: 12px; padding: 0 24px; border-top: 1px solid var(--line); background: var(--paper); cursor: pointer; transition: background .15s ease; }
