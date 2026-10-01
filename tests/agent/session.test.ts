@@ -129,7 +129,7 @@ describe('AgentSession', () => {
       '   story: story of s4',
     ]);
     for (const id of ['s1', 's5']) expect(range).not.toContain(id);
-    expect(prompt.endsWith('\n\nshorten it')).toBe(true);
+    expect(prompt.endsWith('\n\nshorten it\n\nReply in English.')).toBe(true);
 
     const opts = fake.calls[0]!.options;
     expect(opts.model).toBe('claude-opus-5');
@@ -172,6 +172,30 @@ describe('AgentSession', () => {
     await session(fake.impl).send('global', 'Make it shorter', null);
     const [, reply] = await store.thread('global');
     expect(reply!.text).toBe('Lane Tighter opening : done, this change dropped on slide 3 (Title s3) and a removed slide; see.');
+  });
+
+  it('every prompt ends with the reply language of that message: English, French, or the brief language when too short', async () => {
+    const fake = fakeQuery(async function* () {
+      yield assistant('ok');
+      yield success('sess-lang');
+    });
+    const s = session(fake.impl);
+    await s.send('global', 'Make the title of this slide shorter, five words max.', null);
+    await s.send('global', 'Raccourcis le titre de cette slide, cinq mots max.', null);
+    await store.setBrief({ ...brief, message: 'Le log est la mémoire de tous les agents' });
+    await s.send('global', 'shorter title', null);
+    expect(fake.calls.map((c) => c.prompt.split('\n').at(-1))).toEqual(['Reply in English.', 'Réponds en français.', 'Réponds en français.']);
+  });
+
+  it('scrubReply names a lane once and drops a "lane opened" prefix when the sentence names the lane', () => {
+    const ctx = { snapshot: snap(five), lanes: [{ ...lane, id: 'l__w9KF0bWiS', label: 'Four-word hook title' }] };
+    expect(scrubReply('Lane l__w9KF0bWiS — « Four-word hook title » : le titre devient « One log ».', ctx)).toBe('Lane Four-word hook title: le titre devient « One log ».');
+    expect(scrubReply('Lane **l__w9KF0bWiS** — « Four-word hook title » : le titre devient « One log ».', ctx)).toBe('Lane Four-word hook title: le titre devient « One log ».');
+    expect(scrubReply('Lane Four-word hook title — "Four-word hook title": the title now reads One log.', ctx)).toBe('Lane Four-word hook title: the title now reads One log.');
+    expect(scrubReply('Lane ouverte : « Four-word hook title » raccourcit le titre.', ctx)).toBe('« Four-word hook title » raccourcit le titre.');
+    expect(scrubReply('Lane opened: l__w9KF0bWiS cuts the title to four words. Accept it when ready.', ctx)).toBe('Four-word hook title cuts the title to four words. Accept it when ready.');
+    // Without the lane named in that sentence, the prefix is all that says a lane exists: it stays.
+    expect(scrubReply('Lane opened: I cut the title. Four-word hook title is ready.', ctx)).toBe('Lane opened: I cut the title. Four-word hook title is ready.');
   });
 
   it('scrubReply names unknown lanes and changes generically and leaves plain text alone', () => {
@@ -224,7 +248,7 @@ describe('AgentSession', () => {
     expect(prompt).toContain('Anchor slides: "Title s3" (s3)');
     expect(prompt).toContain('call propose_lane with anchor {"kind":"slide","slide":"s3"}');
     expect(prompt).toContain('link_remark_lane({"remarkId":"r1","laneId":<the new lane id>})');
-    expect(prompt.endsWith('\n\nPropose a lane for this remark')).toBe(true);
+    expect(prompt.endsWith('\n\nPropose a lane for this remark\n\nReply in English.')).toBe(true);
   });
 
   it('slide thread: a message without context is anchored on that slide, stored so, and scoped on it in the prompt', async () => {
@@ -238,7 +262,7 @@ describe('AgentSession', () => {
     expect(prompt).toContain('Selected: slide s3');
     expect(prompt).toContain('the creator is editing slide 3 "Title s3" (s3)');
     expect(prompt).toContain('<p>body s3</p>');
-    expect(prompt.endsWith('\n\nmake the claim sharper')).toBe(true);
+    expect(prompt.endsWith('\n\nmake the claim sharper\n\nReply in English.')).toBe(true);
     const stored = await store.thread('slide:s3');
     expect(stored.map((m) => [m.role, m.context])).toEqual([
       ['user', { kind: 'slide', slide: 's3' }],

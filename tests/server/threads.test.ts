@@ -22,11 +22,12 @@ describe('threads API: slide:<id>', () => {
   let tmp: Awaited<ReturnType<typeof tmpDir>>;
   let app: FastifyInstance;
   let prompts: string[];
+  let store: DeckStore;
 
   beforeEach(async () => {
     tmp = await tmpDir();
     const deckDir = join(tmp.dir, 'deck');
-    const store = await DeckStore.init(deckDir, 'demo', brief);
+    store = await DeckStore.init(deckDir, 'demo', brief);
     await store.commit(snap, { kind: 'import' });
     const thumbs = new ThumbService({ cacheDir: join(deckDir, 'cache'), themeCss, assetsDir: join(deckDir, 'assets') });
     const bus = new Bus();
@@ -84,6 +85,38 @@ describe('threads API: slide:<id>', () => {
     expect(res.json().error).toContain('s9');
     expect((await app.inject({ method: 'GET', url: url('slide:s9', '') })).json()).toEqual([]);
     expect(prompts).toEqual([]);
+  });
+
+  it('GET slide:<id> also returns the global turns sent on exactly that slide, replies included, by time', async () => {
+    const msg = (id: string, thread: ThreadMessage['thread'], role: ThreadMessage['role'], context: ThreadMessage['context'], at: string): ThreadMessage => ({
+      id,
+      thread,
+      role,
+      text: id,
+      context,
+      at: `2026-09-30T10:00:${at}.000Z`,
+    });
+    const on = (slide: string) => ({ kind: 'slide' as const, slide });
+    for (const m of [
+      msg('g1', 'global', 'user', on('s2'), '01'),
+      msg('g1r', 'global', 'assistant', null, '02'),
+      msg('g2', 'global', 'user', null, '03'),
+      msg('g2r', 'global', 'assistant', null, '04'),
+      msg('g3', 'global', 'user', { kind: 'range', from: 's2', to: 's3' }, '05'),
+      msg('g3r', 'global', 'assistant', null, '06'),
+      msg('g4', 'global', 'user', on('s3'), '07'),
+      msg('g4r', 'global', 'assistant', null, '08'),
+      msg('g5', 'global', 'user', on('s2'), '11'),
+      msg('g5r', 'global', 'assistant', null, '12'),
+      msg('g5r2', 'global', 'assistant', null, '13'),
+      msg('g6', 'global', 'user', null, '14'),
+    ]) await store.appendMessage(m);
+    for (const m of [msg('t1', 'slide:s2', 'user', on('s2'), '09'), msg('t1r', 'slide:s2', 'assistant', null, '10')]) await store.appendMessage(m);
+    const got = (await app.inject({ method: 'GET', url: url('slide:s2', '') })).json() as ThreadMessage[];
+    expect(got.map((m) => m.id)).toEqual(['g1', 'g1r', 't1', 't1r', 'g5', 'g5r', 'g5r2']);
+    // The global thread itself is unchanged and the slide thread of another slide only gets its own turns.
+    expect(((await app.inject({ method: 'GET', url: url('global', '') })).json() as ThreadMessage[]).map((m) => m.id)).toHaveLength(12);
+    expect(((await app.inject({ method: 'GET', url: url('slide:s3', '') })).json() as ThreadMessage[]).map((m) => m.id)).toEqual(['g4', 'g4r']);
   });
 
   it('rejects an empty slide id as a bad key', async () => {

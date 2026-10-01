@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { contextHeader, SYSTEM_APPEND, themeClasses } from '../../src/agent/prompts.js';
+import { contextHeader, replyInstruction, replyLanguage, SYSTEM_APPEND, themeClasses } from '../../src/agent/prompts.js';
 import type { Brief, Lane, Remark, Slide, Snapshot } from '../../src/model/types.js';
 
 const brief: Brief = { title: 'Deck', audience: 'devs', message: 'one log', pattern: 'solution-first', abstract: 'abs', design: { rules: '', imageStyle: '' } };
@@ -198,5 +198,28 @@ describe('design rules', () => {
   it('SYSTEM_APPEND makes every created or modified slide satisfy the design rules, and names conflicts', () => {
     expect(SYSTEM_APPEND).toMatch(/every slide you create or modify must satisfy the design rules of the brief/i);
     expect(SYSTEM_APPEND).toMatch(/conflicts with them, say so in one sentence and propose the closest compliant change/i);
+  });
+});
+
+describe('reply language, decided per message', () => {
+  const fr: Brief = { ...brief, message: 'Le log est la mémoire de tous les agents' };
+  const en: Brief = { ...brief, message: 'The log is the memory of every agent' };
+
+  it('an English message gets the English instruction, whatever the brief', () => {
+    expect(replyLanguage('Make the title of this slide shorter, five words max.', fr)).toBe('en');
+    expect(replyLanguage('Replace the diagram labels with shorter ones, keep the meaning.', fr)).toBe('en');
+    expect(replyInstruction('en')).toBe('Reply in English.');
+  });
+
+  it('a French message gets the French instruction, whatever the brief', () => {
+    expect(replyLanguage('Raccourcis le titre de cette slide, cinq mots max.', en)).toBe('fr');
+    expect(replyLanguage('Remplace les libellés du schéma par des plus courts.', en)).toBe('fr');
+    expect(replyInstruction('fr')).toBe('Réponds en français.');
+  });
+
+  it('a message too short to tell falls back to the language of the brief message', () => {
+    expect(replyLanguage('shorter title', fr)).toBe('fr');
+    expect(replyLanguage('titre court', en)).toBe('en');
+    expect(replyLanguage('ok', { ...brief, message: '' })).toBe('en');
   });
 });

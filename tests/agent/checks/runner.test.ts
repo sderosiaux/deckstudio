@@ -387,6 +387,17 @@ describe('CheckRunner', () => {
     expect(after[0]!.createdAt >= a1!.createdAt).toBe(true);
   });
 
+  it('two runs with the same findings leave every createdAt as it was: a remark found again is not new', async () => {
+    const findings = JSON.stringify({ remarks: [item('s2', 'Weak hook.'), item('s3', 'Too dense.')] });
+    await runner([findings]).r.run('order');
+    const old = '2026-01-01T00:00:00.000Z';
+    await store.putRemarks((await store.remarks()).map((x) => ({ ...x, createdAt: old })));
+    const before = await store.remarks();
+    await runner([findings]).r.run('order');
+    const after = await store.remarks();
+    expect(after.map((x) => [x.id, x.createdAt])).toEqual(before.map((x) => [x.id, old]));
+  });
+
   it('keeps remarks the creator resolved or proposed on, and does not duplicate them when found again', async () => {
     await runner([JSON.stringify({ remarks: [item('s2', 'Weak hook.'), item('s3', 'Too dense.'), item('s4', 'Gone next time.')] })]).r.run('order');
     const [hook, dense] = await store.remarks();

@@ -144,6 +144,23 @@ describe('history API', () => {
     expect(hashSlide(main.slides.s2!)).toBe(hashSlide(five[1]!));
   });
 
+  it('labels each restore by what it did, with the slide number and title', async () => {
+    await threeVersions(); // v3 order: s5 s1 s2 s4 n1
+    expect((await post('/api/history/restore', { from: 1, entry: { kind: 'added', slide: 'n1', at: 4 } })).statusCode).toBe(200); // v4
+    expect((await post('/api/history/restore', { from: 1, entry: { kind: 'modified', slide: 's2', fields: ['title', 'body'] } })).statusCode).toBe(200); // v5
+    expect((await post('/api/history/restore', { from: 1, entry: { kind: 'moved', slide: 's5', from: 4, to: 0 } })).statusCode).toBe(200); // v6
+    expect((await post('/api/history/restore', { from: 1, entry: { kind: 'removed', slide: 's3', wasAt: 2 } })).statusCode).toBe(200); // v7
+    const versions = (await app.inject({ method: 'GET', url: '/api/versions' })).json() as Array<{ n: number; label: string }>;
+    const labels = versions.filter((v) => v.n >= 4).map((v) => v.label);
+    expect(labels).toEqual([
+      'removed slide 5 (Title n1), back to v1',
+      'reverted title, body of slide 3 (Title s2) to v1',
+      'moved slide 4 (Title s5) back to v1',
+      'brought back slide 3 (Title s3) from v1',
+    ]);
+    expect(new Set(labels).size).toBe(4);
+  });
+
   it('answers 409 when the entry no longer applies', async () => {
     await threeVersions();
     const entry: DiffEntry = { kind: 'removed', slide: 's3', wasAt: 2 };

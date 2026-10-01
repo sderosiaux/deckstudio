@@ -522,8 +522,8 @@ export class CheckRunner {
 
   /**
    * Replaces the check's remarks with the new ones, except that a new remark matching a kept remark (one the
-   * creator acted on, or out of scope) is dropped, and one matching a superseded remark keeps its id and its
-   * draft lane. Drafts no remark points to any more are closed.
+   * creator acted on, or out of scope) is dropped, and one matching a superseded remark keeps its id, its
+   * createdAt and its draft lane. Drafts no remark points to any more are closed.
    */
   private async persist(t: Target, items: Item[]): Promise<CheckRunResult> {
     const { store, bus } = this.opts;
@@ -594,8 +594,9 @@ export class CheckRunner {
       fresh.forEach((it, k) => {
         const key = keyOf(it);
         if (keptNow.has(key)) return;
+        const was = previous.get(key);
         remarks.push({
-          id: previous.get(key)?.id ?? newId('r'),
+          id: was?.id ?? newId('r'),
           anchor: it.anchor,
           text: it.text,
           origin,
@@ -603,7 +604,8 @@ export class CheckRunner {
           status: 'open',
           laneId: laneIds[k] ?? null,
           ...(source !== null ? { sourceLaneId: source } : {}),
-          createdAt: now,
+          // A problem found again is as old as its first report: the UI reads createdAt to mark what is new.
+          createdAt: was?.createdAt ?? now,
         });
       });
       const referenced = new Set(remarks.flatMap((r) => (r.laneId ? [r.laneId] : [])));

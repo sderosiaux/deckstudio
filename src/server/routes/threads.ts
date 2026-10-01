@@ -2,12 +2,37 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AgentSession } from '../../agent/session.js';
 import { AnchorSchema, ThreadKeySchema } from '../../model/schema.js';
-import type { Anchor, ThreadKey } from '../../model/types.js';
+import type { Anchor, ThreadKey, ThreadMessage } from '../../model/types.js';
 import type { DeckStore } from '../../store/deckStore.js';
 
 const SendBody = z.object({ text: z.string().trim().min(1), context: AnchorSchema.nullable().optional() });
 
 type KeyParams = { key: string };
+
+/**
+ * The turns of the global thread sent on exactly this slide: a user message with that context opens a turn, the
+ * replies up to the next user message belong to it (the same rule the web applies to a range). Before slide threads
+ * existed, a request on a selected slide was stored on the global thread; this keeps those turns in the slide panel.
+ */
+export function globalTurnsOn(global: readonly ThreadMessage[], slide: string): ThreadMessage[] {
+  let inside = false;
+  return global.filter((m) => {
+    if (m.role === 'user') inside = m.context?.kind === 'slide' && m.context.slide === slide;
+    return inside;
+  });
+}
+
+/** Two time-ordered lists merged by `at`; on a tie the first list goes first. */
+const mergeByTime = (a: readonly ThreadMessage[], b: readonly ThreadMessage[]): ThreadMessage[] => {
+  const out: ThreadMessage[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    if (j >= b.length || (i < a.length && a[i]!.at <= b[j]!.at)) out.push(a[i++]!);
+    else out.push(b[j++]!);
+  }
+  return out;
+};
 
 export function threadRoutes(app: FastifyInstance, store: DeckStore, session: AgentSession): void {
   const parseKey = (raw: string): ThreadKey | null => {
@@ -27,7 +52,9 @@ export function threadRoutes(app: FastifyInstance, store: DeckStore, session: Ag
   app.get<{ Params: KeyParams }>('/api/threads/:key', async (req, reply) => {
     const key = parseKey(req.params.key);
     if (!key) return reply.code(400).send({ error: `invalid thread key "${req.params.key}"` });
-    return store.thread(key);
+    if (!key.startsWith('slide:')) return store.thread(key);
+    const [own, global] = await Promise.all([store.thread(key), store.thread('global')]);
+    return mergeByTime(globalTurnsOn(global, key.slice('slide:'.length)), own);
   });
 
   app.post<{ Params: KeyParams }>('/api/threads/:key/messages', async (req, reply) => {
