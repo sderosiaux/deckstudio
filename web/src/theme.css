@@ -166,8 +166,9 @@ button { font: inherit; }
 .history-changes::after { content: ''; position: absolute; left: 0; right: 8px; bottom: 0; height: 24px; pointer-events: none; background: linear-gradient(to bottom, transparent, var(--paper)); }
 .history-rail { flex: none; padding: 10px 24px 12px; border-top: 1px solid var(--line); }
 /*
- * The side a slide is missing from: that side's slides around its place, two before over two after, the gap between
- * the rows in the accent (it is the diff). The frame is a size container: the thumbs take the most its 16:9 box holds.
+ * The side a slide is missing from: that side's slides around its place, four of them tiling the 16:9 frame two by two,
+ * the gap mark in the accent (it is the diff) across the middle row or upright in the slot beside a cell. The frame is
+ * a size container: the thumbs take the most its box holds; captions sit on them, the place is said on the label line.
  */
 .compare-context {
   margin: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius); background: var(--card);
@@ -176,21 +177,24 @@ button { font: inherit; }
 .compare-context-label { font-size: var(--fs-meta); line-height: 16px; color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .compare-context-frame {
   width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border: 1px dashed var(--grey-2); border-radius: 2px; container-type: size;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 16px;
+  display: flex; align-items: center; justify-content: center; padding: 8px;
 }
 .compare-context-grid {
-  /* 100cq* is the content box: the budget is the text line, the gap line, the row gaps and the two caption lines. */
-  --ctx-w: max(80px, min(calc((100cqw - 16px) / 2), calc((100cqh - 104px) * 8 / 9)));
-  display: grid; grid-template-columns: repeat(2, var(--ctx-w)); gap: 8px 16px; justify-content: center;
+  /* 100cq* is the content box: two thumbs and three 8/16/8px slots across, two rows and a 16px middle row down. */
+  --ctx-w: max(80px, min(calc((100cqw - 32px) / 2), calc((100cqh - 16px) * 8 / 9)));
+  display: grid; grid-template-columns: 8px var(--ctx-w) 16px var(--ctx-w) 8px; grid-template-rows: auto 16px auto; justify-content: center;
 }
-.compare-context-thumb { margin: 0; display: flex; flex-direction: column; gap: 4px; text-align: center; }
+.compare-context-thumb { margin: 0; position: relative; }
+.compare-context-thumb > figcaption {
+  position: absolute; left: 6px; bottom: 6px; padding: 1px 6px; border-radius: 3px; background: var(--card); box-shadow: 0 0 0 1px var(--line);
+}
 .compare-context-img {
   aspect-ratio: 16 / 9; border-radius: 2px; overflow: hidden; background: var(--line); box-shadow: 0 0 0 1px var(--line);
   display: flex; align-items: center; justify-content: center; padding: 0; font-size: var(--fs-meta); font-weight: 500; color: var(--grey);
 }
 .compare-context-img > img { width: 100%; height: 100%; object-fit: contain; display: block; background: var(--card); }
-.compare-context-gap { grid-column: 1 / -1; height: 0; margin: 2px 0; border-top: 2px dashed var(--accent); }
-.compare-context-text { margin: 0; max-width: 60ch; line-height: 20px; text-align: center; font-size: var(--fs-row); color: var(--ink); }
+.compare-context-gap { justify-self: center; align-self: stretch; width: 0; border-left: 2px dashed var(--accent); }
+.compare-context-gap[data-across="true"] { justify-self: stretch; align-self: center; width: auto; height: 0; border-left: 0; border-top: 2px dashed var(--accent); }
 
 /* History: the "+N" slot over the end of the compared strips scrolls them on; it shows the count EdgeFade prints. */
 .diff-more { all: unset; box-sizing: border-box; cursor: pointer; border-radius: var(--radius); transition: box-shadow .15s ease; }

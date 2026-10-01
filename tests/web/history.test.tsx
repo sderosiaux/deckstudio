@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RESTORE_DONE_MS } from '../../web/src/screens/History.js';
+import { RESTORE_DONE_MS, placeIn } from '../../web/src/screens/History.js';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { History } from '../../web/src/screens/History.js';
 import { VersionLine } from '../../web/src/components/VersionLine.js';
@@ -842,5 +842,43 @@ describe('History space round 2: no paper beside or under the compare', () => {
     const ghost = screen.getByTestId('ghost-s6');
     expect(within(ghost).getByTestId('ghost-image').getAttribute('src')).toBe('/api/thumbs/v3s6.png');
     expect(within(ghost).getByTestId('ghost-image').style.opacity).toBe('0.45');
+  });
+});
+
+describe('History space round 3: the compare takes the whole width, the missing side fills its frame', () => {
+  const css = (): string => readFileSync(join(process.cwd(), 'web/src/theme.css'), 'utf8');
+
+  it('the compare has no label gutter: the pair spans the body width, centred when its height holds less', async () => {
+    render(<History api={stubApi()} subscribe={noEvents} navigate={vi.fn()} initialPair={{ a: 1, b: 3 }} />);
+    await waitFor(() => screen.queryByTestId('compare-pair') !== null);
+    const section = screen.getByRole('region', { name: 'compared slide' });
+    expect(section.querySelector('.gutter')).toBeNull();
+    expect(screen.queryByTestId('compare-what')).toBeNull();
+    expect(screen.getByTestId('compare-pair').style.justifyContent).toBe('center');
+  });
+
+  it('the context window is always four slides of the other side when it has them, the gap wherever it falls', () => {
+    const other = snap(['a', 'b', 'c', 'd', 'e', 'f'].map((id) => slide(id)));
+    const own = (ids: string[]) => snap(ids.map((id) => slide(id)));
+    // Between slides 1 and 2: one before, three after, not a lone thumb with paper beside it.
+    expect(placeIn('x', own(['a', 'x', 'b']), other)).toEqual({ at: 1, before: ['a'], after: ['b', 'c', 'd'] });
+    // Before slide 1: the first four after the gap.
+    expect(placeIn('x', own(['x', 'a']), other)).toEqual({ at: 0, before: [], after: ['a', 'b', 'c', 'd'] });
+    // In the middle: two and two.
+    expect(placeIn('x', own(['c', 'x']), other)).toEqual({ at: 3, before: ['b', 'c'], after: ['d', 'e'] });
+    // After the last slide: the last four before it.
+    expect(placeIn('x', own(['f', 'x']), other)).toEqual({ at: 6, before: ['c', 'd', 'e', 'f'], after: [] });
+  });
+
+  it('the missing side says where the slide goes in its label line and tiles its frame with the thumbs', async () => {
+    render(<History api={stubApi()} subscribe={noEvents} navigate={vi.fn()} initialPair={{ a: 1, b: 3 }} />);
+    await waitFor(() => screen.queryByTestId('compare-pair') !== null);
+    fireEvent.click(within(screen.getByTestId('row-b')).getAllByTestId('thumb').find((t) => t.getAttribute('data-slide') === 's6')!);
+    const missing = within(screen.getByTestId('compare-pair')).getAllByTestId('slide-preview')[0]!;
+    expect(missing.querySelector('.compare-context-label')!.textContent).toBe('v1, not in v1, it comes between slides 2 and 3');
+    expect(missing.querySelector('.compare-context-text')).toBeNull();
+    // Two columns of thumbs with a slot on each side of each for the gap mark; the captions sit on the thumbs.
+    expect(css()).toMatch(/\.compare-context-grid \{[^}]*grid-template-columns: 8px var\(--ctx-w\) 16px var\(--ctx-w\) 8px/);
+    expect(css()).toMatch(/\.compare-context-thumb > figcaption \{[^}]*position: absolute/);
   });
 });
