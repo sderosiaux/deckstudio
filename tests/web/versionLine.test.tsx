@@ -55,3 +55,54 @@ describe('VersionLine when selectable (history)', () => {
     expect(shown()).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
   });
 });
+
+describe('VersionLine QA2', () => {
+  const withLabel = (n: number, label: string, cause: Version['cause']): Version & { label: string } => ({ ...version(n), cause, label });
+  const item = (n: number) => screen.getAllByTestId('version').find((v) => v.getAttribute('data-version') === String(n))!;
+
+  it('shows the server label of a restore whole, on up to two wrapping lines, with the hash kept under it', () => {
+    const long = 'slide 3 "The log has three jobs" reverted to v1 · story, notes';
+    render(<VersionLine versions={[version(0), withLabel(1, long, { kind: 'restore', from: 0, entry: '{}' })]} current={1} selection={{ a: 0, b: 1 }} onSelect={() => {}} />);
+    const cause = within(item(1)).getByTestId('version-cause');
+    expect(cause.textContent).toBe(long);
+    expect(cause.style.whiteSpace).not.toBe('nowrap');
+    expect(cause.style.webkitLineClamp ?? cause.style.getPropertyValue('-webkit-line-clamp')).toBe('2');
+    expect(within(item(1)).getByTestId('version-hash').textContent).toMatch(/^[0-9a-f]{7}$/);
+    // On the history, wide enough that two lines hold a slide title and what was reverted.
+    expect(Number.parseInt(item(1).style.minWidth, 10)).toBeGreaterThanOrEqual(144);
+    cleanup();
+    // Main keeps its six narrow columns beside the lanes.
+    render(<VersionLine versions={[version(0), withLabel(1, long, { kind: 'restore', from: 0, entry: '{}' })]} current={1} />);
+    expect(item(1).style.minWidth).toBe('112px');
+    expect(within(item(1)).getByTestId('version-cause').textContent).toBe(long);
+  });
+
+  it('an accepted change keeps the change part on the rail; the lane name stays in the tooltip', () => {
+    render(<VersionLine versions={[version(0), withLabel(1, 'changed "Hook" · Shorter labels', { kind: 'accept', laneId: 'l1', changeId: 'c1' })]} current={1} />);
+    expect(within(item(1)).getByTestId('version-cause').textContent).toBe('changed "Hook"');
+    expect(item(1).title).toContain('Shorter labels');
+  });
+
+  it('scrolls the selected pair into view, the earlier then the later one, whenever the selection changes', () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    const versions = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(version);
+    const { rerender } = render(<VersionLine versions={versions} current={9} selection={{ a: 1, b: 9 }} onSelect={() => {}} />);
+    const targets = () => scrolled.mock.contexts.map((el) => (el as HTMLElement).getAttribute('data-version'));
+    expect(targets().slice(-2)).toEqual(['1', '9']);
+    scrolled.mockClear();
+    rerender(<VersionLine versions={versions} current={9} selection={{ a: 7, b: 2 }} onSelect={() => {}} />);
+    expect(targets()).toEqual(['2', '7']);
+  });
+
+  it('the "from" and "to" tags follow the selection and stay on the rail', () => {
+    const versions = [1, 2, 3, 4].map(version);
+    const tags = () => screen.getAllByTestId('version').map((v) => within(v).queryByTestId('version-pick')?.textContent ?? null);
+    const { rerender } = render(<VersionLine versions={versions} current={4} selection={{ a: 1, b: 4 }} onSelect={() => {}} />);
+    expect(tags()).toEqual(['from', null, null, 'to']);
+    rerender(<VersionLine versions={versions} current={4} selection={{ a: 2, b: 3 }} onSelect={() => {}} />);
+    expect(tags()).toEqual([null, 'from', 'to', null]);
+    // The tag line may wrap but never clips its tag away.
+    for (const v of screen.getAllByTestId('version-pick')) expect(v.parentElement!.style.overflow).not.toBe('hidden');
+  });
+});

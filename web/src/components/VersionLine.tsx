@@ -59,7 +59,7 @@ export const EMPTY_VERSION = 'empty (before import)';
 /** The rail keeps a label's first clause ('added "X"' of 'added "X" · Hook: …'); the tooltip has the whole of it. */
 export const railCause = (cause: string): string => cause.split(' · ')[0]!.trim();
 
-/** What made the version, on up to two 12px lines: a quoted slide title reads whole rather than cut mid-word. */
+/** What made the version, wrapped on up to two 12px lines (a 144px history column holds about 40 characters): a quoted slide title reads whole rather than cut mid-word. */
 const causeStyle: CSSProperties = {
   display: '-webkit-box',
   WebkitBoxOrient: 'vertical',
@@ -82,11 +82,21 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
   const kept = selectable || all.length <= RAIL_MAX ? all : all.slice(-RAIL_MAX);
   const sorted = kept.some((v) => v.n === current) ? kept : [...all.filter((v) => v.n === current), ...kept.slice(1)];
   const earlier = all.length - sorted.length;
+  // The history rail is the screen's subject: columns wide enough for a restore's label on two lines. Main keeps six
+  // narrow ones beside its lanes.
+  const col = selectable ? 144 : 112;
   const rail = useRef<HTMLOListElement>(null);
-  // The current version stays in sight: on mount, and whenever main moves to another version.
+  const pairLo = selection ? Math.min(selection.a, selection.b) : undefined;
+  const pairHi = selection ? Math.max(selection.a, selection.b) : undefined;
+  // In sight: the compared pair on the history (the earlier one, then the later one, so both show when they fit), the
+  // current version on main; on mount, and whenever the pair or main moves.
   useLayoutEffect(() => {
-    rail.current?.querySelector('[aria-current="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-  }, [current]);
+    const el = rail.current;
+    if (!el) return;
+    const at = (n: number): Element | null => el.querySelector(`[data-version="${n}"]`);
+    const targets = pairLo !== undefined && pairHi !== undefined ? [at(pairLo), pairHi !== pairLo ? at(pairHi) : null] : [el.querySelector('[aria-current="true"]')];
+    for (const t of targets) t?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [current, pairLo, pairHi]);
   const openHistory = (path: string) => (e: MouseEvent<HTMLAnchorElement>): void => {
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
     e.preventDefault();
@@ -109,6 +119,9 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
             const isCurrent = v.n === current;
             // v0 is the empty deck an import starts from: "imported" read as if it held the slides.
             const cause = v.order.length === 0 ? EMPTY_VERSION : ((v as Version & { label?: string }).label ?? describeCause(v.cause));
+            // An accept's label ends with its lane's name, kept for the tooltip; any other label (a restore says which
+            // slide went back to what) is shown whole.
+            const railText = v.order.length > 0 && v.cause.kind === 'accept' ? railCause(cause) : cause;
             const picked: keyof VersionPair | undefined = selection?.a === v.n ? 'a' : selection?.b === v.n ? 'b' : undefined;
             const marked = picked !== undefined || (!selectable && isCurrent);
             const hash = versionHash(v);
@@ -124,8 +137,8 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
                   {isCurrent ? <span className="meta">now</span> : null}
                   {picked ? <span data-testid="version-pick" style={{ fontSize: 12, fontWeight: 500, color: 'var(--accent)' }}>{picked === 'a' ? 'from' : 'to'}</span> : null}
                 </span>
-                <span className="meta" data-testid="version-cause" style={causeStyle}>{railCause(cause)}</span>
-                <span className="mono meta" style={{ display: 'block' }}>{hash}</span>
+                <span className="meta" data-testid="version-cause" style={causeStyle}>{railText}</span>
+                <span className="mono meta" data-testid="version-hash" style={{ display: 'block' }}>{hash}</span>
               </>
             );
             const box: CSSProperties = { all: 'unset', boxSizing: 'border-box', display: 'block', width: '100%', cursor: 'pointer', color: 'inherit' };
@@ -137,7 +150,7 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
                 data-selected={picked}
                 aria-current={isCurrent ? 'true' : undefined}
                 title={`v${v.n}, ${cause}, ${new Date(v.createdAt).toLocaleString()}`}
-                style={{ flex: '1 0 112px', minWidth: 112, maxWidth: 152, paddingRight: 16 }}
+                style={{ flex: `1 0 ${col}px`, minWidth: col, maxWidth: col + 32, paddingRight: 16 }}
               >
                 {selectable ? (
                   <button type="button" aria-pressed={picked !== undefined} aria-label={`v${v.n}: click to compare from, shift-click to compare to`} onClick={(e) => onSelect(v.n, e.shiftKey ? 'b' : 'a')} style={box}>
