@@ -90,6 +90,7 @@ export function RemarkRow({
   items,
   columns,
   testId,
+  slotTestId = 'post-it-slot',
   maxRows,
   view,
   avoid,
@@ -97,6 +98,8 @@ export function RemarkRow({
   items: readonly Pinned[];
   columns: number;
   testId: string;
+  /** Test id of each card's slot. */
+  slotTestId?: string;
   maxRows?: number;
   view?: { first: number; end: number };
   /** Columns a moved hairline runs down: cards keep clear of them (see placeCards). */
@@ -128,7 +131,7 @@ export function RemarkRow({
         return (
           <div
             key={it.id}
-            data-testid="post-it-slot"
+            data-testid={slotTestId}
             data-col={it.col}
             data-span={it.span}
             data-slide={it.slide}

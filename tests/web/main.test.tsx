@@ -520,10 +520,12 @@ describe('Main QA1', () => {
     expect(screen.getByTestId('range-caption').textContent).toBe('slides 2–4');
   });
 
-  it('Escape clears the selection, but not while typing in a text field', async () => {
+  it('Escape clears the selection, but not while a message is being written', async () => {
     await mounted();
     fireEvent.click(mainThumb('s3'));
-    fireEvent.keyDown(screen.getByLabelText('message'), { key: 'Escape' });
+    const input = screen.getByLabelText('message');
+    fireEvent.change(input, { target: { value: 'half written' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
     expect(pressed()).toEqual(['s3']);
     fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(pressed()).toEqual([]);
