@@ -463,7 +463,12 @@ export function BriefChecks({ api = briefChecksApi, subscribe = defaultSubscribe
       else if (e.type === 'lane.created' || e.type === 'lane.updated' || e.type === 'lane.closed') api.getLanes('all').then(setLanes, reportLive);
       // The event carries the running list: no refetch per event.
       else if (e.type === 'checks.status') applyStatus(applyRunning(statusNow.current, e.running, new Date().toISOString()));
-      else if (e.type === 'deck.changed') void loadDeck();
+      else if (e.type === 'deck.changed') {
+        void loadDeck();
+        // The server writes "slide N (title)" into a remark's text when it is read: refetched with the deck, so the
+        // text and its range chip renumber together.
+        loadRemarks().catch(reportLive);
+      }
       else if (e.type === 'thumb.ready') {
         const id = pendingThumbs.current.get(e.hash);
         if (id) loadThumb(id).catch(reportLive);

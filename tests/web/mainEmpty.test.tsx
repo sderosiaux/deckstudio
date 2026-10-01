@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { DeckPayload, LanePreviewPayload } from '../../web/src/api.js';
-import type { Lane, Slide, SlideId } from '../../src/model/types.js';
+import type { Change, Lane, Slide, SlideId, ThreadMessage } from '../../src/model/types.js';
 import { waitFor } from '../helpers/waitFor.js';
 
 const m = vi.hoisted(() => ({
@@ -11,6 +11,8 @@ const m = vi.hoisted(() => ({
   getLane: vi.fn(),
   getLanePreview: vi.fn(),
   thumbFor: vi.fn(),
+  getThread: vi.fn(),
+  acceptChange: vi.fn(),
 }));
 
 vi.mock('../../web/src/api.js', async (importOriginal) => {
@@ -27,7 +29,15 @@ vi.mock('../../web/src/api.js', async (importOriginal) => {
     getRemarks: async () => [],
     openPlayer: vi.fn(),
     remarkApi: { proposeRemark: vi.fn(), resolveRemark: vi.fn() },
-    threadApi: { getThread: async () => [], postMessage: vi.fn() },
+    threadApi: {
+      getThread: (key: string) => m.getThread(key),
+      postMessage: vi.fn(),
+      getLane: (id: string) => m.getLane(id),
+      getLanePreview: (id: string) => m.getLanePreview(id),
+      thumbFor: (id: SlideId) => m.thumbFor(id),
+      acceptChange: (laneId: string, changeId: string) => m.acceptChange(laneId, changeId),
+      refuseChange: vi.fn(),
+    },
     laneApi: { acceptChange: vi.fn(), refuseChange: vi.fn(), discardLane: vi.fn() },
     subscribe: () => () => undefined,
   };
@@ -73,6 +83,8 @@ beforeEach(() => {
   m.getLane.mockReset().mockImplementation(async (id: string) => lanes.find((l) => l.id === id));
   m.getLanePreview.mockReset().mockImplementation(async () => outlinePreview);
   m.thumbFor.mockReset().mockImplementation(async (id: SlideId) => ({ hash: `h_${id}`, ready: true }));
+  m.getThread.mockReset().mockImplementation(async () => []);
+  m.acceptChange.mockReset();
 });
 afterEach(() => cleanup());
 
@@ -105,5 +117,62 @@ describe('Main on an empty deck', () => {
     // The strip row stays named; the hint gives way to the proposal it announced.
     expect(within(screen.getByTestId('strip-header')).getByText('No slides yet')).toBeTruthy();
     expect(screen.queryByText(EMPTY_HINT)).toBeNull();
+  });
+});
+
+describe('QA5: the empty deck header, plurals, the outline receipt on main', () => {
+  it('Present and Brief and checks are muted, not links, titled "no slides yet"', async () => {
+    render(<Main />);
+    await screen.findByText(EMPTY_HINT);
+    for (const id of ['header-present', 'header-brief']) {
+      const el = screen.getByTestId(id);
+      expect(el.getAttribute('aria-disabled')).toBe('true');
+      expect(el.getAttribute('title')).toBe('no slides yet');
+      expect(el.hasAttribute('href')).toBe(false);
+    }
+    expect(screen.getByTestId('header-present').textContent).toBe('Present');
+    // "No slides yet" sits right of the empty gutter, on the title column, not in the gutter.
+    const label = screen.getByTestId('no-slides');
+    expect(label.closest('.gutter')).toBeNull();
+    expect(label.closest('[data-strip="main"]')!.previousElementSibling!.className).toBe('gutter');
+  });
+
+  it('"1 slide", "2 slides" next to the version; with slides Present is a link again', async () => {
+    m.getDeck.mockImplementation(async () => ({ ...emptyDeck, order: ['n1'], slides: { n1: slide('n1') } }));
+    render(<Main />);
+    await waitFor(() => screen.queryByTestId('slide-count')?.textContent === '1 slide');
+    expect(screen.getByTestId('header-present').getAttribute('href')).toBeTruthy();
+    expect(screen.getByTestId('header-present').hasAttribute('aria-disabled')).toBe(false);
+    cleanup();
+    m.getDeck.mockImplementation(async () => ({ ...emptyDeck, order: ['n1', 'n2'], slides: { n1: slide('n1'), n2: slide('n2') } }));
+    render(<Main />);
+    await waitFor(() => screen.queryByTestId('slide-count')?.textContent === '2 slides');
+  });
+
+  it('a 10-insert outline answered in the whole-deck thread is one receipt; "open on the strip" scrolls to its row and flashes it', async () => {
+    const inserts: Change[] = Array.from({ length: 10 }, (_, i) => ({
+      id: `c${i + 1}`, kind: 'insert', after: i === 0 ? null : `n${i}`, slide: slide(`n${i + 1}`), reason: `slide ${i + 1}`, status: 'pending',
+    }));
+    const ten: Lane = { ...outline, changes: inserts, createdAt: '2026-09-30T10:00:02.000Z' };
+    lanes = [ten];
+    m.getLanePreview.mockImplementation(async () => ({ order: inserts.map((c) => (c.kind === 'insert' ? c.slide.id : '')), slides: {}, skipped: [], thumbs: {} }));
+    const stored: ThreadMessage[] = [
+      { id: 'u1', thread: 'global', role: 'user', text: 'Draft the outline: 10 slides', context: { kind: 'arc' }, at: '2026-09-30T10:00:00.000Z' },
+      { id: 'a1', thread: 'global', role: 'assistant', text: 'Here it is.', context: null, at: '2026-09-30T10:05:00.000Z' },
+    ];
+    m.getThread.mockImplementation(async () => stored);
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    render(<Main />);
+    const head = await waitFor(() => screen.queryByTestId('receipt-head'));
+    expect(head.textContent).toBe('lane: first outline, 10 inserts');
+    expect(screen.getAllByTestId('receipt-line')).toHaveLength(10);
+    expect(screen.queryAllByTestId('proposal-change')).toHaveLength(0);
+    await waitFor(() => screen.queryByTestId('lane-row'));
+    scrolled.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'open on the strip' }));
+    const row = screen.getByTestId('lane-row');
+    expect(scrolled.mock.contexts).toContain(row);
+    await waitFor(() => row.getAttribute('data-flash') === 'true');
   });
 });

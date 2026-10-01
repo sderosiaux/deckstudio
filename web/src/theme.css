@@ -271,6 +271,9 @@ button { font: inherit; }
 .focus-side > [data-testid='thread'] { flex: 1; min-height: 0; }
 /* The lane's changes above its conversation: what each does and why. Under half the column, then it scrolls. */
 .focus-changes { flex: 0 1 auto; max-height: 45%; overflow: auto; padding: 14px 20px 12px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--line); }
+/* Narrow, the list follows the renders in the scrolling body, above the thread: whole, never a box of its own, and it folds. */
+.focus-changes[data-collapsible='true'] { max-height: none; overflow: visible; max-width: 924px; padding: 8px 0 12px; border-bottom: none; border-top: 1px solid var(--line); }
+.focus-changes-toggle { display: inline-flex; align-items: baseline; gap: 10px; font-size: var(--fs-row); color: var(--ink); }
 .focus-change-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .focus-change { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; margin: 0 -8px; border-radius: var(--radius); font-size: var(--fs-body); line-height: 1.45; }
 .focus-change[aria-current='true'] { background: var(--card); box-shadow: inset 2px 0 0 var(--accent); }

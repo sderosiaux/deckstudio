@@ -329,6 +329,8 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
   const [revising, setRevising] = useState(false);
   // The full filmstrips, folded by default into one strip of numbers.
   const [expanded, setExpanded] = useState(false);
+  // Narrow, "changes in this lane" sits in the body above the thread: open by default, it folds to its title.
+  const [listOpen, setListOpen] = useState(true);
   // The diff pane runs on below its bottom edge.
   const [fade, setFade] = useState(false);
   const pane = useRef<HTMLElement>(null);
@@ -755,9 +757,20 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
 
   // Every change of the lane, above its conversation: what each does and why, the one on screen marked, the pending
   // ones a click away (previous and next only step one at a time), the decided ones with their outcome.
-  const changeList = (
-    <section data-testid="focus-changes" aria-label="changes in this lane" className="focus-changes">
-      <h2 className="row-label" style={{ margin: 0 }}>changes in this lane</h2>
+  // Narrow, the list follows the renders in the body, above the thread, and folds to its title.
+  const changeList = (collapsible: boolean) => (
+    <section data-testid="focus-changes" aria-label="changes in this lane" className="focus-changes" data-collapsible={collapsible ? 'true' : undefined}>
+      {collapsible ? (
+        <h2 className="row-label" style={{ margin: 0 }}>
+          <button type="button" className="link focus-changes-toggle" aria-expanded={listOpen} onClick={() => setListOpen((o) => !o)}>
+            changes in this lane
+            <span className="meta">{listOpen ? 'hide' : `show ${lane.changes.length}`}</span>
+          </button>
+        </h2>
+      ) : (
+        <h2 className="row-label" style={{ margin: 0 }}>changes in this lane</h2>
+      )}
+      {collapsible && !listOpen ? null : (
       <ol className="focus-change-list">
         {lane.changes.map((c, i) => {
           const { outcome } = outcomeOf(lane, c);
@@ -782,6 +795,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
           );
         })}
       </ol>
+      )}
     </section>
   );
 
@@ -867,6 +881,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
                 {actionError}
               </p>
             ) : null}
+            {wide ? null : changeList(true)}
             {wide ? null : (
               <section aria-label="lane thread" className="focus-thread">
                 {thread}
@@ -949,7 +964,7 @@ export function Focus({ laneId, changeId, api = focusApi, subscribe = defaultSub
       </div>
       {wide ? (
         <section data-testid="focus-side" aria-label="lane thread" className="focus-side">
-          {changeList}
+          {changeList(false)}
           {thread}
         </section>
       ) : null}

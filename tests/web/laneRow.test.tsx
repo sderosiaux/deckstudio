@@ -660,3 +660,109 @@ describe('LaneRow QA4: decided cells, no ghosts, "+N" on pending only, moved slo
     history.replaceState(null, '', '/');
   });
 });
+
+describe('LaneRow QA5: optimistic decisions, in-row move paths, changes listed when off-screen', () => {
+  const move = (id: string, slideId: SlideId, after: SlideId | null): Change => ({ id, kind: 'move', slide: slideId, after, reason: `move ${slideId}`, status: 'pending' });
+  const cellOf = (id: string) => screen.getAllByTestId('lane-cell').find((c) => c.getAttribute('data-slide') === id)!;
+
+  it('a click on accept or refuse switches that cell to "accepted" / "refused" at once, buttons gone, before the server answers', async () => {
+    const api = stubApi();
+    let answer: (v: unknown) => void = () => undefined;
+    api.acceptChange.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+    api.refuseChange.mockImplementation(() => new Promise(() => undefined));
+    const l = lane();
+    const { rerender } = render(<LaneRow lane={l} preview={preview} mainOrder={order} mainThumbs={{}} api={api} />);
+    fireEvent.click(screen.getByRole('button', { name: 'accept: modify slide 3, Sharper s3' }));
+    // Same tick, no server answer yet.
+    expect(cellOf('s3').getAttribute('data-mark')).toBe('settled');
+    expect(within(cellOf('s3')).getByTestId('settled-tag').textContent).toBe('accepted');
+    expect(within(cellOf('s3')).queryByTestId('change-buttons')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'accept: modify slide 3, Sharper s3' })).toBeNull();
+    await act(async () => answer({}));
+    // lane.updated: the server's lane agrees, the cell stays decided.
+    rerender(<LaneRow lane={{ ...l, changes: l.changes.map((c) => (c.id === 'c1' ? { ...c, status: 'accepted' as const } : c)) }} preview={preview} mainOrder={order} mainThumbs={{}} api={api} />);
+    expect(within(cellOf('s3')).getByTestId('settled-tag').textContent).toBe('accepted');
+
+    fireEvent.click(screen.getByRole('button', { name: 'refuse: remove slide 4, Title s4' }));
+    expect(cellOf('s4').getAttribute('data-mark')).toBe('settled');
+    expect(within(cellOf('s4')).getByTestId('settled-tag').textContent).toBe('refused');
+    expect(within(cellOf('s4')).queryByTestId('change-buttons')).toBeNull();
+  });
+
+  it('a decision the server rejects comes back with its buttons and the error', async () => {
+    const api = stubApi();
+    api.acceptChange.mockRejectedValueOnce(new Error('409 change c1 is orphan'));
+    render(<LaneRow lane={lane()} preview={preview} mainOrder={order} mainThumbs={{}} api={api} />);
+    fireEvent.click(screen.getByRole('button', { name: 'accept: modify slide 3, Sharper s3' }));
+    expect(cellOf('s3').getAttribute('data-mark')).toBe('settled');
+    await waitFor(() => screen.queryByRole('alert'));
+    expect(cellOf('s3').getAttribute('data-mark')).toBe('modified');
+    expect(within(cellOf('s3')).getByTestId('change-buttons')).toBeTruthy();
+  });
+
+  it('a move draws its path inside its own row, on the row grid from its column to where it lands; none for a move that stays', () => {
+    const earlier = move('m1', 's4', 's1');
+    const p: LanePreviewPayload = { order: ['s1', 's4', 's2', 's3', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
+    render(<LaneRow lane={lane({ changes: [earlier] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    const row = screen.getByTestId('lane-row');
+    const path = screen.getByTestId('move-path');
+    expect(row.contains(path)).toBe(true);
+    expect(path.parentElement).toBe(screen.getByTestId('lane-grid'));
+    // s4 (column 3) lands before column 1: the path spans columns 1..2 and reaches the moved card's dot.
+    expect(path.getAttribute('data-from')).toBe('3');
+    expect(path.getAttribute('data-to')).toBe('1');
+    expect(path.style.gridColumn).toBe('2 / 4');
+    expect(path.style.gridRow).toBe('1');
+    expect(path.style.position).toBe('relative');
+    cleanup();
+
+    const later = move('m2', 's1', 's4');
+    const q: LanePreviewPayload = { order: ['s2', 's3', 's4', 's1', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
+    render(<LaneRow lane={lane({ changes: [later] })} preview={q} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    expect(screen.getByTestId('move-path').style.gridColumn).toBe('1 / 5');
+    cleanup();
+
+    // Lands where it already is: no path.
+    const noop = move('m3', 's3', 's2');
+    render(<LaneRow lane={lane({ changes: [noop] })} preview={{ order, slides: mainSlides, skipped: [], thumbs: {} }} mainOrder={order} mainThumbs={{}} api={stubApi()} />);
+    expect(screen.queryByTestId('move-path')).toBeNull();
+  });
+
+  it('changed columns outside the window: the edge chip and, under it, each pending change on one line, a link to focus', () => {
+    const big: SlideId[] = Array.from({ length: 20 }, (_, i) => `s${i + 1}`);
+    const bigSlides = Object.fromEntries(big.map((id) => [id, slide(id)]));
+    // Slides 17 and 18 go to 9 and 10; slide 8's move is settled (no-op accepted), in view.
+    const moves: Change[] = [move('m17', 's17', 's8'), move('m18', 's18', 's17'), { ...move('m8', 's8', 's7'), status: 'accepted' }];
+    const laneOrder = [...big.slice(0, 8), 's17', 's18', ...big.slice(8, 16), 's19', 's20'];
+    const p: LanePreviewPayload = { order: laneOrder, slides: bigSlides, skipped: [], thumbs: {} };
+    const open = vi.fn();
+    render(
+      <LaneRow
+        lane={lane({ anchor: { kind: 'arc' }, changes: moves })}
+        preview={p}
+        mainOrder={big}
+        mainSlides={bigSlides}
+        mainThumbs={{}}
+        api={stubApi()}
+        view={{ first: 6, end: 9 }}
+        onReveal={vi.fn()}
+        onOpenChange={open}
+      />,
+    );
+    expect(screen.getByTestId('edge-chip').textContent).toContain('slide 17');
+    const list = screen.getByTestId('lane-offscreen');
+    const links = within(list).getAllByRole('link');
+    expect(links.map((a) => a.textContent)).toEqual(['move slide 17 to 9', 'move slide 18 to 10']);
+    expect(links[0]!.getAttribute('href')).toBe(focusPath('l1', 'm17'));
+    fireEvent.click(links[1]!);
+    expect(open).toHaveBeenCalledWith('l1', 'm18');
+    // The list lives in the header column.
+    expect(list.closest('.gutter')).toBeTruthy();
+  });
+
+  it('no list while a changed cell is in view', () => {
+    const p: LanePreviewPayload = { order: ['s1', 's4', 's2', 's3', 's5'], slides: mainSlides, skipped: [], thumbs: {} };
+    render(<LaneRow lane={lane({ changes: [move('m1', 's4', 's1')] })} preview={p} mainOrder={order} mainThumbs={{}} api={stubApi()} view={{ first: 0, end: 5 }} onReveal={vi.fn()} />);
+    expect(screen.queryByTestId('lane-offscreen')).toBeNull();
+  });
+});

@@ -30,11 +30,11 @@ import {
 } from '../api.js';
 import { END_W, EdgeFade, useVisibleColumns, type VisibleColumns } from '../components/EdgeFade.js';
 import { Filmstrip } from '../components/Filmstrip.js';
-import { FAILED_THUMB, LaneRow, MoveRisers, VariantRow, anchorColumns, variantGroups, type VariantGroup } from '../components/LaneRow.js';
+import { FAILED_THUMB, LaneRow, VariantRow, anchorColumns, variantGroups, type VariantGroup } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
 import { DecksLink, ScreenHeader } from '../components/ScreenHeader.js';
 import { SlidePreview } from '../components/SlidePreview.js';
-import { Thread } from '../components/Thread.js';
+import { Thread, plural } from '../components/Thread.js';
 import type { RemarkDot } from '../components/Thumb.js';
 import { VersionLine } from '../components/VersionLine.js';
 import { modified, typingIn } from '../keys.js';
@@ -96,6 +96,7 @@ const PANEL_REMARKS = 3;
 const SLIDE_HINT = 'Ask the co-author about this slide: a sharper title, a tighter story, a diagram. Its proposal shows here with accept and refuse.';
 const RANGE_HINT = 'Ask the co-author about these slides. Only the messages sent on this range show here; the whole deck keeps its own conversation.';
 const DECK_HINT = 'Ask the co-author about the whole deck: its arc, its order, its pacing. Select a slide to talk about that slide here.';
+const NO_SLIDES = 'no slides yet';
 const EMPTY_DECK_HINT = 'Describe the talk to the co-author on the right: it proposes an outline as a lane you accept slide by slide.';
 
 /** Focus route of the lane now linked to the note's remark, once the co-author's lane is there with something to review. */
@@ -170,6 +171,14 @@ const PINNED_W = '100cqw';
 const CANVAS_SIDE = 24;
 /** The stage runs 12px into the canvas's right padding: its neighbour column ends 12px short of the conversation's rule. */
 const STAGE_RUN = 12;
+
+/**
+ * A pinned box's room past the rows' content edge. Sticky never moves a box out of its parent, and the rows end END_W
+ * (their "+N" padding) short of the canvas's scrolled end: a box as wide as the visible canvas (the stage runs STAGE_RUN
+ * further) would be pushed back left and cut once the strip scrolls to its end. Its slot runs this much further right,
+ * inside the canvas's own 24px padding, so the scroll width never grows.
+ */
+const PINNED_SLOT: CSSProperties = { marginRight: -(END_W + STAGE_RUN) };
 
 /** Top and bottom of the canvas's pinned box ([data-pinned]) in the canvas's box, below the sticky strip; null when none shows. */
 export interface PinnedBand {
@@ -1147,6 +1156,8 @@ export function Main() {
       document.getElementById(`lane-row-${laneId}`) ??
       document.querySelector(`[data-testid="variant-cell"][data-lane="${CSS.escape(laneId)}"]`)?.closest('[data-testid="variant-row"]');
     row?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    // Then once outlined, so the eye finds which row it is.
+    setFlash(laneId);
   };
   const openedLane = (r: Remark): { label: string; onShow(): void } | undefined => {
     const lane = r.laneId ? lanes.find((l) => l.id === r.laneId) : undefined;
@@ -1368,6 +1379,8 @@ export function Main() {
         api={deckApi}
         subscribe={fanout}
         autoFocus={empty}
+        knownLanes={lanes}
+        onShowLane={showLane}
         lead={
           deckRemarks.length > 0 || notesBlock ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -1420,9 +1433,22 @@ export function Main() {
         <ScreenHeader>
           <h1 className="screen-title">{deck.brief.title || deck.state.name}</h1>
           <span className="meta">v{deck.state.version}</span>
-          <span className="meta">{deck.order.length} slides</span>
+          <span data-testid="slide-count" className="meta">{plural(deck.order.length, 'slide')}</span>
           <DecksLink style={{ marginLeft: 'auto' }} />
+          {empty ? (
+            // Nothing to check or present yet: both stay where they will be, muted, and say why.
+            <>
+              <span data-testid="header-brief" aria-disabled="true" title={NO_SLIDES} className="link" style={{ cursor: 'default', color: 'var(--grey-2)' }}>
+                Brief and checks
+              </span>
+              <span data-testid="header-present" role="link" aria-disabled="true" title={NO_SLIDES} className="btn-primary" style={{ alignSelf: 'center', cursor: 'default', opacity: 0.45 }}>
+                Present
+              </span>
+            </>
+          ) : (
+          <>
           <a
+            data-testid="header-brief"
             href={briefPath()}
             onClick={(e) => {
               e.preventDefault();
@@ -1434,7 +1460,9 @@ export function Main() {
             <span>Brief and checks</span>
             {openCount > 0 ? <span data-testid="remark-count" className="meta">{openCount} open {openCount === 1 ? 'remark' : 'remarks'}</span> : null}
           </a>
-          <a href={presentHref} className="btn-primary" title="esc returns here" style={{ alignSelf: 'center' }}>Present</a>
+          <a data-testid="header-present" href={presentHref} className="btn-primary" title="esc returns here" style={{ alignSelf: 'center' }}>Present</a>
+          </>
+          )}
         </ScreenHeader>
         {/* The canvas takes the height left above the versions rail and scrolls both ways; the rail stays put under it. */}
         <div style={{ position: 'relative', flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
@@ -1447,10 +1475,9 @@ export function Main() {
           >
             {
               // max-content: the filmstrip and the lane rows scroll together, so lane columns stay under main's.
-              // z-index 0: a stacking context, so the moved hairlines pass under the rows and the remark cards.
+              // z-index 0: a stacking context of its own for the rows, the remark cards and the sticky strip.
               // END_W of right padding: scrolled to the end, the last slide clears the "+N" slot instead of hiding behind it.
               <div ref={rows} style={{ position: 'relative', zIndex: 0, width: 'max-content', minWidth: '100%', display: 'flex', flexDirection: 'column', gap: 24, paddingRight: END_W }}>
-                <MoveRisers root={rows} deps={[deck.order, lanes, previews]} />
                 <div
                   ref={stripHeader}
                   data-testid="strip-header"
@@ -1462,11 +1489,14 @@ export function Main() {
                 >
                   {empty ? (
                     // No slides: the strip row keeps its place (lane cells line up under it) and says why it is bare.
+                    // Its words start on the screens' title column (x = 144), right of the empty gutter, like the title above.
                     <div style={{ display: 'flex', alignItems: 'stretch' }}>
-                      <div className="gutter row-label" style={{ paddingTop: 8 }}>
-                        No slides yet
+                      <div className="gutter" />
+                      <div data-strip="main" style={{ height: 'var(--thumb-h)', padding: '6px 6px 22px 0', boxSizing: 'content-box' }}>
+                        <p data-testid="no-slides" className="row-label" style={{ margin: 0, paddingTop: 2 }}>
+                          No slides yet
+                        </p>
                       </div>
-                      <div data-strip="main" style={{ height: 'var(--thumb-h)', padding: '6px 6px 22px', boxSizing: 'content-box' }} />
                     </div>
                   ) : (
                   <Filmstrip
@@ -1492,7 +1522,7 @@ export function Main() {
                     : null}
                 </div>
                 {selectionStage || remarkError ? (
-                  <div style={{ marginTop: -8 }}>
+                  <div data-testid="stage-slot" style={{ marginTop: -8, ...PINNED_SLOT }}>
                     {selectionStage}
                     {remarkError ? (
                       <p style={{ margin: '6px 0 0 var(--gutter)', color: 'var(--warn)', fontSize: 12 }}>
@@ -1514,7 +1544,9 @@ export function Main() {
                   laneRows
                 )}
                 {context.kind === 'arc' && !empty ? (
-                  <DeckSheet order={deck.order} slides={deck.slides} thumbs={shownThumbs} dots={dots} width={pinned} canvasHeight={room.canvas} onPick={pickFromSheet} onOpen={presentFrom} />
+                  <div style={PINNED_SLOT}>
+                    <DeckSheet order={deck.order} slides={deck.slides} thumbs={shownThumbs} dots={dots} width={pinned} canvasHeight={room.canvas} onPick={pickFromSheet} onOpen={presentFrom} />
+                  </div>
                 ) : null}
               </div>
             }
