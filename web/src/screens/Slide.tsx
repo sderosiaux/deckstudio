@@ -18,6 +18,7 @@ import {
   type RemarkApi,
   type SlideApi,
   type ThumbStatus,
+  mainHref,
 } from '../api.js';
 import { ChangeButtons, settledNote } from '../components/ChangeButtons.js';
 import { describeChange, originTag, targetOf, useLaneActions } from '../components/LaneRow.js';
@@ -392,7 +393,7 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
         <p style={{ color: 'var(--warn)', fontWeight: 700 }}>Could not load the deck.</p>
         <p className="muted mono">{deckLoad.message}</p>
         <button type="button" className="btn" onClick={() => void reloadDeck()}>Retry</button>{' '}
-        <a href="/" onClick={go('/')} className="link">back to main</a>
+        <a href={mainHref()} onClick={go(mainHref())} className="link">back to main</a>
       </div>
     );
   }
@@ -400,7 +401,7 @@ export function Slide({ slideId, api = defaultApi, subscribe = defaultSubscribe,
     return (
       <div style={{ padding: 32, display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
         <p style={{ margin: 0 }}>This slide is no longer on main: a change removed it, or the link is out of date.</p>
-        <a href="/" onClick={go('/')} className="link">back to main</a>
+        <a href={mainHref()} onClick={go(mainHref())} className="link">back to main</a>
       </div>
     );
   }

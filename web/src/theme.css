@@ -244,3 +244,25 @@ button { font: inherit; }
 .move-strip[data-side='lane'] .move-caption { color: var(--ink); font-weight: 500; }
 .move-strip-list { position: relative; display: flex; align-items: flex-end; gap: var(--col-gap); overflow-x: auto; padding: 6px 6px 4px; scrollbar-width: thin; }
 .move-strip-item { flex: none; --thumb-w: calc(var(--move-u) * var(--move-s) * var(--move-k, 1)); --thumb-h: calc(var(--thumb-w) * 9 / 16); }
+
+/* Home: every presentation of the studio. The body starts on the screens' column (x = 144). */
+.home-body { padding: 8px 24px 48px calc(24px + var(--gutter)); display: flex; flex-direction: column; gap: 24px; }
+.home-empty { margin: 24px 0 0; font-size: var(--fs-row); color: var(--grey); }
+.home-panel { max-width: 960px; padding: 20px 24px 24px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); }
+.home-panel-title { margin: 0 0 4px; font-size: var(--fs-row); font-weight: 700; }
+.home-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); column-gap: 24px; }
+.deck-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 24px; max-width: 1320px; }
+/* A deck card: the one card of the home, because it is the one object picked up here. */
+.deck-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 10px 10px 12px; border-radius: var(--radius); background: var(--card);
+  border: 1px solid var(--line); color: var(--ink); text-decoration: none; transition: border-color .15s ease, box-shadow .15s ease;
+}
+.deck-card:hover, .deck-card:focus-visible { border-color: var(--grey-2); box-shadow: var(--shadow); outline: none; }
+.deck-card-cover { display: block; aspect-ratio: 16 / 9; border-radius: 4px; overflow: hidden; background: var(--paper); box-shadow: 0 0 0 1px var(--line); margin-bottom: 4px; }
+.deck-card-cover img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.deck-card-placeholder { display: block; width: 100%; height: 100%; background: var(--line); }
+.deck-card-title { font-size: var(--fs-row); font-weight: 700; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-height: 2.6em; }
+.deck-card-meta { display: flex; justify-content: space-between; gap: 12px; }
+/* Main on a deck with no slides: one line centred on the canvas, under the strip's "No slides yet". */
+.empty-deck-hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 0 48px; pointer-events: none; }
+.empty-deck-hint > p { margin: 0; max-width: 560px; text-align: center; font-size: var(--fs-row); line-height: 1.45; color: var(--grey); pointer-events: auto; }

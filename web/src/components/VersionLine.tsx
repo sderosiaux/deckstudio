@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, type CSSProperties, type MouseEvent } from 'react';
 import type { Version, VersionCause } from '../../../src/model/types.js';
-import { HISTORY_PATH, historyPath, navigate as defaultNavigate } from '../api.js';
+import { historyPath, navigate as defaultNavigate } from '../api.js';
 
 /** The two versions compared on the history screen: `a` is the reference, `b` the one diffed against it. */
 export interface VersionPair {
@@ -54,7 +54,7 @@ const node = (marked: boolean, current: boolean): CSSProperties => ({
 });
 
 /** What the rail says of a version without slides (v0, before the import). */
-export const EMPTY_VERSION = 'empty (before import)';
+export const EMPTY_VERSION = 'empty';
 
 /** The rail keeps a label's first clause ('added "X"' of 'added "X" · Hook: …'); the tooltip has the whole of it. */
 export const railCause = (cause: string): string => cause.split(' · ')[0]!.trim();
@@ -110,14 +110,14 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
       ) : (
         <>
         {earlier > 0 ? (
-          <a href={HISTORY_PATH} onClick={openHistory(HISTORY_PATH)} data-testid="versions-earlier" className="link" title="open the history" style={{ flex: '0 0 auto', fontSize: 12, lineHeight: `${NODE}px`, paddingLeft: 6, marginRight: 4, whiteSpace: 'nowrap' }}>
+          <a href={historyPath()} onClick={openHistory(historyPath())} data-testid="versions-earlier" className="link" title="open the history" style={{ flex: '0 0 auto', fontSize: 12, lineHeight: `${NODE}px`, paddingLeft: 6, marginRight: 4, whiteSpace: 'nowrap' }}>
             … {earlier} earlier
           </a>
         ) : null}
         <ol ref={rail} style={{ position: 'relative', listStyle: 'none', margin: 0, padding: '0 6px', display: 'flex', overflowX: 'auto', scrollPaddingInline: 6, minWidth: 0, flex: 1 }}>
           {sorted.map((v, i) => {
             const isCurrent = v.n === current;
-            // v0 is the empty deck an import starts from: "imported" read as if it held the slides.
+            // v0 is the empty deck a new or imported deck starts from: "imported" read as if it held the slides.
             const cause = v.order.length === 0 ? EMPTY_VERSION : ((v as Version & { label?: string }).label ?? describeCause(v.cause));
             // An accept's label ends with its lane's name, kept for the tooltip; any other label (a restore says which
             // slide went back to what) is shown whole.
@@ -158,8 +158,8 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
                   </button>
                 ) : (
                   <a
-                    href={isCurrent ? HISTORY_PATH : historyPath(v.n, current)}
-                    onClick={openHistory(isCurrent ? HISTORY_PATH : historyPath(v.n, current))}
+                    href={isCurrent ? historyPath() : historyPath(v.n, current)}
+                    onClick={openHistory(isCurrent ? historyPath() : historyPath(v.n, current))}
                     aria-label={isCurrent ? `v${v.n}, current: open the history` : `compare v${v.n} with v${current}`}
                     style={{ ...box, textDecoration: 'none' }}
                   >
@@ -173,7 +173,7 @@ export function VersionLine({ versions, current, selection, onSelect, navigate =
         </>
       )}
       {!selectable && sorted.length > 1 ? (
-        <a href={HISTORY_PATH} onClick={openHistory(HISTORY_PATH)} data-testid="history-link" className="link" style={{ flex: '0 0 auto', fontSize: 12, lineHeight: `${NODE}px`, marginLeft: 12 }}>
+        <a href={historyPath()} onClick={openHistory(historyPath())} data-testid="history-link" className="link" style={{ flex: '0 0 auto', fontSize: 12, lineHeight: `${NODE}px`, marginLeft: 12 }}>
           compare versions
         </a>
       ) : null}

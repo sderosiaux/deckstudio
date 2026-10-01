@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import type React from 'react';
 import type { Anchor, Lane, Remark, SlideId, ThreadKey, ThreadMessage, Version } from '../../../src/model/types.js';
 import {
-  BRIEF_PATH,
+  briefPath,
   focusPath,
   getDeck,
   getLane,
@@ -32,7 +32,7 @@ import { END_W, EdgeFade, useVisibleColumns, type VisibleColumns } from '../comp
 import { Filmstrip } from '../components/Filmstrip.js';
 import { FAILED_THUMB, LaneRow, MoveRisers, VariantRow, anchorColumns, variantGroups, type VariantGroup } from '../components/LaneRow.js';
 import { RemarkPostIt, anchorLabel } from '../components/Remark.js';
-import { ScreenHeader } from '../components/ScreenHeader.js';
+import { DecksLink, ScreenHeader } from '../components/ScreenHeader.js';
 import { SlidePreview } from '../components/SlidePreview.js';
 import { Thread } from '../components/Thread.js';
 import type { RemarkDot } from '../components/Thumb.js';
@@ -91,6 +91,7 @@ const BAR_SHUT_W = 40;
 const PANEL_REMARKS = 3;
 const SLIDE_HINT = 'Ask the co-author about this slide: a sharper title, a tighter story, a diagram. Its proposal shows here with accept and refuse.';
 const RANGE_HINT = 'Ask the co-author about these slides. Only the messages sent on this range show here; the whole deck keeps its own conversation.';
+const EMPTY_DECK_HINT = 'Describe the talk to the co-author below: it proposes an outline as a lane you accept slide by slide.';
 const DECK_HINT = 'Ask the co-author about the whole deck: its arc, its order, its pacing. Select a slide to talk about it right under the strip.';
 
 /** Focus route of the lane now linked to the note's remark, once the co-author's lane is there with something to review. */
@@ -1105,6 +1106,8 @@ export function Main() {
         </div>
       </div>
     ) : null;
+  // A new deck: nothing to select or present yet, the whole-deck conversation is where it starts.
+  const empty = deck.order.length === 0;
   const pickFromSheet = (id: SlideId, e: MouseEvent<HTMLElement>): void => {
     shift.current = e.shiftKey;
     pointer.current = e.detail > 0;
@@ -1117,14 +1120,15 @@ export function Main() {
           <h1 className="screen-title">{deck.brief.title || deck.state.name}</h1>
           <span className="meta">v{deck.state.version}</span>
           <span className="meta">{deck.order.length} slides</span>
+          <DecksLink style={{ marginLeft: 'auto' }} />
           <a
-            href={BRIEF_PATH}
+            href={briefPath()}
             onClick={(e) => {
               e.preventDefault();
-              navigate(BRIEF_PATH);
+              navigate(briefPath());
             }}
             className="link"
-            style={{ marginLeft: 'auto', color: 'var(--ink)', display: 'inline-flex', gap: 6, alignItems: 'baseline' }}
+            style={{ color: 'var(--ink)', display: 'inline-flex', gap: 6, alignItems: 'baseline' }}
           >
             <span>Brief and checks</span>
             {openCount > 0 ? <span data-testid="remark-count" className="meta">{openCount} open {openCount === 1 ? 'remark' : 'remarks'}</span> : null}
@@ -1140,9 +1144,7 @@ export function Main() {
             onClick={clearOnEmpty}
             style={{ '--strip-h': `${room.strip}px`, flex: 1, minHeight: 0, overflow: 'auto', paddingTop: 8, paddingRight: 24, paddingLeft: 24, paddingBottom: CANVAS_BOTTOM } as CSSProperties}
           >
-            {deck.order.length === 0 ? (
-              <p className="muted">This deck has no slides yet. Import a deck.html into the folder to start.</p>
-            ) : (
+            {
               // max-content: the filmstrip and the lane rows scroll together, so lane columns stay under main's.
               // z-index 0: a stacking context, so the moved hairlines pass under the rows and the remark cards.
               // END_W of right padding: scrolled to the end, the last slide clears the "+N" slot instead of hiding behind it.
@@ -1157,6 +1159,15 @@ export function Main() {
                     pointer.current = e.detail > 0;
                   }}
                 >
+                  {empty ? (
+                    // No slides: the strip row keeps its place (lane cells line up under it) and says why it is bare.
+                    <div style={{ display: 'flex', alignItems: 'stretch' }}>
+                      <div className="gutter row-label" style={{ paddingTop: 8 }}>
+                        No slides yet
+                      </div>
+                      <div data-strip="main" style={{ height: 'var(--thumb-h)', padding: '6px 6px 22px', boxSizing: 'content-box' }} />
+                    </div>
+                  ) : (
                   <Filmstrip
                     order={deck.order}
                     slides={deck.slides}
@@ -1167,6 +1178,7 @@ export function Main() {
                     titleLink={context.kind === 'slide' ? editLink : undefined}
                     remarkDots={dots}
                   />
+                  )}
                   {rangeCols
                     ? gridRow(
                         <div style={{ gridColumn: `${rangeCols.start + 1} / span ${rangeCols.span}`, marginTop: -16, paddingBottom: 4 }}>
@@ -1194,18 +1206,23 @@ export function Main() {
                     <span>Lanes: {lanesFailed}</span> <button type="button" className="btn" onClick={reloadAll}>Retry</button>
                   </p>
                 ) : laneRows.length === 0 ? (
-                  <p className="muted" style={{ margin: '0 0 0 var(--gutter)', fontSize: 13, maxWidth: 520 }}>
+                  empty ? null : <p className="muted" style={{ margin: '0 0 0 var(--gutter)', fontSize: 13, maxWidth: 520 }}>
                     No open lanes. Ask the co-author in the thread; its proposals appear here, under the slides they touch.
                   </p>
                 ) : (
                   laneRows
                 )}
-                {context.kind === 'arc' ? (
+                {context.kind === 'arc' && !empty ? (
                   <DeckSheet order={deck.order} slides={deck.slides} thumbs={shownThumbs} dots={dots} width={pinned} canvasHeight={room.canvas} onPick={pickFromSheet} onOpen={presentFrom} />
                 ) : null}
               </div>
-            )}
+            }
           </main>
+          {empty && laneRows.length === 0 && !lanesFailed ? (
+            <div className="empty-deck-hint">
+              <p>{EMPTY_DECK_HINT}</p>
+            </div>
+          ) : null}
           <EdgeFade visible={visible} />
           <StripPager visible={visible} onPage={page} />
         </div>
@@ -1214,8 +1231,9 @@ export function Main() {
         </div>
       </div>
       {/* The whole-deck bar has two fixed widths and its own toggle: a selection never resizes the strip. */}
-      {wholeDeck ? (
+      {wholeDeck || empty ? (
         <aside data-testid="thread-panel" style={{ width: BAR_OPEN_W, flex: `0 0 ${BAR_OPEN_W}px`, borderLeft: '1px solid var(--line)', background: 'var(--paper)', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {empty ? null : (
           <button
             type="button"
             className="link"
@@ -1227,6 +1245,7 @@ export function Main() {
           >
             hide
           </button>
+          )}
           {notesInPanel ? null : notesBlock}
           <div style={{ flex: 1, minHeight: 0 }}>
             <Thread
@@ -1238,6 +1257,7 @@ export function Main() {
               slides={deck.slides}
               api={deckApi}
               subscribe={fanout}
+              autoFocus={empty}
             />
           </div>
         </aside>
