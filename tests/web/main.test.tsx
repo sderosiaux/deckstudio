@@ -346,7 +346,9 @@ describe('Main remarks', () => {
     expect(dot('s2')!.textContent).toBe('1');
     expect(['s3', 's4', 's5'].map((id) => dot(id)?.getAttribute('data-severity'))).toEqual(['info', 'info', 'info']);
     expect(dot('s1')).toBeNull();
-    expect(screen.queryAllByTestId('post-it')).toHaveLength(0);
+    // Not on the canvas: the open ones lead the whole-deck conversation in the column.
+    expect(within(screen.getByTestId('canvas')).queryAllByTestId('post-it')).toHaveLength(0);
+    expect(within(screen.getByTestId('thread-panel')).getAllByTestId('post-it').map((x) => x.getAttribute('data-remark'))).toEqual(['r_slide', 'r_range']);
     expect(screen.queryByTestId('remarks-more')).toBeNull();
 
     m.getRemarks.mockResolvedValue([remark('r_slide', { anchor: { kind: 'slide', slide: 's2' }, status: 'resolved' })]);
@@ -459,9 +461,9 @@ describe('Main propose feedback', () => {
     expect(m.proposeRemark).toHaveBeenCalledWith('r_p');
     await waitFor(() => note());
     expect(note()!.textContent).toBe('asked the co-author for a lane on slide 2…');
-    // Where the creator asked: in the panel, not in the whole-deck bar (open beside it).
+    // Where the creator asked: in the selection's conversation, which holds the column while the slide is selected.
     expect(within(screen.getByTestId('selection-panel')).getByTestId('propose-note')).toBe(note());
-    expect(within(screen.getByTestId('thread-panel')).queryByTestId('propose-note')).toBeNull();
+    expect(screen.getAllByTestId('propose-note')).toHaveLength(1);
     expect(note()!.querySelector('a')).toBeNull();
 
     // An unrelated lane event: still waiting.
