@@ -13,6 +13,10 @@ pnpm import:sf                                            # optional: imports th
 
 The home folder holds one sub-folder per deck: `DECKSTUDIO_HOME`, else `./decks` when it exists, else `~/deckstudio/decks` (created). Given a deck folder, the CLI serves its parent as the home. The app opens on http://127.0.0.1:4177 (port from `DECKSTUDIO_PORT`, `DECKSTUDIO_NO_OPEN=1` skips the browser). New decks and deck.html imports are made from the home screen; a deck folder copied into the home while the server runs shows up without a restart. The co-author uses your Claude Code login through the Agent SDK; no API key is read.
 
+## Start a new presentation
+
+On the home screen, "New presentation" asks for a title, the audience and the message (the one sentence the deck must land), plus an optional abstract and design rules. The deck opens empty: describe the talk in the whole-deck conversation and the co-author proposes an outline as a lane of inserted slides, which you accept one at a time. Then select a slide, talk about it under the strip, and judge each proposal with its before/after. "Import a deck.html" brings an existing single-file deck in, slides and assets included.
+
 ## Layout
 
 A deck folder holds `deck.json` (order, version, brief), `slides/`, `assets/`, `lanes/`, `remarks.json`, `threads/`, `theme.css` and content-addressed `objects/` + `versions/`. Everything is plain files, so a deck can be copied, diffed or thrown away. The folder name is the deck id.
